@@ -67,6 +67,21 @@ _LIVE_SOURCES = {"session", "claude_code", "bg_job", "pipeline", "worktree"}
 SOLDIER_APPEARANCES = frozenset({"primary", "worker", "scout", "reviewer", "specialist", "sword", "helmet"})
 
 
+def _child_with_live_approval(child: Dict[str, Any], pending: Dict[str, int]) -> Dict[str, Any]:
+    """Re-derive a child run's `waiting_approval` from the live approval store.
+
+    ``pending`` maps chat id to its count of unexpired approvals. A child whose
+    chat holds none is reported as ``approval_expired``: the run is still
+    paused, but there is no card left to answer.
+    """
+    if child.get("status") != "waiting_approval":
+        return child
+    target = str((child.get("summary") or {}).get("target_session") or child.get("session_id") or "")
+    if target and pending.get(target):
+        return child
+    return {**child, "status": "approval_expired"}
+
+
 def _loadout_basis(settings: Dict[str, Any], profiles_by_name: Dict[str, Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """``{"name", "exists", "changes"}`` for a chat based on a loadout, else None.
 
@@ -300,6 +315,14 @@ def setup_agents_routes(session_manager) -> APIRouter:
             # under "Child workers" offered an Open button back to this chat.
             children = [child for child in children
                         if (child.get("summary") or {}).get("target_session") != sid]
+            # A worker run is filed `waiting_approval` when its turn ended on an
+            # approval card, and nothing ever rewrites that record. 2026-10-02:
+            # a card that had expired (or been superseded) kept showing as
+            # "Needs approval" for hours. The live store is the truth: keep the
+            # status only while that worker's chat still holds a pending approval.
+            children = [
+                _child_with_live_approval(child, pending) for child in children
+            ]
             from src.session_settings import effective_worker_limit
             config = {
                 "agent_profile": settings.get("agent_profile"),
@@ -584,6 +607,25 @@ def setup_agents_routes(session_manager) -> APIRouter:
                 "expires_at": rec.expires_at,
             })
         return {"approvals": rows}
+
+    @router.get("/approvals/{approval_id}/status")
+    async def approval_status(request: Request, approval_id: str, session_id: str):
+        """Whether one approval card can still be answered.
+
+        A card restored from history, or left open past its window, asks here
+        before it enables its buttons. ``pending`` is the only answerable
+        state; ``expired`` also covers an id the server no longer holds.
+        """
+        user = _require_owned(request, session_id)
+        state = tool_approvals.tool_approval_store.status(
+            approval_id, owner=user, session_id=session_id,
+        )
+        rec = tool_approvals.tool_approval_store.peek(approval_id) if state == "pending" else None
+        return {
+            "approval_id": approval_id,
+            "status": state,
+            "expires_at": rec.expires_at if rec is not None else None,
+        }
 
     @router.post("/sessions/{session_id}/crew_profile")
     async def set_crew_profile(request: Request, session_id: str):

@@ -823,9 +823,30 @@ async def status(
     *,
     cfg: Optional[WorktreeConfig] = None,
     repository: Optional[str] = None,
+    owner: Optional[str] = None,
+    session_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Configuration and worktree state. Contains no credential material."""
+    """Configuration and worktree state. Contains no credential material.
+
+    ``owner`` and ``session_id`` scope the per-branch ``publish`` block to the
+    requests this person's chat (and its workers) made.
+    """
     cfg = cfg or load_config()
+
+    def _publish_block(name: Optional[str], head: Optional[str], base_sha: Optional[str]) -> Optional[Dict[str, Any]]:
+        # Read from the request records, never recalled from earlier turns:
+        # 2026-10-02 a worker reported a spent request as "waiting for approval".
+        if not name or not head:
+            return None
+        try:
+            return approval_mod.publish_status_for_branch(
+                name, head_sha=head, base_sha=base_sha, repo=rcfg.repo_slug or None,
+                owner=owner, session_id=session_id, cfg=cfg,
+            )
+        except Exception as exc:  # noqa: BLE001 - status must still answer
+            logger.debug("agent worktree: publish status unavailable: %s", exc)
+            return None
+
     rcfg = await repository_config(cfg, repository)
     out: Dict[str, Any] = {
         "publish_enabled": cfg.publish_enabled,
@@ -887,6 +908,9 @@ async def status(
         if meta.get("base"):
             info["base"] = meta.get("base")
             info["base_sha"] = meta.get("base_sha")
+        block = _publish_block(info.get("branch"), info.get("head_sha"), meta.get("base_sha"))
+        if block:
+            info["publish"] = block
         out["worktrees"].append(info)
 
     if branch:
@@ -909,6 +933,9 @@ async def status(
             elif out["exists"]:
                 out["head_sha"] = await _head_sha(lcfg, path)
                 out["dirty"] = await _is_dirty(lcfg, path)
+                block = _publish_block(resolved, out["head_sha"], meta.get("base_sha"))
+                if block:
+                    out["publish"] = block
     return out
 
 
@@ -1255,7 +1282,29 @@ async def _publish_locked(
         cfg=cfg,
     )
     approved_sha = live["head_sha"]
+    try:
+        return await _push_approved(cfg, request_id, stored, branch, live, approved_sha)
+    except Exception as exc:  # noqa: BLE001 - recorded, then re-raised unchanged
+        # The grant is already spent (consume() runs first on purpose), so a
+        # failure here leaves a used request with nothing published. Say so on
+        # the record; otherwise it reads as published and a second approval
+        # answers "already published" (2026-10-02).
+        try:
+            approval_mod.mark_failed(request_id, str(exc), cfg=cfg)
+        except Exception:  # noqa: BLE001 - never mask the push failure
+            logger.warning("agent worktree: could not mark request %s failed", request_id, exc_info=True)
+        raise
 
+
+async def _push_approved(
+    cfg: WorktreeConfig,
+    request_id: str,
+    stored: Dict[str, Any],
+    branch: str,
+    live: Dict[str, Any],
+    approved_sha: str,
+) -> Dict[str, Any]:
+    """Push the approved commit and open the draft PR; the grant is spent."""
     from src.agent_worktree.github import (
         GitHubError,
         create_draft_pr,
@@ -1369,8 +1418,9 @@ async def approve_and_publish(
 
     Same checks as the operator CLI's ``approve`` followed by the agent's
     ``publish``, but the one-time code never leaves this function: nothing
-    the agent can read ever holds it. A failed push leaves the grant unused,
-    so approving again retries.
+    the agent can read ever holds it. The grant is spent before the push, so a
+    failed push or PR does not retry on a second approval: the request is
+    marked failed and the agent has to call request_publish again.
     """
     cfg = cfg or load_config()
     stored = approval_mod.get_request(request_id, cfg=cfg)

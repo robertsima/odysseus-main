@@ -979,6 +979,13 @@ register_all([
         env_override="ODYSSEUS_AGENT_APPROVAL_TTL_SECONDS", advanced=True,
     ),
     SettingSpec(
+        key="tool_approval_ttl_seconds", type="int", label="Tool approval lifetime",
+        help=("How long an approval card for a gated tool call stays answerable "
+              "before it expires. A new message or a newer card ends it sooner."),
+        group="Agents", min_value=30, max_value=86400, step=30, unit="seconds",
+        advanced=True,
+    ),
+    SettingSpec(
         key="agent_base_branch", type="string", label="Default target branch",
         help="Branch used as the base for agent diffs and draft pull requests.",
         group="Agents", placeholder="dev", env_override="ODYSSEUS_AGENT_BASE_BRANCH",

@@ -491,6 +491,10 @@ def _model_endpoint_breaker():
     )
 
 
+# Text of the agent loop's ``approval_unavailable`` tool error (src/agent_loop.py).
+_APPROVAL_UNAVAILABLE_MARK = "none can be given in this run"
+
+
 def _parse_stream_error(chunk: str) -> str:
     """Pull a human-readable message out of an SSE ``event: error`` frame.
 
@@ -3373,7 +3377,7 @@ class TaskScheduler:
         full_text = ""
         tool_results = []
         stream_error = ""
-        approval_pause = None
+        approval_blocked_tool = None
 
         # Honor per-task max_steps (defense against runaway agent loops).
         # Falls back to 20 if not set — the historical default.
@@ -3414,6 +3418,10 @@ class TaskScheduler:
             relevant_tools=relevant_tools,
             fallbacks=_task_fallbacks,
             workload="background",
+            # Nobody watches a scheduled run, so no card is raised. A gated
+            # call comes back as an error and the model carries on without it;
+            # the old create-then-deny ended the whole run on the first one.
+            approval_surface=False,
         ):
             # stream_agent_loop forwards upstream failures as SSE error frames
             # ("event: error\ndata: {...}"). They do NOT start with "data: ", so
@@ -3441,40 +3449,16 @@ class TaskScheduler:
                         tool_summary = data.get("stdout") or data.get("output") or data.get("result") or ""
                         if isinstance(tool_summary, str) and tool_summary.strip():
                             tool_results.append(f"[{data.get('tool', '?')}] {tool_summary[:500]}")
-                        approval = data.get("ask_user")
-                        if (
-                            isinstance(approval, dict)
-                            and approval.get("kind") == "tool_approval"
-                        ):
-                            approval_pause = {
-                                "tool": data.get("tool") or "tool",
-                                "approval_id": approval.get("approval_id"),
-                            }
-                            # Scheduled tasks have no interactive surface that
-                            # can safely resume a one-use grant. Retire the
-                            # record immediately instead of leaving it pending
-                            # and report an explicit manual-action boundary.
-                            try:
-                                from src.tool_approvals import tool_approval_store
-                                tool_approval_store.consume(
-                                    approval_pause["approval_id"],
-                                    decision="deny",
-                                    owner=task.owner,
-                                    session_id=session_id,
-                                )
-                            except Exception:
-                                logger.debug(
-                                    "Could not retire scheduled-task approval",
-                                    exc_info=True,
-                                )
-                            break
+                        if _APPROVAL_UNAVAILABLE_MARK in str(data.get("output") or ""):
+                            approval_blocked_tool = data.get("tool") or "tool"
                 except (json.JSONDecodeError, KeyError):
                     pass
 
-        if approval_pause is not None:
+        if approval_blocked_tool is not None and not full_text.strip():
+            # The run reached a gated call and had nothing else to report.
             return (
                 "Scheduled task paused safely: "
-                f"{approval_pause['tool']} needs approval under the current "
+                f"{approval_blocked_tool} needs approval under the current "
                 "approval settings. That action was not executed. Run this task "
                 "interactively to inspect and approve the action, or loosen "
                 "Settings › Workbench › Default approvals."

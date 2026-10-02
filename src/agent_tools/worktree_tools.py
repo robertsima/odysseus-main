@@ -53,7 +53,21 @@ def _setup_plan(worktree: Any) -> Dict[str, Any]:
     return plan
 
 
-def _similar_request_hint(request_id: str, cfg) -> str:
+def _request_visible(request: Dict[str, Any], ctx: dict) -> bool:
+    """Whether this chat's agent may read ``request``: it is the owner's and was
+    made from this chat or one of its workers."""
+    owner = str(ctx.get("owner") or "")
+    if owner and request.get("requested_by") != owner:
+        return False
+    session_id = str(ctx.get("session_id") or "")
+    if session_id:
+        from src.agent_worktree import approval as approval_mod
+
+        return session_id in approval_mod.session_lineage(str(request.get("session_id") or ""))
+    return True
+
+
+def _similar_request_hint(request_id: str, cfg, ctx: Dict[str, Any] | None = None) -> str:
     """Open publish requests an unknown id was probably meant to be.
 
     Ids are 32 hex characters that agents copy between chats; on 2026-09-29 a
@@ -65,7 +79,11 @@ def _similar_request_hint(request_id: str, cfg) -> str:
 
     wanted = request_id.strip().lower()
     try:
-        open_requests = [r for r in approval_mod.list_requests(cfg=cfg)
+        ctx = ctx or {}
+        open_requests = [r for r in approval_mod.list_requests(
+                             cfg=cfg,
+                             owner=str(ctx.get("owner") or "") or None,
+                             session_id=str(ctx.get("session_id") or "") or None)
                          if r.get("status") in ("pending", "granted")]
     except Exception:  # noqa: BLE001 - a hint must never mask the real error
         return ""
@@ -265,7 +283,9 @@ class AgentWorktreeTool:
         try:
             if action == "status":
                 return {"exit_code": 0, "status": await service.status(
-                    branch or None, cfg=cfg, repository=repository or None)}
+                    branch or None, cfg=cfg, repository=repository or None,
+                    owner=str(ctx.get("owner") or "") or None,
+                    session_id=str(ctx.get("session_id") or "") or None)}
 
             if action == "start":
                 name = _text_arg(args, "name")
@@ -343,19 +363,30 @@ class AgentWorktreeTool:
                 return {"exit_code": 0, "published": result}
 
             if action == "list_requests":
-                return {"exit_code": 0, "requests": approval_mod.list_requests(cfg=cfg)}
+                # Only this person's requests from this chat and its workers; the
+                # unfiltered list let an agent present another chat's request as
+                # its own (2026-10-02).
+                return {"exit_code": 0, "requests": approval_mod.list_requests(
+                    cfg=cfg,
+                    owner=str(ctx.get("owner") or "") or None,
+                    session_id=str(ctx.get("session_id") or "") or None,
+                )}
 
             if action == "show_request":
                 request_id = str(args.get("request_id") or "").strip()
                 if not request_id:
                     return _err("manage_agent_worktree: 'request_id' is required")
-                return {"exit_code": 0, "request": approval_mod.get_request(request_id, cfg=cfg)}
+                request = approval_mod.get_request(request_id, cfg=cfg)
+                if not _request_visible(request, ctx):
+                    # Same answer as an unknown id, so a guessed id confirms nothing.
+                    return _err(f"manage_agent_worktree show_request: no approval request {request_id}")
+                return {"exit_code": 0, "request": request}
 
         except Exception as exc:  # noqa: BLE001 - surfaced to the model as text
             # Messages from this package are already credential-scrubbed.
             logger.warning("manage_agent_worktree %s failed: %s", action, exc)
             code = getattr(exc, "code", None)
-            hint = (_similar_request_hint(str(args.get("request_id") or ""), cfg)
+            hint = (_similar_request_hint(str(args.get("request_id") or ""), cfg, ctx)
                     if action in ("publish", "show_request") and "no approval request" in str(exc) else "")
             return _err(f"manage_agent_worktree {action}: {exc}{hint}",
                         **(_next_step(code, action, branch, repository) if code else {}))

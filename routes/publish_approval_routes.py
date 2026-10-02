@@ -78,20 +78,13 @@ def _can_decide(request: Request, user: Optional[str], record: Dict[str, Any]) -
 
 
 def _lineage(session_id: Optional[str], limit: int = 4) -> List[str]:
-    """The chat and the chats above it (a worker's parent, its parent...)."""
-    chain: List[str] = []
-    current = session_id
-    try:
-        from core.database import get_session_settings
-    except Exception:
-        return [session_id] if session_id else []
-    while current and current not in chain and len(chain) < limit:
-        chain.append(current)
-        try:
-            current = (get_session_settings(current) or {}).get("parent_session")
-        except Exception:
-            break
-    return chain
+    """The chat and the chats above it (a worker's parent, its parent...).
+
+    One definition, shared with the agent-facing tool, in the approval module.
+    """
+    from src.agent_worktree.approval import session_lineage
+
+    return session_lineage(session_id, limit)
 
 
 def _load(request_id: str) -> Dict[str, Any]:
@@ -179,6 +172,23 @@ def setup_publish_approval_routes(session_manager=None) -> APIRouter:
                                                        allow_sensitive=allow_sensitive)
         except service.WorktreeError as exc:
             logger.info("publish approval failed id=%s by=%s: %s", request_id, user, exc)
+            from src.agent_worktree import approval as approval_mod
+
+            try:
+                spent = approval_mod.get_request(request_id).get("status") == approval_mod.STATUS_FAILED
+            except approval_mod.ApprovalError:
+                spent = False
+            if spent:
+                # The grant was consumed before the push, so approving again
+                # cannot retry. Tell the chat, or its agent keeps reporting the
+                # request as pending (2026-10-02).
+                _note_in_chat(
+                    rec,
+                    f"[Publish failed after approval by {user or 'the local user'}] {rec.get('branch')} was not "
+                    f"pushed: {str(exc)[:300]}. That approval is spent and nothing is published; "
+                    "call request_publish again to ask for a new one.",
+                    user,
+                )
             raise HTTPException(409, str(exc))
         pr = result.get("pull_request") or {}
         url = str(pr.get("html_url") or pr.get("url") or "")

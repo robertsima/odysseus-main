@@ -58,6 +58,28 @@ STATUS_GRANTED = "granted"
 STATUS_USED = "used"
 STATUS_REVOKED = "revoked"
 STATUS_EXPIRED = "expired"
+# The grant was spent and the push or PR step then failed. Terminal, like USED:
+# the one-time grant is gone, so the change needs a new request. Kept apart from
+# USED so nobody reads a failed publish as a published one (2026-10-02: the UI
+# answered a re-approval with "already published" for a push that never landed).
+STATUS_FAILED = "failed"
+
+
+_FAILED_MESSAGE = (
+    "this request was approved but publishing it failed, so the approval is spent; "
+    "ask the agent to call request_publish again"
+)
+
+
+def _used_message(record: Dict) -> str:
+    # "Already published" only when the record shows a push; a spent grant with
+    # nothing published is not that (legacy failures, or a publish in flight).
+    if record.get("published"):
+        return "this request was already published"
+    return (
+        "this request's approval was already used, but no push is recorded for it; "
+        "ask the agent to call request_publish again"
+    )
 
 
 class ApprovalError(RuntimeError):
@@ -201,7 +223,7 @@ def _effective_status(
     """
     now = _now() if now is None else now
     status = str(record.get("status") or STATUS_PENDING)
-    if status in (STATUS_USED, STATUS_REVOKED):
+    if status in (STATUS_USED, STATUS_REVOKED, STATUS_FAILED):
         return status
     grant = record.get("grant") or {}
     if status == STATUS_GRANTED:
@@ -257,7 +279,26 @@ def public_view(record: Dict, cfg: Optional[WorktreeConfig] = None) -> Dict:
             else None
         ),
         "published": record.get("published"),
+        # Why a spent grant did not end in a push and PR; None unless failed.
+        "publish_error": record.get("publish_error"),
     }
+
+
+def session_lineage(session_id: Optional[str], limit: int = 4) -> List[str]:
+    """The chat and the chats above it (a worker's parent, its parent...)."""
+    chain: List[str] = []
+    current = session_id
+    try:
+        from core.database import get_session_settings
+    except Exception:
+        return [session_id] if session_id else []
+    while current and current not in chain and len(chain) < limit:
+        chain.append(current)
+        try:
+            current = (get_session_settings(current) or {}).get("parent_session")
+        except Exception:
+            break
+    return chain
 
 
 def create_request(
@@ -314,7 +355,20 @@ def create_request(
     return record
 
 
-def list_requests(cfg: Optional[WorktreeConfig] = None) -> List[Dict]:
+def list_requests(
+    cfg: Optional[WorktreeConfig] = None,
+    *,
+    owner: Optional[str] = None,
+    session_id: Optional[str] = None,
+) -> List[Dict]:
+    """Requests, newest first.
+
+    ``owner`` keeps only the requests that person made; ``session_id`` keeps
+    only those made from that chat or a chat below it (its workers). Both
+    default to no filter for operator tooling. The agent-facing tool always
+    passes them: until 2026-10-02 it returned every user's and every chat's
+    requests, so an agent reported another chat's request as its own.
+    """
     cfg = cfg or load_config()
     directory = _requests_dir(cfg)
     out: List[Dict] = []
@@ -322,14 +376,97 @@ def list_requests(cfg: Optional[WorktreeConfig] = None) -> List[Dict]:
         names = sorted(os.listdir(directory))
     except OSError:
         return out
+    lineage_cache: Dict[str, List[str]] = {}
     for name in names:
         if not name.endswith(".json"):
             continue
         try:
-            out.append(public_view(_load(cfg, name[: -len(".json")]), cfg=cfg))
+            view = public_view(_load(cfg, name[: -len(".json")]), cfg=cfg)
         except ApprovalError:
             continue
+        if owner and view.get("requested_by") != owner:
+            continue
+        if session_id:
+            asked_from = str(view.get("session_id") or "")
+            if asked_from not in lineage_cache:
+                lineage_cache[asked_from] = session_lineage(asked_from)
+            if session_id not in lineage_cache[asked_from]:
+                continue
+        out.append(view)
     out.sort(key=lambda r: r.get("created_at") or 0, reverse=True)
+    return out
+
+
+def publish_status_for_branch(
+    branch: str,
+    *,
+    head_sha: Optional[str] = None,
+    base_sha: Optional[str] = None,
+    repo: Optional[str] = None,
+    owner: Optional[str] = None,
+    session_id: Optional[str] = None,
+    cfg: Optional[WorktreeConfig] = None,
+) -> Dict:
+    """Where one branch stands with publishing, from the real request records.
+
+    This is what an agent states to the user. 2026-10-02: a worker told the
+    admin chat "managed publication is waiting for your approval" for a request
+    that had been approved and spent, and its newer commits had no request at
+    all. The answer here comes only from the records: an open request, the head
+    that was last published, and the head the worktree is on now.
+    """
+    rows = [
+        r for r in list_requests(cfg, owner=owner, session_id=session_id)
+        if r.get("branch") == branch and (not repo or not r.get("repo") or r.get("repo") == repo)
+    ]
+    latest = rows[0] if rows else None
+    published = next((r for r in rows if r.get("published")), None)
+    published_head = str(((published or {}).get("published") or {}).get("head_sha") or "") or None
+    out: Dict = {
+        "latest_request": (
+            {
+                "id": latest.get("id"),
+                "status": latest.get("status"),
+                "head_sha": latest.get("head_sha"),
+                "created_at": latest.get("created_at"),
+            }
+            if latest else None
+        ),
+        "published_head_sha": published_head,
+        "head_sha": head_sha,
+    }
+    if latest and latest.get("status") in (STATUS_PENDING, STATUS_GRANTED):
+        waiting = latest["status"] == STATUS_PENDING
+        out["state"] = "awaiting_approval" if waiting else "approved_not_pushed"
+        out["next_step"] = (
+            f"Request {latest['id']} is {latest['status']}"
+            + (" and waits for a person to approve it in the chat." if waiting
+               else "; the approval has not been spent on a push yet.")
+            + (" Commits made after it was requested are not part of it."
+               if head_sha and latest.get("head_sha") != head_sha else "")
+        )
+        return out
+    if head_sha and base_sha and head_sha == base_sha:
+        out["state"] = "nothing_to_publish"
+        out["next_step"] = "The branch has no commits beyond its base."
+        return out
+    if head_sha and published_head == head_sha:
+        out["state"] = "published"
+        out["next_step"] = "The current commit is published. New commits need a new request_publish."
+        return out
+    if latest and latest.get("status") == STATUS_FAILED:
+        out["state"] = "publish_failed"
+        out["next_step"] = (
+            f"Request {latest['id']} was approved and its push or pull request failed: "
+            f"{(latest.get('publish_error') or {}).get('message') or 'see the chat note'}. "
+            "No open request: call request_publish to ask again."
+        )
+        return out
+    out["state"] = "unpublished"
+    out["next_step"] = (
+        "No open request: call request_publish to publish the commits on this branch "
+        "(none of them are published until a person approves one)."
+    )
     return out
 
 
@@ -356,7 +493,9 @@ def grant(
         record = _load(cfg, request_id)
         status = _effective_status(record, cfg=cfg)
         if status == STATUS_USED:
-            raise ApprovalError("this request was already published")
+            raise ApprovalError(_used_message(record))
+        if status == STATUS_FAILED:
+            raise ApprovalError(_FAILED_MESSAGE)
         if status == STATUS_REVOKED:
             raise ApprovalError("this request was revoked")
         if status == STATUS_EXPIRED:
@@ -402,8 +541,11 @@ def revoke(request_id: str, cfg: Optional[WorktreeConfig] = None) -> Dict:
     cfg = cfg or load_config()
     with file_lock(_lock_path(cfg)):
         record = _load(cfg, request_id)
-        if _effective_status(record, cfg=cfg) == STATUS_USED:
-            raise ApprovalError("this request was already published")
+        spent = _effective_status(record, cfg=cfg)
+        if spent == STATUS_USED:
+            raise ApprovalError(_used_message(record))
+        if spent == STATUS_FAILED:
+            raise ApprovalError(_FAILED_MESSAGE)
         record["status"] = STATUS_REVOKED
         record["grant"] = None
         _save(cfg, record)
@@ -437,6 +579,8 @@ def consume(
         status = _effective_status(record, cfg=cfg)
         if status == STATUS_USED:
             raise ApprovalError("approval already used; request a new one")
+        if status == STATUS_FAILED:
+            raise ApprovalError(_FAILED_MESSAGE)
         if status == STATUS_REVOKED:
             raise ApprovalError("approval was revoked")
         if status == STATUS_EXPIRED:
@@ -480,6 +624,26 @@ def consume(
         _save(cfg, record)
     logger.info("agent worktree: approval consumed id=%s sha=%s", request_id, head_sha[:12])
     return record
+
+
+def mark_failed(request_id: str, reason: str, cfg: Optional[WorktreeConfig] = None) -> Dict:
+    """Record that a consumed grant did not end in a push and pull request.
+
+    The grant is spent before the push runs (see :func:`consume`), so a failure
+    leaves a used request with nothing published. Marking it failed keeps it
+    from reading as published and tells the next approval click why it cannot
+    retry: the agent has to request again.
+    """
+    cfg = cfg or load_config()
+    with file_lock(_lock_path(cfg)):
+        record = _load(cfg, request_id)
+        if record.get("published"):
+            return public_view(record, cfg=cfg)
+        record["status"] = STATUS_FAILED
+        record["publish_error"] = {"at": _now(), "message": str(reason or "")[:500]}
+        _save(cfg, record)
+    logger.info("agent worktree: publish failed after approval id=%s", request_id)
+    return public_view(record, cfg=cfg)
 
 
 def mark_published(request_id: str, details: Dict, cfg: Optional[WorktreeConfig] = None) -> Dict:

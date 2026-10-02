@@ -2424,6 +2424,96 @@ function _handleAskUserShortcut(event) {
 
 document.addEventListener('keydown', _handleAskUserShortcut);
 
+// A tool-approval record lives in server memory for a limited window and ends
+// early when a newer card or message replaces it. The saved card knows none of
+// that, so it asks the server before it offers buttons (2026-10-02: a restored
+// card still showed "Allow" long after its record was gone, and the click
+// answered 409 with no explanation).
+const _APPROVAL_LAPSE_TEXT = {
+  expired: 'This approval expired. Ask the agent to try the action again to get a new one.',
+  superseded: 'A newer message replaced this approval. Ask the agent to try the action again to get a new one.',
+};
+
+export function lapseApprovalCard(card, state, text) {
+  return _lapseApprovalCard(card, state, text);
+}
+
+function _lapseApprovalCard(card, state, text) {
+  if (!card || !card.isConnected) return;
+  card.classList.add('ask-user-card-lapsed');
+  card.querySelectorAll('.ask-user-option, .ask-user-other-send, .ask-user-other-input').forEach((el) => {
+    el.disabled = true;
+  });
+  let note = card.querySelector('.ask-user-lapsed');
+  if (!note) {
+    note = document.createElement('div');
+    note.className = 'ask-user-option-desc ask-user-lapsed';
+    note.setAttribute('role', 'status');
+    const list = card.querySelector('.ask-user-options');
+    if (list) card.insertBefore(note, list);
+    else card.appendChild(note);
+  }
+  // `text` is the server's own reason when a send was refused; the status
+  // lookup passes none and gets the standard wording for the state.
+  note.textContent = text || _APPROVAL_LAPSE_TEXT[state] || _APPROVAL_LAPSE_TEXT.expired;
+}
+
+async function _approvalState(aq) {
+  if (!aq.session_id || !aq.approval_id) return null;
+  try {
+    const res = await fetch(
+      `/api/agents/approvals/${encodeURIComponent(aq.approval_id)}/status`
+        + `?session_id=${encodeURIComponent(aq.session_id)}`,
+      { credentials: 'same-origin' },
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data && typeof data.status === 'string' ? data : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * Keep a tool-approval card honest about the server record behind it.
+ * `verifyFirst` (cards restored from history) holds the buttons disabled until
+ * the server confirms the approval is still pending. A failed lookup leaves a
+ * card enabled: the server still refuses a dead id, and this is only a courtesy.
+ */
+function _watchApprovalLiveness(card, aq, verifyFirst) {
+  if (verifyFirst) {
+    card.querySelectorAll('.ask-user-option').forEach((el) => { el.disabled = true; });
+  }
+  const check = async () => {
+    if (!card.isConnected) return;
+    const data = await _approvalState(aq);
+    if (!card.isConnected) return;
+    if (data && data.status && data.status !== 'pending') {
+      _lapseApprovalCard(card, data.status);
+      return;
+    }
+    if (verifyFirst) {
+      card.querySelectorAll('.ask-user-option').forEach((el) => { el.disabled = false; });
+    }
+  };
+  check();
+  // Re-check once the window the server stated has passed, rather than
+  // trusting this browser's clock to declare the card dead.
+  const expiresAt = Number(aq.expires_at);
+  if (Number.isFinite(expiresAt) && expiresAt > 0) {
+    const wait = Math.min(Math.max(expiresAt * 1000 - Date.now(), 0) + 1000, 2147483000);
+    setTimeout(() => {
+      if (!card.isConnected) return;
+      _approvalState(aq).then((data) => {
+        if (!card.isConnected) return;
+        // After the stated expiry an unanswerable verdict, or no record at all,
+        // both end the card; only a still-pending record keeps it alive.
+        if (!data || data.status !== 'pending') _lapseApprovalCard(card, (data && data.status) || 'expired');
+      });
+    }, wait);
+  }
+}
+
 /**
  * Render an ask_user payload as a durable choice card.
  *
@@ -2461,6 +2551,11 @@ export function renderAskUserCard(payload, options) {
   closeBtn.setAttribute('aria-label', 'Dismiss question');
   closeBtn.addEventListener('click', () => {
     card.remove();
+    // Dismissing an approval card also disarms chatStream.js's send-click
+    // intercept, which stays armed until the approval is submitted or cancelled.
+    if (card.dataset.askUserKind === 'tool_approval') {
+      document.dispatchEvent(new CustomEvent('odysseus:tool-approval-cancel'));
+    }
     const input = uiModule.el('message');
     if (input) input.focus();
   });
@@ -2552,6 +2647,8 @@ export function renderAskUserCard(payload, options) {
             document_id: aq.action && aq.action.document_id
               ? String(aq.action.document_id)
               : '',
+            // Lets the composer put this card back if the send is refused.
+            payload: aq,
           };
           if (onSubmit) {
             const accepted = onSubmit({
@@ -2607,6 +2704,7 @@ export function renderAskUserCard(payload, options) {
   if (!isToolApproval) card.appendChild(other);
 
   chatBox.appendChild(card);
+  if (isToolApproval) _watchApprovalLiveness(card, aq, !!renderOptions.restored);
   if (renderOptions.scroll !== false) {
     card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
@@ -2807,7 +2905,7 @@ export function addMessage(role, content, modelName, metadata) {
         // Session history is rendered oldest-to-newest.  A later user message
         // removes this card; if there is none, the pending choice survives a
         // refresh.  Avoid stealing focus while the history is loading.
-        renderAskUserCard(pendingAskUser, { focus: false, scroll: false });
+        renderAskUserCard(pendingAskUser, { focus: false, scroll: false, restored: true });
       }
       return lastWrap;
     }
@@ -3186,6 +3284,7 @@ const chatRenderer = {
   safeDisplayImageSrc,
   removeAskUserCards,
   renderAskUserCard,
+  lapseApprovalCard,
   buildSourcesBox,
   buildFindingsBox,
   appendReportButton,

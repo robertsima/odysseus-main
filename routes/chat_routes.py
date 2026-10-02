@@ -115,13 +115,27 @@ def _reject_delegated_tool_approval(request: Request) -> None:
         )
 
 
+# States a card is marked with when its record ended without a person's answer.
+# 2026-10-02: records expire after the TTL or are retired by the next message,
+# and the saved card kept its buttons, so "approve" later answered 409.
+_LAPSED_APPROVAL_STATES = frozenset({"expired", "superseded"})
+
+
 def _mark_tool_approval_resolved(sess, approval_id: Any, decision: Any) -> bool:
-    """Persist a consumed approval decision on its existing tool event."""
+    """Persist a consumed approval decision, or a lapse, on its tool event.
+
+    ``decision`` is the person's answer, or ``expired`` / ``superseded`` when
+    the record ended without one. A lapse never overwrites an answer already
+    saved on the card.
+    """
 
     approval_key = str(approval_id or "")
     normalized_decision = str(decision or "").strip().lower()
-    if not approval_key or normalized_decision not in {"approve", "approve_task", "deny"}:
+    if not approval_key or normalized_decision not in (
+        {"approve", "approve_task", "deny"} | _LAPSED_APPROVAL_STATES
+    ):
         return False
+    lapsed = normalized_decision in _LAPSED_APPROVAL_STATES
 
     message_id = None
     resolved_metadata = None
@@ -138,6 +152,8 @@ def _mark_tool_approval_resolved(sess, approval_id: Any, decision: Any) -> bool:
                 continue
             if str(ask_user.get("approval_id") or "") != approval_key:
                 continue
+            if lapsed and ask_user.get("resolved"):
+                return False
             ask_user["resolved"] = normalized_decision
             stamp_chat_session_grant(
                 ask_user,
@@ -1211,6 +1227,18 @@ def setup_chat_routes(
                     or pending_tool_approval.owner != normalized_owner
                     or pending_tool_approval.session_id != str(session)
                 ):
+                    if pending_tool_approval is None:
+                        # The record is gone (window ran out, a newer card or
+                        # message replaced it, or the server restarted): put
+                        # that on the saved card so the buttons stop offering
+                        # an answer that can only fail.
+                        _mark_tool_approval_resolved(
+                            sess,
+                            tool_approval_id,
+                            tool_approval_store.status(
+                                tool_approval_id, owner=owner, session_id=session,
+                            ),
+                        )
                     raise HTTPException(
                         409,
                         "This tool approval is invalid, expired, or belongs to another thread.",
@@ -1282,10 +1310,15 @@ def setup_chat_routes(
                 # in this thread. Retire its opaque grant, but preserve the
                 # originating provenance for this turn so dismissing a card
                 # cannot make the same model-requested action authoritative.
-                retired_tool_approval_taint = tool_approval_store.retire_for_session(
+                (
+                    retired_tool_approval_taint,
+                    retired_tool_approval_ids,
+                ) = tool_approval_store.retire_for_session_ids(
                     owner=owner,
                     session_id=session,
                 )
+                for retired_id in retired_tool_approval_ids:
+                    _mark_tool_approval_resolved(sess, retired_id, "superseded")
                 external_untrusted_context_seen = (
                     external_untrusted_context_seen or retired_tool_approval_taint
                 )
@@ -2450,6 +2483,9 @@ def setup_chat_routes(
                 _agent_round_models = {1: _requested_model}
                 _agent_round_endpoint_ids = {1: _agent_actual_endpoint_id}
                 _agent_round_endpoint_labels = {1: _agent_actual_endpoint_label}
+                # The round the reply was last split at by a steer (1 = never).
+                # What is saved at the end is only what came after it.
+                _last_split_round = 1
                 try:
                     from src.settings import get_setting
                     # Per-message tool budget from settings; guard defensively in
@@ -2550,6 +2586,54 @@ def setup_chat_routes(
                                         _stream_set(session, partial=full_response)
                                     yield chunk
                                 elif data.get("type") == "steer_applied":
+                                    # Save the reply so far as its own message,
+                                    # then the instruction after it. 2026-10-02:
+                                    # one assistant message at the end made the
+                                    # history (and the chat) show every user turn
+                                    # grouped above every agent turn, and the
+                                    # reply to a steer was appended to the message
+                                    # the steer interrupted.
+                                    try:
+                                        from src.agent_control import STEER_SPLIT_NO_TEXT
+                                        _split_round = int(data.get("round") or 0)
+                                        if _split_round > _last_split_round:
+                                            _split_texts, _split_events = _trail.take_before(_split_round)
+                                            if full_response.strip() or _split_events:
+                                                _split_range = range(1, _split_round)
+                                                _split_md = {
+                                                    "steer_split": True,
+                                                    "steer_split_round": _split_round,
+                                                    "steer_id": data.get("steer_id"),
+                                                    "model": _actual_model or _answered_by or _requested_model,
+                                                    "requested_model": _requested_model,
+                                                    "endpoint_id": _agent_actual_endpoint_id,
+                                                    "endpoint_label": _agent_actual_endpoint_label,
+                                                    "round_models": [_agent_round_models.get(i, _actual_model or _requested_model) for i in _split_range],
+                                                    "round_endpoint_ids": [_agent_round_endpoint_ids.get(i) for i in _split_range],
+                                                    "round_endpoint_labels": [_agent_round_endpoint_labels.get(i) for i in _split_range],
+                                                }
+                                                if _split_events:
+                                                    _split_md["tool_events"] = _split_events
+                                                if any(_split_texts):
+                                                    _split_md["round_texts"] = _split_texts
+                                                if thinking_response.strip():
+                                                    _split_md["thinking"] = thinking_response.strip()
+                                                _split_id = save_assistant_response(
+                                                    sess, session_manager, session,
+                                                    full_response.strip() or STEER_SPLIT_NO_TEXT, _split_md,
+                                                    character_name=ctx.preset.character_name,
+                                                    web_sources=web_sources,
+                                                    incognito=incognito,
+                                                )
+                                                full_response = ""
+                                                thinking_response = ""
+                                                web_sources = []
+                                                _stream_set(session, partial="")
+                                                if _split_id:
+                                                    yield f'data: {json.dumps({"type": "message_saved", "id": _split_id, "steer_split": True, "steer_id": data.get("steer_id")})}\n\n'
+                                            _last_split_round = _split_round
+                                    except Exception:
+                                        logger.warning("steer split save failed", exc_info=True)
                                     # Keep the mid-task instruction in history so
                                     # the next turn (and the transcript) has it.
                                     try:
@@ -2629,6 +2713,8 @@ def setup_chat_routes(
                                     yield f'data: {json.dumps(data)}\n\n'
                                 elif data.get("type") == "agent_terminal":
                                     terminal_metadata = dict(data.get("data") or {})
+                                    from src.agent_control import metrics_after_split
+                                    terminal_metadata = metrics_after_split(terminal_metadata, _last_split_round)
                                     last_metrics = terminal_metadata
                                     failure = terminal_metadata.get("failure") or {}
                                     failure_status = _normalize_http_status(
@@ -2695,10 +2781,13 @@ def setup_chat_routes(
                         elif chunk.startswith("event: "):
                             yield chunk
                         elif chunk == "data: [DONE]\n\n":
-                            _has_tool_events = bool((last_metrics or {}).get("tool_events"))
+                            from src.agent_control import metrics_after_split
+                            # Only what came after the last steer split: earlier
+                            # rounds were saved as their own messages.
+                            _metrics_to_save = metrics_after_split(last_metrics, _last_split_round)
+                            _has_tool_events = bool(_metrics_to_save.get("tool_events"))
                             if full_response or _has_tool_events:
                                 _response_to_save = full_response or "Done."
-                                _metrics_to_save = dict(last_metrics or {})
                                 if thinking_response.strip() and not _metrics_to_save.get("thinking"):
                                     _metrics_to_save["thinking"] = thinking_response.strip()
                                 _saved_id = save_assistant_response(

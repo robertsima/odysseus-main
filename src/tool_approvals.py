@@ -14,6 +14,7 @@ import os
 import secrets
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -29,6 +30,27 @@ from src.tool_capabilities import ToolCapabilities, capabilities_for_action
 
 DEFAULT_APPROVAL_TTL_SECONDS = 10 * 60
 DEFAULT_MAX_PENDING_APPROVALS = 2048
+# Setting that overrides the default window. Read at each create, so a change
+# applies to the next card without a restart. Bounded so a typo cannot make
+# cards vanish at once or sit in memory for weeks.
+APPROVAL_TTL_SETTING = "tool_approval_ttl_seconds"
+_MIN_APPROVAL_TTL_SECONDS = 30
+_MAX_APPROVAL_TTL_SECONDS = 24 * 60 * 60
+# How many finished approvals keep a recorded end state, so a card the browser
+# still shows can be told "expired" or "superseded" instead of failing on click.
+_MAX_ENDED_APPROVALS = 4096
+
+
+def configured_approval_ttl_seconds() -> int:
+    """The approval window in seconds: the saved setting, else 600."""
+    try:
+        from src.settings import get_setting
+
+        raw = get_setting(APPROVAL_TTL_SETTING, DEFAULT_APPROVAL_TTL_SECONDS)
+        value = int(raw)
+    except Exception:
+        return DEFAULT_APPROVAL_TTL_SECONDS
+    return max(_MIN_APPROVAL_TTL_SECONDS, min(_MAX_APPROVAL_TTL_SECONDS, value))
 
 
 def _normalized_owner(owner: Any) -> str:
@@ -174,6 +196,10 @@ class PendingToolApproval:
             # resolved card lets history-derived session grants remain bound to
             # this exact chat and prevents inheritance by a forked session.
             "session_id": self.session_id,
+            # Epoch seconds. The card reads it to stop offering buttons once
+            # the record is gone (2026-10-02: a card outlived its 10-minute
+            # record and "approve" answered 409 with no explanation).
+            "expires_at": self.expires_at,
             "question": "Allow this task to continue?",
             "description": reason or self.reason or (
                 "Untrusted context influenced this run, so continuing with "
@@ -322,13 +348,30 @@ class ToolApprovalStore:
     def __init__(
         self,
         *,
-        ttl_seconds: int = DEFAULT_APPROVAL_TTL_SECONDS,
+        ttl_seconds: int | None = None,
         max_pending: int = DEFAULT_MAX_PENDING_APPROVALS,
     ):
-        self._ttl_seconds = max(1, int(ttl_seconds))
+        # None: follow the ``tool_approval_ttl_seconds`` setting at each create.
+        self._fixed_ttl_seconds = (
+            None if ttl_seconds is None else max(1, int(ttl_seconds))
+        )
         self._max_pending = max(1, int(max_pending))
         self._pending: dict[str, PendingToolApproval] = {}
+        # approval id -> (end state, owner, session id) for approvals that left
+        # ``_pending`` without being consumed.
+        self._ended: "OrderedDict[str, tuple[str, str, str]]" = OrderedDict()
         self._lock = threading.Lock()
+
+    @property
+    def _ttl_seconds(self) -> int:
+        if self._fixed_ttl_seconds is not None:
+            return self._fixed_ttl_seconds
+        return configured_approval_ttl_seconds()
+
+    def _note_ended_locked(self, pending: PendingToolApproval, state: str) -> None:
+        self._ended[pending.approval_id] = (state, pending.owner, pending.session_id)
+        while len(self._ended) > _MAX_ENDED_APPROVALS:
+            self._ended.popitem(last=False)
 
     def _purge_expired_locked(self, now: float) -> None:
         expired = [
@@ -337,9 +380,46 @@ class ToolApprovalStore:
             if pending.expires_at <= now
         ]
         for approval_id in expired:
-            self._pending.pop(approval_id, None)
+            pending = self._pending.pop(approval_id, None)
+            if pending is not None:
+                self._note_ended_locked(pending, "expired")
 
-    def create(
+    def status(self, approval_id: Any, *, owner: Any, session_id: Any) -> str:
+        """Live state of one approval for the card that shows it.
+
+        ``pending`` while it can still be answered; ``superseded`` when a newer
+        card or an ordinary message replaced it; ``expired`` when its window
+        ran out or the server no longer knows it (a restart clears the store).
+        An id that belongs to another owner or chat reads as ``expired``, so
+        this never confirms that someone else's approval exists.
+        """
+        now = time.time()
+        key = str(approval_id or "")
+        with self._lock:
+            self._purge_expired_locked(now)
+            pending = self._pending.get(key)
+            if pending is not None:
+                if (
+                    pending.owner == _normalized_owner(owner)
+                    and pending.session_id == str(session_id or "")
+                ):
+                    return "pending"
+                return "expired"
+            ended = self._ended.get(key)
+        if (
+            ended is not None
+            and ended[0] == "superseded"
+            and ended[1] == _normalized_owner(owner)
+            and ended[2] == str(session_id or "")
+        ):
+            return "superseded"
+        return "expired"
+
+    def create(self, **kwargs: Any) -> PendingToolApproval:
+        """Create a pending approval; see :meth:`create_replacing`."""
+        return self.create_replacing(**kwargs)[0]
+
+    def create_replacing(
         self,
         *,
         owner: Any,
@@ -356,7 +436,13 @@ class ToolApprovalStore:
         external_untrusted_context_seen: bool,
         capabilities: ToolCapabilities,
         reason: str | None = None,
-    ) -> PendingToolApproval:
+    ) -> tuple[PendingToolApproval, list[str]]:
+        """Create a pending approval and return it with the ids it replaced.
+
+        A chat shows one card, so a new approval supersedes the older one for
+        the same owner and chat. The replaced ids come back so the caller can
+        mark those saved cards, instead of leaving buttons that answer 409.
+        """
         now = time.time()
         effects = tuple(sorted(effect.value for effect in capabilities.effects))
         result_integrity = capabilities.result_integrity.value
@@ -418,15 +504,19 @@ class ToolApprovalStore:
                 )
             ]
             for approval_id in superseded:
-                self._pending.pop(approval_id, None)
+                dropped = self._pending.pop(approval_id, None)
+                if dropped is not None:
+                    self._note_ended_locked(dropped, "superseded")
             while len(self._pending) >= self._max_pending:
                 oldest_id = min(
                     self._pending,
                     key=lambda approval_id: self._pending[approval_id].created_at,
                 )
-                self._pending.pop(oldest_id, None)
+                evicted = self._pending.pop(oldest_id, None)
+                if evicted is not None:
+                    self._note_ended_locked(evicted, "expired")
             self._pending[pending.approval_id] = pending
-        return pending
+        return pending, superseded
 
     def consume(
         self,
@@ -489,13 +579,21 @@ class ToolApprovalStore:
 
         Returns whether any retired action carried external provenance, so the
         caller can preserve that security state without treating the new user
-        message as an approval continuation.
+        message as an approval continuation. :meth:`retire_for_session_ids`
+        also returns which approvals were dropped.
         """
+        return self.retire_for_session_ids(owner=owner, session_id=session_id)[0]
+
+    def retire_for_session_ids(
+        self, *, owner: Any, session_id: Any
+    ) -> tuple[bool, list[str]]:
+        """Like :meth:`retire_for_session`, plus the ids it dropped, so the
+        route can mark those saved cards ``superseded``."""
         now = time.time()
         normalized_owner = _normalized_owner(owner)
         normalized_session = str(session_id or "")
         if not normalized_session:
-            return False
+            return False, []
         with self._lock:
             self._purge_expired_locked(now)
             retired_ids = [
@@ -511,8 +609,22 @@ class ToolApprovalStore:
                 for approval_id in retired_ids
             )
             for approval_id in retired_ids:
-                self._pending.pop(approval_id, None)
-        return carried_taint
+                dropped = self._pending.pop(approval_id, None)
+                if dropped is not None:
+                    self._note_ended_locked(dropped, "superseded")
+        return carried_taint, retired_ids
+
+    def has_pending_for_session(self, session_id: Any) -> bool:
+        """Whether any unexpired approval is waiting in this chat (any owner).
+
+        Internal bookkeeping only (open-needs checks); never shown to a user.
+        """
+        wanted = str(session_id or "")
+        if not wanted:
+            return False
+        with self._lock:
+            self._purge_expired_locked(time.time())
+            return any(p.session_id == wanted for p in self._pending.values())
 
     def pending_for_sessions(self, *, owner: Any, session_ids: Any) -> list[PendingToolApproval]:
         """Unexpired pending approvals in these chats, oldest first.

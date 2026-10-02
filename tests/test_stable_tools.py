@@ -70,11 +70,25 @@ def test_the_declared_list_only_grows_and_keeps_its_order():
     assert _names(sent) == ["read_file", "bash", "web_search"] and callable_ == []
 
 
-def test_a_changed_schema_replaces_its_entry_in_place():
+def test_a_changed_parameter_structure_replaces_its_entry_in_place():
     stable_tools.declare("c1", [_schema("a"), _schema("b")])
-    sent, _ = stable_tools.declare("c1", [_schema("a", desc="new")])
+    changed = _schema("a")
+    changed["function"]["parameters"] = {"type": "object", "properties": {"q": {"type": "string"}}}
+    sent, _ = stable_tools.declare("c1", [changed])
     assert _names(sent) == ["a", "b"]
-    assert sent[0]["function"]["description"] == "new"
+    assert "q" in sent[0]["function"]["parameters"]["properties"]
+
+
+def test_a_description_only_change_keeps_the_declared_bytes():
+    """2026-10-02: an MCP identity label / refreshed description changed a declared
+    tool at the same count (tools hash e0dd1d7baf -> a674d8987f, 0% cache on 68k)."""
+    first = [_schema("a", desc="[MCP:srv] one"), _schema("b")]
+    sent1, _ = stable_tools.declare("c1", first)
+    sent2, _ = stable_tools.declare("c1", [_schema("a", desc="[MCP:srv (me@x)] one, reworded"), _schema("b")])
+    assert json.dumps(sent1, sort_keys=True) == json.dumps(sent2, sort_keys=True)
+    sent3, _ = stable_tools.declare("c1", [_schema("c")])
+    assert _names(sent3) == ["a", "b", "c"]
+    assert sent3[0]["function"]["description"] == "[MCP:srv] one"
 
 
 def test_past_the_cap_it_starts_over_from_the_round(monkeypatch):

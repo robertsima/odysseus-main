@@ -909,9 +909,18 @@ def backend_warning() -> Optional[str]:
             "or set it back to run on this machine.")
 
 
+def _with_steer_note(report: dict, steered: list) -> dict:
+    """Say why a wait came back early, when a user message ended it."""
+    if steered and isinstance(report, dict):
+        from src import agent_control
+        report = {**report, "steer_note": agent_control.STEER_WAIT_NOTE}
+    return report
+
+
 async def _cloud_action(action: str, args: dict, *, owner, session_id, tool_name: str) -> Optional[dict]:
     """Handle the action on the cloud runner, or return None for the local one."""
     task_id = str(args.get("task_id") or "").strip()
+    steered: list = []
     if action in ("poll", "get", "cancel"):
         from src import claude_cloud
         if not claude_cloud.is_cloud_task(task_id):
@@ -927,12 +936,13 @@ async def _cloud_action(action: str, args: dict, *, owner, session_id, tool_name
                 if claude_cloud.get(task_id, owner) is None:
                     record = None
                 else:
-                    record = await claude_cloud.wait(task_id, wait) if wait else await claude_cloud.refresh(task_id)
+                    record = (await claude_cloud.wait(task_id, wait, session_id=session_id, steered=steered)
+                              if wait else await claude_cloud.refresh(task_id))
         except Exception as exc:
             return {"error": _tool_error(str(exc), tool_name), "exit_code": 1}
         if record is None:
             return {"error": _tool_error(f"task {task_id} not found", tool_name), "exit_code": 1}
-        return claude_cloud.report(record)
+        return _with_steer_note(claude_cloud.report(record), steered)
     if action not in ("run", "start") or not _wants_cloud(args):
         return None
     from src import claude_cloud
@@ -957,10 +967,10 @@ async def _cloud_action(action: str, args: dict, *, owner, session_id, tool_name
                 timeout = max(30, min(1800, int(args.get("timeout_seconds", 900))))
             except (TypeError, ValueError):
                 timeout = 900
-            record = await claude_cloud.wait(record["task_id"], timeout)
+            record = await claude_cloud.wait(record["task_id"], timeout, session_id=session_id, steered=steered)
     except Exception as exc:
         return {"error": _tool_error(str(exc), tool_name), "exit_code": 1}
-    return claude_cloud.report(record)
+    return _with_steer_note(claude_cloud.report(record), steered)
 
 
 def _parse_args(args: dict, tool_name: str = _DEFAULT_TOOL_NAME) -> dict:
@@ -2416,6 +2426,7 @@ class ClaudeCodeTool:
             task_id = str(args.get("task_id") or "").strip()
             if not task_id:
                 return {"error": _tool_error("task_id is required", invoked_tool), "exit_code": 1}
+            steered: list = []
             if action == "cancel":
                 record = await runner.cancel(task_id, owner=owner)
             else:
@@ -2425,14 +2436,15 @@ class ClaudeCodeTool:
                     wait = 0
                 if action == "poll":
                     wait = _poll_wait(task_id, wait)
-                record = await runner.wait(task_id, wait, owner=owner) if wait else runner.get(task_id, owner=owner)
+                record = (await runner.wait(task_id, wait, owner=owner, session_id=session_id, steered=steered)
+                          if wait else runner.get(task_id, owner=owner))
             if record is None:
                 return {"error": _tool_error(f"task {task_id} not found", invoked_tool), "exit_code": 1}
             if record.get("status") in _ACTIVE_STATUSES:
                 report = _running_report(record)
                 if action == "poll" and wait:
                     report["waited_seconds"] = wait
-                return report
+                return _with_steer_note(report, steered)
             _last_polls.pop(task_id, None)
             return {**record, "exit_code": record.get("exit_code", 1)}
         if action == "list":
@@ -2634,15 +2646,20 @@ class ClaudeCodeTaskRunner:
             return None
         return dict(record)
 
-    async def wait(self, task_id: str, timeout: float, *, owner: Optional[str] = None) -> dict | None:
+    async def wait(self, task_id: str, timeout: float, *, owner: Optional[str] = None,
+                   session_id: Optional[str] = None, steered: Optional[list] = None) -> dict | None:
         """``get``, after waiting up to ``timeout`` seconds for the job to end.
 
         ``asyncio.wait`` never cancels the job, so an abandoned wait (the chat
-        turn stopped) leaves the delegation running.
+        turn stopped) leaves the delegation running. A user message in
+        ``session_id`` also ends the wait (2026-10-02: a poll of up to 600 s
+        held a steer for its whole length); ``steered`` then gets a True.
         """
         job = self.jobs.get(task_id)
         if job is not None and not job.done() and timeout > 0:
-            await asyncio.wait({job}, timeout=timeout)
+            from src import agent_control
+            if await agent_control.wait_or_steer(session_id, timeout, job) and steered is not None:
+                steered.append(True)
         return self.get(task_id, owner=owner)
 
     def summaries(self, *, owner: Optional[str] = None, limit: int = 50) -> list[dict]:

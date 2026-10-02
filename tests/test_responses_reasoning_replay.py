@@ -146,8 +146,9 @@ def test_replay_window_prunes_in_batches_not_every_round():
     (cached=16896 flat across a 28-round turn in the 2026-09-10 logs). The
     window is allowed to overrun by a slack, then cut back in one go."""
     from src.agent_loop import _MAX_REASONING_REPLAY_ROUNDS as window
+    from src.agent_loop import _REASONING_PRUNE_SLACK
 
-    slack = max(4, window)
+    slack = max(_REASONING_PRUNE_SLACK, window)
     # Inside window + slack: nothing is touched, the prefix stays byte-stable.
     kept = [m for m in _run_rounds(window + slack) if m.get("reasoning_items")]
     assert len(kept) == window + slack

@@ -1103,6 +1103,12 @@ _TOOL_SELECTION_TIMEOUT_SECONDS = 1.5
 # How many recent assistant rounds keep their encrypted Responses reasoning
 # items (re-ported from 8cca5a1e, lost in the 2026-09-18 upstream sync).
 _MAX_REASONING_REPLAY_ROUNDS = 3
+# Rounds the reasoning window may overrun before it is cut back in one edit.
+# Each cut rewrites earlier history and costs one uncached re-read of the
+# prompt: with a slack of 4 that happened every 5 rounds, the largest source of
+# uncached tokens in the 2026-10-02 logs (707k in one hour). 6 more rounds of
+# opaque items ride in the cached prefix instead.
+_REASONING_PRUNE_SLACK = 8
 
 
 def _is_ollama_openai_compat_url(endpoint_url: str) -> bool:
@@ -4758,9 +4764,17 @@ def _append_tool_results(
         if _m.get("role") == "assistant" and _m.get("reasoning_items")
     ]
     _replay_window = max(1, int(reasoning_replay_rounds or _MAX_REASONING_REPLAY_ROUNDS))
-    if len(_reasoning_turns) > _replay_window + max(4, _replay_window):
+    if len(_reasoning_turns) > _replay_window + max(_REASONING_PRUNE_SLACK, _replay_window):
         for _m in _reasoning_turns[:-_replay_window]:
             _m.pop("reasoning_items", None)
+        # The prefix breaks here anyway, so prune old images in the same edit
+        # instead of on their own schedule (one cache miss instead of two).
+        try:
+            from src.context_compactor import prune_tool_images
+
+            prune_tool_images(messages, force=True)
+        except Exception as _image_exc:
+            logger.warning("[agent] aligned image prune skipped: %s", _image_exc)
 
     # Execution ledger, re-ported from the fork (lost in the 2026-09-18 upstream
     # sync, which left `recall_tool_output` offered with nothing to recall).
@@ -5782,6 +5796,11 @@ async def stream_agent_loop(
     # tool-free and the model is told to write its final answer from what it
     # has and name what is unfinished. Fires at most once per run.
     wrap_up_round: int = 0,
+    # Whether a person can answer an approval card for this run. None means
+    # "yes when the run belongs to a chat". A session-less run (scheduled skill
+    # audit, manual skill test) has no card to render, so the gate refuses the
+    # call at once instead of parking an approval nobody can see.
+    approval_surface: Optional[bool] = None,
 ) -> AsyncGenerator[str, None]:
     """Streaming agent loop generator.
 
@@ -5810,6 +5829,9 @@ async def stream_agent_loop(
         # A token-driven run has nobody to answer a card, so it keeps the
         # untrusted-context gate whatever the chat's mode says.
         approval_mode=None if delegated_credential else approval_mode,
+        approval_surface=(
+            bool(session_id) if approval_surface is None else bool(approval_surface)
+        ),
     )
     mcp_mgr = get_mcp_manager()
     prep_timings: Dict[str, float] = {}
@@ -7591,6 +7613,12 @@ async def stream_agent_loop(
     # the whole promise of steering. Each extension drains the entire queue, so
     # this is self-limiting; the cap only bounds a client that steers forever.
     _steer_extensions = 0
+    # Why the turn stopped at a point that never reads the steer queue again
+    # (budget, a question for the user, a finished document). A steer still
+    # queued then was not ignored by the model; the turn ended for other
+    # reasons, so the client sends it as the next message instead of just
+    # handing it back with an apology.
+    _steer_break_reason: Optional[str] = None
     _MAX_STEER_EXTENSIONS = 8
 
     # "I said I would, then didn't" detector. The pattern that breaks debug
@@ -7973,9 +8001,12 @@ async def stream_agent_loop(
                 if _approved_objective:
                     _approved_objective.append(_steer_text)
             agent_control.mark_injected(_steer_rec, round_num=round_num)
+            # age_s is how long it waited in the queue; "stuck on Steering"
+            # reports (2026-10-02) could not be sized from this line before.
             logger.info(
-                "[agent-steer] round=%s steer_id=%s kind=%s state=injected chars=%s",
+                "[agent-steer] round=%s steer_id=%s kind=%s state=injected chars=%s age_s=%.1f",
                 round_num, _steer_rec.get("id"), "peer" if _is_peer else "user", len(_steer_text),
+                max(0.0, time.time() - float(_steer_rec.get("queued_at") or _steer_rec.get("ts") or time.time())),
             )
             _steer_event = {"type": "steer_applied", "text": _steer_text, "round": round_num,
                             "kind": "peer" if _is_peer else "user", "steer_id": _steer_rec.get("id")}
@@ -9089,6 +9120,19 @@ async def stream_agent_loop(
                     "Tool blocked before approval by current policy: %s",
                     block.tool_type,
                 )
+            elif (
+                agent_control.steer_pending(session_id, run_id=steer_run_id)
+                and agent_control.is_wait_only_call(block.tool_type, block.content or "")
+            ):
+                # The user wrote while an earlier call this round was waiting.
+                # A second wait would hold their message for the same time
+                # again, so skip it. Only calls that do nothing but wait are
+                # skipped; bash and anything that changes state still runs.
+                desc = f"{block.tool_type}: WAIT SKIPPED (user message pending)"
+                result = {"output": agent_control.STEER_WAIT_SKIPPED, "exit_code": 0,
+                          "steer_wait_skipped": True}
+                logger.info("[agent-steer] round=%s skipped wait-only call %s: a steer is pending",
+                            round_num, block.tool_type)
             elif _is_duplicate_call(_dup_sig, block.tool_type, _call_memo, block.content or ""):
                 # Exact repeat of a call that already succeeded this turn, with
                 # nothing mutating in between — running it again can only
@@ -9179,6 +9223,24 @@ async def stream_agent_loop(
                         "blocked": True,
                         "policy": "exact_tool_approval_target",
                     }
+                elif not run_security.approval_surface:
+                    # Nobody can answer a card in this run, so say so now and
+                    # let the model carry on another way. Creating a record
+                    # here (then denying it) cost a full model round per call.
+                    desc = f"{block.tool_type}: BLOCKED"
+                    result = {
+                        "error": (
+                            f"{block.tool_type} needs a person's approval, and "
+                            "none can be given in this run"
+                        ),
+                        "exit_code": 1,
+                        "blocked": True,
+                        "policy": "approval_unavailable",
+                    }
+                    logger.info(
+                        "Approval unavailable (no chat surface), refused: %s",
+                        block.tool_type,
+                    )
                 else:
                     # The approval click becomes a synthetic user turn. Seal the
                     # actual server-selected candidates now so that continuation
@@ -9814,6 +9876,7 @@ async def stream_agent_loop(
 
         # If budget was hit, stop the loop
         if budget_hit:
+            _steer_break_reason = "the tool budget was reached"
             break
 
         # ask_user posed a question — stop here and wait for the user's choice.
@@ -9821,9 +9884,11 @@ async def stream_agent_loop(
         # arrives as the next message and the agent resumes from there. The
         # question text is already in the streamed response, so it persists.
         if _awaiting_user:
+            _steer_break_reason = "the agent asked you a question"
             break
 
         if _doc_stream_create_completed:
+            _steer_break_reason = "the document was finished"
             if not full_response.strip():
                 full_response = "Done."
                 yield 'data: ' + json.dumps({"delta": "Done."}) + '\n\n'
@@ -9831,6 +9896,7 @@ async def stream_agent_loop(
             break
 
         if _ody_doc_tool_completed:
+            _steer_break_reason = "the document was finished"
             if not full_response.strip() or full_response.strip().startswith("```"):
                 full_response = "Done."
                 yield 'data: ' + json.dumps({"delta": "Done."}) + '\n\n'
@@ -9894,6 +9960,12 @@ async def stream_agent_loop(
         # a typed instruction vanish.
         yield "data: " + json.dumps({
             "type": "steer_dropped",
+            # `carry`: the turn ended on purpose before the message could be
+            # read (see _steer_break_reason). The client queues it as the next
+            # user message. Without it the turn simply ended first and the text
+            # goes back to the composer.
+            "carry": bool(_steer_break_reason),
+            "reason": _steer_break_reason,
             "messages": [
                 {"id": rec.get("id"), "text": rec.get("text") or "",
                  "kind": rec.get("kind") or "user"}

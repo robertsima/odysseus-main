@@ -1429,6 +1429,7 @@ def prune_tool_images(
     *,
     keep: int = TOOL_IMAGES_KEEP,
     slack: int = TOOL_IMAGES_SLACK,
+    force: bool = False,
 ) -> int:
     """Replace older tool-image messages with a one-line text placeholder, in
     batches. Mutates `messages` in place; returns how many it rewrote.
@@ -1441,10 +1442,15 @@ def prune_tool_images(
     rewritten at most once (a placeholder has no image part, so it is never a
     candidate again), the prefix breaks once per `slack + 1` image rounds, and
     at most `keep + slack` image messages are in flight at the peak.
+
+    `force` skips the slack and prunes whatever is older than `keep`: the agent
+    loop passes it on the round it already rewrites the reasoning items, so the
+    two edits break the cached prefix once instead of on separate rounds
+    (2026-10-02: `history_shrank` rounds cost 707k uncached tokens in an hour).
     """
     keep = max(1, int(keep))
     live = _live_tool_image_messages(messages)
-    if len(live) <= keep + max(1, int(slack)):
+    if len(live) <= (keep if force else keep + max(1, int(slack))):
         return 0
     rewritten = 0
     for msg in live[:-keep]:

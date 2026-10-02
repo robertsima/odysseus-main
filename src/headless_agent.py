@@ -755,7 +755,21 @@ async def _drain(sess, messages, state: Dict[str, Any], *, max_rounds: int, owne
             # persistence branch. Preserve the same human/peer attribution in
             # both paths, so a resumed worker never renders peer mail as "You".
             try:
-                from src.agent_control import persist_applied_steer
+                from src.agent_control import persist_applied_steer, persist_steer_split
+                # Same split as the chat route (routes/chat_routes.py): what the
+                # worker produced before this steer is its own assistant message,
+                # so the history reads in the order things happened and the
+                # caller saves only what comes after.
+                split_round = int(d.get("round") or 0)
+                if split_round > state.get("split_round", 1):
+                    state["split_round"] = split_round
+                    if state["full"].strip() or tool_events:
+                        meta = {"steer_split_round": split_round, "steer_id": d.get("steer_id")}
+                        if tool_events:
+                            meta["tool_events"] = list(tool_events)
+                        persist_steer_split(sess, content=state["full"].strip(), metadata=meta)
+                        state["full"] = ""
+                        del tool_events[:]
                 persist_applied_steer(sess, d)
             except Exception:
                 logger.debug("headless steer persistence failed", exc_info=True)

@@ -472,11 +472,25 @@ async def _watch(task_id: str) -> None:
         _watchers.pop(task_id, None)
 
 
-async def wait(task_id: str, seconds: int) -> Optional[Dict[str, Any]]:
+async def wait(task_id: str, seconds: int, *, session_id: Optional[str] = None,
+               steered: Optional[list] = None) -> Optional[Dict[str, Any]]:
+    """Refresh until the run ends or ``seconds`` pass.
+
+    A user message in ``session_id`` ends the wait early (2026-10-02: a poll of
+    up to 600 s held a steer for its whole length). When it does, ``steered``
+    gets a True appended so the caller can say why it came back; the run itself
+    is left going.
+    """
+    from src import agent_control
+
     deadline = time.monotonic() + max(0, seconds)
     record = await refresh(task_id)
     while record is not None and record.get("status") not in _TERMINAL and time.monotonic() < deadline:
-        await asyncio.sleep(min(POLL_INTERVAL_S, max(1.0, deadline - time.monotonic())))
+        if await agent_control.wait_or_steer(
+                session_id, min(POLL_INTERVAL_S, max(1.0, deadline - time.monotonic()))):
+            if steered is not None:
+                steered.append(True)
+            break
         record = await refresh(task_id)
     return record
 

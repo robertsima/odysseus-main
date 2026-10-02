@@ -15,15 +15,33 @@ import documentModule from './document.js?v=20260928docedittarget1';
 // button is polymorphic: with an empty composer it can mean New chat or Record
 // voice instead of Send. Intercept only the programmatic approval click and
 // route it through the form submit path, which already reaches chat.js directly.
+//
+// The intercept stays armed until that click arrives or the approval is
+// cancelled (`odysseus:tool-approval-cancel`: the card was dismissed, or the
+// submit failed before it sent). A fixed 60 s timer used to disarm it, so an
+// approval whose deferred click ran later (slow model start, busy tab) fell
+// through to the shared button's New chat / voice behaviour (2026-10-02).
+let _approvalIntercept = null;
+
+function _disarmApprovalIntercept() {
+  if (!_approvalIntercept) return;
+  _approvalIntercept.button.removeEventListener('click', _approvalIntercept.handler, true);
+  _approvalIntercept = null;
+}
+
+document.addEventListener('odysseus:tool-approval-cancel', _disarmApprovalIntercept);
+
 document.addEventListener('odysseus:tool-approval', () => {
   const sendButton = document.querySelector('.send-btn');
   const chatForm = document.getElementById('chat-form');
   if (!sendButton || !chatForm) return;
 
+  // One armed intercept at a time: a newer approval replaces an older one.
+  _disarmApprovalIntercept();
   const interceptApprovalClick = (event) => {
     // A real user click must retain the normal send/new-chat/STT behavior.
     if (event.isTrusted) return;
-    sendButton.removeEventListener('click', interceptApprovalClick, true);
+    _disarmApprovalIntercept();
     event.preventDefault();
     event.stopImmediatePropagation();
     if (chatForm.requestSubmit) chatForm.requestSubmit();
@@ -31,11 +49,7 @@ document.addEventListener('odysseus:tool-approval', () => {
   };
 
   sendButton.addEventListener('click', interceptApprovalClick, true);
-  // Fail-safe cleanup if the approval continuation never reaches its deferred
-  // synthetic click (for example because the surrounding view is torn down).
-  setTimeout(() => {
-    sendButton.removeEventListener('click', interceptApprovalClick, true);
-  }, 60000);
+  _approvalIntercept = { button: sendButton, handler: interceptApprovalClick };
 }, true);
 
 /**

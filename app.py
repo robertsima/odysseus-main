@@ -1364,8 +1364,17 @@ async def _startup_event():
                 if not get_setting("skill_audit_nightly", True):
                     continue
                 batch = int(get_setting("skill_audit_batch", 8) or 8)
-                from routes.skills_routes import run_scheduled_skill_audit
-                await run_scheduled_skill_audit(skills_manager, owner=None, max_skills=batch)
+                from routes.skills_routes import (
+                    run_scheduled_skill_audit,
+                    scheduled_audit_owners,
+                )
+                # One pass per real account. 2026-10-02: owner=None audited
+                # every user's skills under one identity, so tests ran with no
+                # owner and wrote verdicts across accounts.
+                for audit_owner in scheduled_audit_owners():
+                    await run_scheduled_skill_audit(
+                        skills_manager, owner=audit_owner, max_skills=batch,
+                    )
             except Exception as e:
                 logger.warning(f"Nightly skill audit failed: {e}")
 

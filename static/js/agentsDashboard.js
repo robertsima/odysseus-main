@@ -26,7 +26,11 @@ import { resolveAgamemnonModelIdentity } from './agamemnonIdentity.js';
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const STATUS = {
-  waiting_approval: ['Needs approval', 'warn'], running: ['Running', 'run'], failed: ['Failed', 'bad'],
+  waiting_approval: ['Needs approval', 'warn'],
+  // A worker that paused on a card whose approval has since lapsed (expired or
+  // superseded): nothing is left to answer, so it must not read as "Needs approval".
+  approval_expired: ['Approval expired', 'warn'],
+  running: ['Running', 'run'], failed: ['Failed', 'bad'],
   finished: ['Finished', 'ok'], stopped: ['Stopped', 'warn'], idle: ['Idle', ''],
   // A turn that ended on `Needs user:` lines or a question to the user
   // (src/open_needs.py). It used to show as Finished, so the one thing the

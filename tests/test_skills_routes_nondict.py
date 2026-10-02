@@ -35,26 +35,27 @@ def test_skill_test_messages_keep_skill_text_untrusted_and_arm_gate():
     assert messages[1]["metadata"]["tool_gate_untrusted"] is True
 
 
-def test_autonomous_skill_test_reports_exact_approval_as_inconclusive(monkeypatch):
-    approval = {
-        "kind": "tool_approval",
-        "approval_id": "opaque",
-        "question": "Allow this exact action once?",
-    }
+def test_autonomous_skill_test_is_judged_when_a_gated_tool_is_refused(monkeypatch):
+    """2026-10-02: an unattended test has no approval surface, so a gated call
+    comes back as a tool error and the run is judged on what the model did next,
+    instead of ending inconclusive with a record created and denied."""
+    seen = {}
 
     async def fake_loop(*args, **kwargs):
+        seen.update(kwargs)
         yield "data: " + json.dumps({
             "type": "tool_output",
-            "tool": "bash",
-            "output": "Waiting for an exact user approval.",
-            "ask_user": approval,
+            "tool": "create_document",
+            "output": "create_document needs a person's approval, and none can be given in this run",
         })
+        yield "data: " + json.dumps({"delta": "Worked on the inline sample instead."})
 
-    async def fail_eval(*args, **kwargs):
-        raise AssertionError("approval pause must not be judged as a failed skill")
+    async def fake_eval(md, task, transcript, *args, **kwargs):
+        seen["judged"] = transcript
+        return {"verdict": "pass", "summary": "ok", "issues": []}
 
     monkeypatch.setattr("src.agent_loop.stream_agent_loop", fake_loop)
-    monkeypatch.setattr(skills_routes, "_eval_skill_run", fail_eval)
+    monkeypatch.setattr(skills_routes, "_eval_skill_run", fake_eval)
 
     transcript, verdict = asyncio.run(_run_skill_test_once(
         "skill markdown",
@@ -65,9 +66,11 @@ def test_autonomous_skill_test_reports_exact_approval_as_inconclusive(monkeypatc
         "owner",
     ))
 
-    assert "Waiting for an exact user approval" in transcript
-    assert verdict["verdict"] == "inconclusive"
-    assert verdict["approval_required"] is True
+    assert seen["approval_surface"] is False
+    assert "none can be given in this run" in transcript
+    assert "inline sample" in seen["judged"]
+    assert verdict["verdict"] == "pass"
+    assert "approval_required" not in verdict
 
 
 def test_manual_skill_test_pauses_with_resumable_exact_approval(monkeypatch):

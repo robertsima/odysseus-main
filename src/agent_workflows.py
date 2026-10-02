@@ -1380,10 +1380,18 @@ def render_result(snapshot):
             lines.append("  Result excerpt truncated; the complete artifact remains in that worker chat.")
     if snapshot["failures"]:
         lines.append("Failures/retries: " + json.dumps(snapshot["failures"], ensure_ascii=False)[:2500])
+    if snapshot.get("steer_note"):
+        lines.append(snapshot["steer_note"])
     return "\n".join(lines)
 
 
+def _agent_control_wait_note() -> str:
+    from src import agent_control
+    return agent_control.STEER_WAIT_NOTE
+
+
 async def inspect(*, workflow_id: str, session_id: str, owner: Optional[str], action="status", wait_seconds=30):
+    steered = False
     rec = _load(workflow_id, session_id, owner)
     task = _TASKS.get(workflow_id)
     if action == "cancel" and task:
@@ -1394,12 +1402,16 @@ async def inspect(*, workflow_id: str, session_id: str, owner: Optional[str], ac
         if timeout:
             _WAITERS[workflow_id] = _WAITERS.get(workflow_id, 0) + 1
             try:
-                await asyncio.wait({task}, timeout=timeout)
+                # A user message ends the wait early; the workflow keeps running.
+                from src import agent_control
+                steered = await agent_control.wait_or_steer(session_id, timeout, task)
             finally:
                 _WAITERS[workflow_id] -= 1
                 if _WAITERS[workflow_id] <= 0:
                     _WAITERS.pop(workflow_id, None)
     result = _public(rec)
+    if steered:
+        result["steer_note"] = _agent_control_wait_note()
     if result["terminal"]:
         # The calling turn now has the final result; continuing the chat on
         # the same result afterwards would only repeat the answer.

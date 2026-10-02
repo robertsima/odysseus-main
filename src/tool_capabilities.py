@@ -731,6 +731,11 @@ class ToolRunSecurityContext:
     # asks for destructive and outward-facing calls, and ``ask_all`` asks for
     # every change and also keeps the untrusted-context gate.
     approval_mode: str | None = None
+    # False for a run with no chat (scheduled skill audit, skill tester): no
+    # person can see an approval card there, so the loop answers a gated call
+    # with a tool error instead of creating a record that can only expire
+    # (2026-10-02: every nightly skill test ended "inconclusive" that way).
+    approval_surface: bool = True
 
     def observe_messages(self, messages: Iterable[dict]) -> None:
         """Apply server-owned chat scope and promote untrusted prompt context."""

@@ -445,7 +445,7 @@ def test_an_unknown_request_id_lists_the_close_open_requests(monkeypatch):
     from src.agent_tools import worktree_tools
     from src.agent_worktree import approval as approval_mod
 
-    monkeypatch.setattr(approval_mod, "list_requests", lambda cfg=None: [
+    monkeypatch.setattr(approval_mod, "list_requests", lambda cfg=None, **kwargs: [
         {"id": "5920c8ebbb87419a9ab29e17447cfa92", "branch": "agent/umni/umni-delivery-slice", "status": "pending"},
         {"id": "e61ec75ece1747959737a71086400609", "branch": "agent/umni/resolve-pr14", "status": "used"},
     ])

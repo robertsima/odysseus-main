@@ -185,3 +185,16 @@ def test_loop_never_writes_its_messages_to_chat_history():
     import inspect
 
     assert "history.append" not in inspect.getsource(al)
+
+
+def test_prune_tool_images_force_skips_the_slack():
+    from src.context_compactor import TOOL_IMAGES_SOURCE, prune_tool_images
+
+    def img(i):
+        return {"role": "user", "metadata": {"source": TOOL_IMAGES_SOURCE},
+                "content": [{"type": "text", "text": f"{i}. shot"},
+                            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}}]}
+
+    msgs = [img(i) for i in range(1, 5)]  # keep=2, slack=2 -> 4 is inside the slack
+    assert prune_tool_images(msgs, keep=2, slack=2) == 0
+    assert prune_tool_images(msgs, keep=2, slack=2, force=True) == 2

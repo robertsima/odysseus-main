@@ -153,12 +153,12 @@ class TestClientHandlesTheDrop:
     def test_the_dropped_text_goes_back_to_the_user(self):
         src = self._chat_js()
         start = src.index("function _handleSteerDropped")
-        body = src[start:start + 2000]
+        body = src[start:start + 4000]
         assert "uiModule.el('message')" in body, "the text must return to the composer"
         assert "showError" in body, "and the user must be told it was not read"
 
     def test_a_peer_agent_message_is_not_pushed_into_the_composer(self):
         src = self._chat_js()
         start = src.index("function _handleSteerDropped")
-        body = src[start:start + 2000]
+        body = src[start:start + 4000]
         assert "'peer'" in body

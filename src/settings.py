@@ -133,6 +133,7 @@ DEFAULT_SETTINGS = {
     "penpot_access_token": "",
     "penpot_public_url": "",
     "agent_approval_ttl_seconds": 900,
+    "tool_approval_ttl_seconds": 600,
     "agent_base_branch": "dev",
     "search_provider": "searxng",
     # Providers tried when the primary fails or rate-limits. Empty means the

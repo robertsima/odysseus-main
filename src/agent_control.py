@@ -24,7 +24,9 @@ import asyncio
 import contextlib
 import contextvars
 import logging
+import json
 import re
+import threading
 import time
 import uuid
 from typing import Any, Dict, List, Optional
@@ -258,11 +260,69 @@ def persist_applied_steer(session, event: dict) -> None:
         return
     peer = event.get("kind") == "peer"
     metadata = {"source": "agent" if peer else "steer", "steer_id": event.get("steer_id")}
+    # The round that took it, so a reader can tell which assistant message
+    # (split at this steer, see STEER_SPLIT_NO_TEXT) came before and after.
+    if event.get("round") is not None:
+        metadata["round"] = event.get("round")
     if peer:
         metadata.update(kind="peer", trusted=False,
                         from_session=event.get("from_session"),
                         from_session_name=event.get("from_session_name"))
     session.add_message(ChatMessage("user", text, metadata))
+
+
+# What an assistant message holds when the turn ran tools but wrote no text
+# before a steer split it off. The model reads its own history, and an empty
+# assistant turn is rejected by some providers, so it needs words. The UI draws
+# the tool cards from metadata.tool_events and ignores this line.
+STEER_SPLIT_NO_TEXT = "[Ran tools; wrote no reply text before the user's next message.]"
+
+
+def persist_steer_split(session, *, content: str, metadata: dict) -> Optional[str]:
+    """Save what the turn produced so far as its own assistant message.
+
+    2026-10-02: a turn that took steers saved the user's messages as they
+    arrived but the whole reply as ONE assistant message at the end, so the
+    history read "request, steer, steer, one long reply" and the chat showed
+    all of the user's turns grouped above all of the agent's. Saving the reply
+    in pieces, split where each steer landed, makes the history alternate in
+    the order things happened, and the model's next-turn context follows the
+    same order (get_context_messages is a plain walk of the history).
+
+    Returns the saved message's database id, or None.
+    """
+    from core.models import ChatMessage
+
+    md = dict(metadata or {})
+    md["steer_split"] = True
+    session.add_message(ChatMessage("assistant", content or STEER_SPLIT_NO_TEXT, md))
+    history = getattr(session, "history", None) or []
+    saved = getattr(history[-1], "metadata", None) if history else None
+    return saved.get("_db_id") if isinstance(saved, dict) else None
+
+
+def metrics_after_split(metrics: Optional[dict], split_round: int) -> dict:
+    """The part of a turn's final metrics that belongs after the last split.
+
+    The loop reports every round of the turn at its end. Rounds before
+    ``split_round`` were already saved as earlier assistant messages, so their
+    tool cards and texts are dropped (texts blanked, not removed: a saved
+    ``round_texts`` entry is addressed by round number).
+    """
+    md = dict(metrics or {})
+    if split_round <= 1:
+        return md
+    if md.get("tool_events"):
+        kept = [e for e in md["tool_events"]
+                if not isinstance(e, dict) or int(e.get("round") or 1) >= split_round]
+        if kept:
+            md["tool_events"] = kept
+        else:
+            md.pop("tool_events", None)
+    if md.get("round_texts"):
+        md["round_texts"] = [("" if i + 1 < split_round else t)
+                             for i, t in enumerate(md["round_texts"])]
+    return md
 
 
 def _live_run_id(session_id: str) -> Optional[str]:
@@ -302,6 +362,130 @@ def _live_run_id(session_id: str) -> Optional[str]:
     except Exception:
         pass
     return None
+
+
+# ── waking a long wait when a steer arrives ──────────────────────────────
+#
+# 2026-10-02: a message sent mid-turn sat on "Steering" for minutes. A steer is
+# injected only at the top of a round, and a round can be spent inside one tool
+# call that waits on something else: `manage_agent_loadout` status waits up to
+# 300 s, a Claude Code poll up to 600 s, a workflow wait up to 60 s. Those waits
+# watch their own condition (a worker finishing) and never looked at the queue.
+#
+# `wait_or_steer` is the one way such a wait should sleep: it returns early
+# when a steer is queued for the chat, and the tool answers with its normal
+# "still running" result plus a note that the user wrote. The wait is only
+# ever cut short; the thing waited on is never cancelled, and a model call or a
+# running bash command is not a wait and is left alone.
+#
+# Waiters are keyed by chat, not by (chat, run): tools run with a session id
+# and no run id. A steer for a different run of the same chat can end an
+# unrelated wait early, which costs one extra poll and nothing else.
+_WAKERS: Dict[str, List[tuple]] = {}
+_WAKERS_LOCK = threading.Lock()
+
+STEER_WAIT_NOTE = (
+    "The user sent a message while you were waiting, so this wait ended early. "
+    "What you were waiting on is still running and nothing was cancelled. "
+    "Their message reaches you at the start of your next step: read it, then "
+    "decide whether to keep waiting."
+)
+
+# Shown instead of a skipped wait call's result.
+STEER_WAIT_SKIPPED = (
+    "Not run: the user sent a message, and this call only waits. Nothing was "
+    "cancelled. Read their message at the start of your next step, then call "
+    "this again if you still need to wait."
+)
+
+
+def steer_pending(session_id: Optional[str], *, run_id: Optional[str] = None) -> bool:
+    """Whether a steer is queued and not yet drained for this chat (or run)."""
+    if not session_id:
+        return False
+    return bool(pending_steer(str(session_id), run_id=run_id))
+
+
+def _wake_waiters(session_id: str) -> None:
+    with _WAKERS_LOCK:
+        waiters = list(_WAKERS.get(str(session_id), ()))
+    for loop, event in waiters:
+        try:
+            loop.call_soon_threadsafe(event.set)
+        except RuntimeError:  # that loop is closed; its wait is gone with it
+            pass
+
+
+async def wait_or_steer(session_id: Optional[str], timeout: float, *awaitables) -> bool:
+    """Wait up to ``timeout`` s for any of ``awaitables`` or for a steer.
+
+    Returns True when a steer ended the wait, False when an awaitable finished
+    or the time ran out. ``awaitables`` must be tasks/futures: they are never
+    cancelled here, so an abandoned wait leaves the work running. With none,
+    this is an interruptible sleep. A steer already queued returns at once.
+    """
+    if timeout <= 0:
+        return steer_pending(session_id)
+    if not session_id:
+        if awaitables:
+            await asyncio.wait(set(awaitables), timeout=timeout)
+        else:
+            await asyncio.sleep(timeout)
+        return False
+    sid = str(session_id)
+    if steer_pending(sid):
+        return True
+    loop = asyncio.get_running_loop()
+    event = asyncio.Event()
+    entry = (loop, event)
+    with _WAKERS_LOCK:
+        _WAKERS.setdefault(sid, []).append(entry)
+    wake = asyncio.ensure_future(event.wait())
+    try:
+        # A steer queued between the check above and the registration.
+        if steer_pending(sid):
+            return True
+        await asyncio.wait({wake, *awaitables}, timeout=timeout,
+                           return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        wake.cancel()
+        with _WAKERS_LOCK:
+            waiters = _WAKERS.get(sid) or []
+            if entry in waiters:
+                waiters.remove(entry)
+            if not waiters:
+                _WAKERS.pop(sid, None)
+    return event.is_set()
+
+
+def is_wait_only_call(tool: str, content: str) -> bool:
+    """True for a call whose whole effect is waiting for other work.
+
+    When a steer is pending the loop skips the ones the model batched after the
+    call that was interrupted, so the steer is not held up by a second wait.
+    """
+    name = str(tool or "")
+    if name not in ("manage_agent_loadout", "orchestrate_agents", "delegate_to_agent",
+                    "delegate_to_claude_code"):
+        return False
+    text = str(content or "").strip()
+    if not text.startswith("{"):
+        return False
+    try:
+        args = json.loads(text)
+    except ValueError:
+        return False
+    if not isinstance(args, dict):
+        return False
+    action = str(args.get("action") or "").strip().lower()
+    if name == "manage_agent_loadout":
+        if action not in ("status", "poll", "wait", "check"):
+            return False
+        wait = args.get("wait_seconds", args.get("wait"))
+        return action == "wait" or (not isinstance(wait, bool) and bool(wait))
+    if name == "orchestrate_agents":
+        return action == "wait"
+    return action == "poll" and bool(args.get("wait_seconds"))
 
 
 def steer(session_id: str, text: str, *, owner: Optional[str] = None, kind: str = "user",
@@ -346,6 +530,11 @@ def steer(session_id: str, text: str, *, owner: Optional[str] = None, kind: str 
         raise ValueError("too many queued steer messages")
     queue.append(rec)
     _steer_transition(rec, "queued")
+    # Queue depth and run binding in the log: "stuck on Steering" reports were
+    # undiagnosable because the only line was the one written at injection.
+    logger.info("[agent-steer] steer_id=%s kind=%s state=queued run=%s depth=%d chars=%d",
+                rec["id"], kind, target_run or "unbound", len(queue), len(text))
+    _wake_waiters(str(session_id))
     return rec
 
 
@@ -1550,11 +1739,13 @@ async def _continue_parent(manager, parent_id: str, parent, worker, owner: Optio
 # up to the chat that started it like any other result.
 
 _PUBLISH_FOLLOWUP_NOTE = (
-    "[Harness note, not from the user] The publish request above was approved and has gone out. "
-    "Carry on with the request this chat is working on: check the pull request's CI run and fix a "
-    "failure on the same branch, along with anything else left after publication. When CI is green "
-    "and nothing else in the request is open, state the outcome in one or two sentences with the "
-    "pull request link.{budget}"
+    "[Harness note, not from the user] The publish request above was approved and has gone out; "
+    "that request is spent. Carry on with the request this chat is working on: check the pull "
+    "request's CI run and fix a failure on the same branch, along with anything else left after "
+    "publication. Commits made from here on are unpublished: they need a new request_publish and a "
+    "new approval. State what is published or waiting only from manage_agent_worktree status (its "
+    "publish block for the branch). When CI is green and nothing else in the request is open, state "
+    "the outcome in one or two sentences with the pull request link.{budget}"
 )
 
 

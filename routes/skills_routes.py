@@ -103,18 +103,27 @@ class SkillUpdateRequest(BaseModel):
 
 def _skill_test_task(skill: dict) -> str:
     """Build a self-contained test task. Many skills act ON something (a doc,
-    an email); if we just hand over the 'when to use' text the agent has nothing
-    to work on and stalls asking for input. So we tell it to create its own
-    realistic fixture first, then apply the skill end-to-end."""
+    an email); with only the 'when to use' text the agent has nothing to work
+    on and stalls asking for input. So the task has it invent a small sample
+    input and keep it inline.
+
+    The sample stays in the reply, never in a created document. 2026-10-02:
+    the old wording said to create a document first; the skill text rides in as
+    untrusted context, so ``create_document`` then needed a person's approval
+    that a session-less test cannot get, and nearly every nightly test ended
+    "inconclusive" after a full model round.
+    """
     if not isinstance(skill, dict):
         skill = {}
     ctx = (skill.get("when_to_use") or skill.get("description") or skill.get("name") or "").strip()
     return (
-        "Test this skill end-to-end. FIRST, set up a small realistic scenario it "
-        "applies to — create any sample input it needs (e.g. a short document, a "
-        "note, sample data). Do NOT ask the user for input; invent a plausible "
-        "example yourself. THEN apply the skill fully to that example and show the "
-        "result. Context for when this skill is used: " + (ctx or "(general)")
+        "Test this skill end-to-end. FIRST, write a small realistic scenario it "
+        "applies to, with the sample input it needs (a short document, a note, "
+        "sample data) typed out inline in your reply. Work on that inline "
+        "sample; do not create documents, files or other saved items for it, "
+        "and do not ask the user for input. THEN apply the skill fully to the "
+        "sample and show the result. Context for when this skill is used: "
+        + (ctx or "(general)")
     )
 
 
@@ -485,6 +494,9 @@ async def _run_skill_test_job(
             url, model, messages, headers=headers,
             temperature=0.3, max_tokens=0, max_rounds=8, owner=owner,
             exact_approval=exact_approval,
+            # The manual tester has no chat session, but its own polling UI and
+            # /test-approval route answer the card, so the gate may raise one.
+            approval_surface=True,
         ):
             if not chunk.startswith("data: ") or chunk.strip() == "data: [DONE]":
                 continue
@@ -770,11 +782,18 @@ def _apply_skill_md(skills_manager, name: str, md: str, owner) -> bool:
 
 
 async def _run_skill_test_once(md: str, task: str, url, model, headers, owner) -> tuple:
-    """Run the skill once in the agent loop; return (transcript, verdict)."""
+    """Run the skill once in the agent loop; return (transcript, verdict).
+
+    Unattended: no chat, no card, so approval-gated tools come back as a tool
+    error (``approval_unavailable``) and the model carries on without them.
+    """
     import json as _json
     from src.agent_loop import stream_agent_loop
+    from src.interactive_gate import wait_for_interactive_quiet
+    # Scheduled audits queue behind a person's running turn instead of
+    # competing with it for the model endpoint; a manual audit never waits.
+    await wait_for_interactive_quiet("skill test")
     transcript = []
-    approval_required = None
     messages = _skill_test_messages(md, task)
     try:
         # max_tokens explicitly set: passing 0 lets some upstreams (Ollama,
@@ -782,7 +801,8 @@ async def _run_skill_test_once(md: str, task: str, url, model, headers, owner) -
         # the skill test returning nothing while chat (which carries its
         # preset's max_tokens) worked. 4096 matches the chat default.
         async for chunk in stream_agent_loop(url, model, messages, headers=headers,
-                                             temperature=0.3, max_tokens=4096, max_rounds=8, owner=owner):
+                                             temperature=0.3, max_tokens=4096, max_rounds=8, owner=owner,
+                                             approval_surface=False):
             if not chunk.startswith("data: ") or chunk.strip() == "data: [DONE]":
                 continue
             try:
@@ -795,44 +815,11 @@ async def _run_skill_test_once(md: str, task: str, url, model, headers, owner) -
                 transcript.append(f"\n[tool {d.get('tool')}] {str(d.get('command') or d.get('args') or '')[:300]}\n")
             elif d.get("type") == "tool_output":
                 transcript.append(f"[output] {str(d.get('output') or '')[:600]}\n")
-                approval = d.get("ask_user")
-                if (
-                    isinstance(approval, dict)
-                    and approval.get("kind") == "tool_approval"
-                ):
-                    approval_required = approval
-                    break
             elif d.get("type") == "agent_step":
                 transcript.append(f"\n--- round {d.get('round')} ---\n")
     except Exception as e:
         transcript.append(f"\n[run error] {e}\n")
     text = "".join(transcript)
-    if approval_required is not None:
-        # Unattended audits have no authority to approve and no UI that could
-        # resume this record. Destructively deny it now instead of leaving a
-        # reusable opaque grant pending until TTL/cap eviction.
-        try:
-            from src.tool_approvals import tool_approval_store
-            tool_approval_store.consume(
-                approval_required.get("approval_id"),
-                decision="deny",
-                owner=owner,
-                session_id=None,
-            )
-        except Exception:
-            logger.debug("Could not retire unattended skill approval", exc_info=True)
-        return text, {
-            "verdict": "inconclusive",
-            "confidence": 1.0,
-            "summary": (
-                "This automated audit reached an exact action that requires "
-                "a human approval; no action was executed."
-            ),
-            "issues": [
-                "Run this skill's manual test and review the sealed action."
-            ],
-            "approval_required": True,
-        }
     verdict = await _eval_skill_run(md, task, text, url, model, headers)
     return text, verdict
 
@@ -993,27 +980,6 @@ async def _audit_one_skill(skills_manager, skill, url, model, headers,
     transcript, verdict = await _run_skill_test_once(md, task, url, model, headers, owner)
     v = verdict.get("verdict")
     log(f"{name}: verdict = {v} ({verdict.get('summary', '')[:80]})")
-    if verdict.get("approval_required"):
-        # An unattended audit is not authority for an action influenced by the
-        # skill under test. Preserve the skill's current publication/confidence
-        # state and route the exact action to the manual test UI instead of
-        # letting a safety pause demote, rewrite, or auto-publish the skill.
-        await _off_loop(
-            skills_manager.set_audit,
-            name,
-            "inconclusive",
-            by_teacher=False,
-            worker_model=model,
-            owner=owner,
-        )
-        status = skill.get("status") or "draft"
-        log(f"{name}: {status} unchanged — exact action needs manual approval")
-        return {
-            "skill": name,
-            "result": "approval_required",
-            "verdict": verdict,
-            "status": status,
-        }
     if v == "pass":
         # Procedure works. If the reviewer still flagged metadata (tags/category/
         # when_to_use/description), do ONE fixer pass to correct the frontmatter
@@ -1193,6 +1159,25 @@ def _resolve_audit_models(owner=None):
     except Exception as e:
         logger.warning(f"Audit teacher resolve failed: {e}")
     return url, model, headers, teacher
+
+
+def scheduled_audit_owners() -> list:
+    """Accounts the nightly audit visits, one pass each.
+
+    ``[None]`` only on an install with no accounts (auth disabled), where the
+    single implicit owner is the whole library.
+    """
+    try:
+        from core.auth import get_auth_manager
+
+        names = [
+            str(u.get("username") or "") for u in get_auth_manager().list_users()
+        ]
+        names = [n for n in names if n]
+    except Exception as error:
+        logger.debug("Skill audit: user enumeration failed: %s", error)
+        names = []
+    return names or [None]
 
 
 async def run_scheduled_skill_audit(skills_manager: SkillsManager,

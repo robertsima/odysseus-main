@@ -22,6 +22,19 @@ from src.tool_capabilities import (
 ToolBlock = namedtuple("ToolBlock", ["tool_type", "content"])
 
 
+def _gated_loop(*args, **kwargs):
+    """Run the agent loop as a run a person can answer.
+
+    These tests drive the approval gate without a chat session; the loop's
+    default for a session-less run is no approval surface (it refuses a gated
+    call instead of raising a card), so they ask for the surface explicitly.
+    """
+    import src.agent_loop as agent_loop
+
+    kwargs.setdefault("approval_surface", True)
+    return agent_loop.stream_agent_loop(*args, **kwargs)
+
+
 def _collect_agent_events(generator):
     async def _collect():
         return [chunk async for chunk in generator]
@@ -797,7 +810,7 @@ def test_fake_weak_model_search_then_bash_next_round_is_blocked(monkeypatch):
     )
 
     events = _collect_agent_events(
-        agent_loop.stream_agent_loop(
+        _gated_loop(
             "http://local.test/v1",
             "small-local-model",
             [{"role": "user", "content": "research this and inspect my workspace"}],
@@ -834,7 +847,7 @@ def test_fake_weak_model_search_then_bash_same_batch_is_blocked(monkeypatch):
     )
 
     events = _collect_agent_events(
-        agent_loop.stream_agent_loop(
+        _gated_loop(
             "http://local.test/v1",
             "small-local-model",
             [{"role": "user", "content": "research this and inspect my workspace"}],
@@ -868,7 +881,7 @@ def test_search_then_model_controlled_fetch_same_batch_is_blocked(monkeypatch):
     )
 
     events = _collect_agent_events(
-        agent_loop.stream_agent_loop(
+        _gated_loop(
             "http://local.test/v1",
             "small-local-model",
             [{"role": "user", "content": "research this"}],
@@ -901,7 +914,7 @@ def test_search_then_document_same_batch_has_no_editor_side_effect(monkeypatch):
     )
 
     events = _collect_agent_events(
-        agent_loop.stream_agent_loop(
+        _gated_loop(
             "http://local.test/v1",
             "small-local-model",
             [{"role": "user", "content": "research this and write a document"}],
@@ -935,7 +948,7 @@ def test_initial_external_context_blocks_document_before_editor_side_effect(monk
     ]
 
     events = _collect_agent_events(
-        agent_loop.stream_agent_loop(
+        _gated_loop(
             "http://local.test/v1",
             "small-local-model",
             messages,
@@ -1006,7 +1019,7 @@ def test_native_argument_deltas_do_not_mutate_editor_before_gate(monkeypatch):
     ]
 
     events = _collect_agent_events(
-        agent_loop.stream_agent_loop(
+        _gated_loop(
             "https://api.example.test/v1",
             "gpt-test",
             messages,
@@ -1055,7 +1068,7 @@ def test_tainted_native_route_keeps_action_schema_for_exact_approval(monkeypatch
     ]
 
     _collect_agent_events(
-        agent_loop.stream_agent_loop(
+        _gated_loop(
             "https://api.openai.com/v1",
             "gpt-test",
             messages,
@@ -1093,7 +1106,7 @@ def test_tainted_document_edit_without_active_target_cannot_be_approved(monkeypa
     monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
     monkeypatch.setattr(agent_loop, "execute_tool_block", should_not_execute)
     events = _collect_agent_events(
-        agent_loop.stream_agent_loop(
+        _gated_loop(
             "http://local.test/v1",
             "small-local-model",
             [
@@ -1148,7 +1161,7 @@ def test_tainted_disabled_tool_is_blocked_without_misleading_approval(monkeypatc
     monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
     monkeypatch.setattr(agent_loop, "execute_tool_block", should_not_execute)
     events = _collect_agent_events(
-        agent_loop.stream_agent_loop(
+        _gated_loop(
             "http://local.test/v1",
             "small-local-model",
             [
@@ -1207,7 +1220,7 @@ def test_tainted_document_approval_seals_current_content(monkeypatch):
         version_count=4,
     )
     events = _collect_agent_events(
-        agent_loop.stream_agent_loop(
+        _gated_loop(
             "http://local.test/v1",
             "small-local-model",
             [
@@ -1272,7 +1285,7 @@ def test_approval_pause_does_not_trigger_teacher_takeover(monkeypatch):
     monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
     monkeypatch.setattr(teacher_escalation, "run_teacher_inline", fail_teacher)
     events = _collect_agent_events(
-        agent_loop.stream_agent_loop(
+        _gated_loop(
             "http://local.test/v1",
             "small-local-model",
             [
@@ -1326,7 +1339,7 @@ def test_teacher_takeover_inherits_delegated_and_tainted_run_authority(monkeypat
     monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
     monkeypatch.setattr(teacher_escalation, "run_teacher_inline", capture_teacher)
     _collect_agent_events(
-        agent_loop.stream_agent_loop(
+        _gated_loop(
             "http://local.test/v1",
             "qwen-local-model",
             [
@@ -1471,7 +1484,7 @@ def test_authorized_document_stream_precedes_completed_update(monkeypatch):
     monkeypatch.setattr(agent_loop, "execute_tool_block", fake_execute)
 
     events = _collect_agent_events(
-        agent_loop.stream_agent_loop(
+        _gated_loop(
             "http://local.test/v1",
             "small-local-model",
             [{"role": "user", "content": "update the active document"}],

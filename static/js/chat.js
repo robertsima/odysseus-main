@@ -8,8 +8,8 @@
 import Storage from './storage.js';
 import uiModule from './ui.js';
 import sessionModule from './sessions.js';
-import chatRenderer from './chatRenderer.js?v=20260929resumerun1';
-import chatStream from './chatStream.js?v=20260819approvalcontrol1';
+import chatRenderer from './chatRenderer.js?v=20261002steer1';
+import chatStream from './chatStream.js?v=20261002approvals1';
 import { renderDiffCard } from './diffView.js';
 import agentThread from './agentThread.js?v=20260928subagentui1';
 import { addAITTSButton } from './tts-ai.js';
@@ -87,6 +87,60 @@ function _personaNameForTurn() {
   let _contextHeaderBound = false;
   let _pendingToolApproval = null;
 
+  /** The message a failed chat request carries, whatever shape the body has. */
+  function _serverErrorText(body) {
+    const raw = String(body || '');
+    const nested = (s) => {
+      const m = String(s).match(/"message"\s*:\s*"([^"]+)"/);
+      return m ? m[1].replace(/\\"/g, '"') : String(s);
+    };
+    try {
+      const parsed = JSON.parse(raw);
+      let found = parsed && (parsed.detail ?? parsed.message ?? parsed.error);
+      if (Array.isArray(found)) found = found.map((x) => (x && (x.msg || x.message)) || x).join('; ');
+      if (found && typeof found === 'object') found = found.message || found.detail || '';
+      if (typeof found === 'string' && found.trim()) return nested(found).trim();
+    } catch (_) { /* not JSON: fall through */ }
+    const m = raw.match(/"message"\s*:\s*"([^"]+)"/);
+    return m ? m[1].replace(/\\"/g, '"') : '';
+  }
+
+  /** True only for a provider saying the model cannot use tools. */
+  function _isToolSupportError(text) {
+    const t = String(text || '');
+    return /(?:does(?:\s*not|n't)|do(?:\s*not|n't)|is\s*not|not)\s+(?:support(?:ed)?|available)[^.]{0,40}\b(?:tools?|function[ _-]?calling|tool[ _-]?use)\b/i.test(t)
+      || /\b(?:tools?|function[ _-]?calling|tool[ _-]?use|tool[ _-]?choice)\b[^.]{0,40}\b(?:not\s+supported|unsupported|not\s+available)\b/i.test(t)
+      || /enable-auto-tool-choice|auto[ _-]tool[ _-]choice/i.test(t);
+  }
+
+  /**
+   * An approval send failed before the server accepted it. Put the card back so
+   * the click is not lost: a refusal the server states as final (expired,
+   * replaced, another thread) comes back as a lapsed card carrying the server's
+   * reason, anything else (network, 5xx) as a live card to click again.
+   */
+  function _settleFailedApproval(approval, status, reason) {
+    const payload = approval && approval.payload;
+    // chatStream.js keeps its approval-click intercept armed until it fires or
+    // is cancelled; a failed send must not leave it waiting for a click that
+    // will never come. Clicking the restored card arms a fresh one.
+    try { document.dispatchEvent(new CustomEvent('odysseus:tool-approval-cancel')); } catch (_) {}
+    try {
+      if (payload && chatRenderer && chatRenderer.renderAskUserCard) {
+        const card = chatRenderer.renderAskUserCard(payload, { scroll: true });
+        const final = [400, 403, 404, 409, 410].includes(Number(status));
+        if (card && final && chatRenderer.lapseApprovalCard) {
+          chatRenderer.lapseApprovalCard(card, 'expired', reason);
+        }
+      }
+    } catch (e) {
+      console.warn('could not restore the approval card', e);
+    }
+    if (!payload) {
+      try { uiModule.showError && uiModule.showError(reason || 'The approval could not be sent. Try again.'); } catch (_) {}
+    }
+  }
+
   function _submitToolApprovalWhenIdle(approvalId) {
     if (
       !_pendingToolApproval
@@ -102,6 +156,7 @@ function _personaNameForTurn() {
     }
     const sendButton = document.querySelector('.send-btn');
     if (sendButton) sendButton.click();
+    else document.dispatchEvent(new CustomEvent('odysseus:tool-approval-cancel'));
   }
 
   document.addEventListener('odysseus:tool-approval', (event) => {
@@ -112,6 +167,9 @@ function _personaNameForTurn() {
       approval_id: String(detail.approval_id),
       decision,
       document_id: String(detail.document_id || ''),
+      // Kept so a refused or failed send can put the card back (see
+      // _settleFailedApproval); the card itself is removed on click.
+      payload: detail.payload || null,
     };
     _submitToolApprovalWhenIdle(_pendingToolApproval.approval_id);
   });
@@ -1050,7 +1108,15 @@ function _personaNameForTurn() {
   function _ensureQueuedBubbleHost() {
     const chatBox = document.getElementById('chat-history');
     if (!chatBox) return null;
-    if (_queuedBubbleHost && _queuedBubbleHost.isConnected) return _queuedBubbleHost;
+    if (_queuedBubbleHost && _queuedBubbleHost.isConnected) {
+      // Re-append on every use. The turn keeps adding rounds below it, so a
+      // host left where it was first created sits above them and a bubble put
+      // into it renders at a stale position (2026-10-02).
+      if (_queuedBubbleHost.parentNode !== chatBox || _queuedBubbleHost.nextSibling) {
+        chatBox.appendChild(_queuedBubbleHost);
+      }
+      return _queuedBubbleHost;
+    }
     let host = document.getElementById('chat-queued-bubble-host');
     if (!host) {
       host = document.createElement('div');
@@ -1159,12 +1225,64 @@ function _personaNameForTurn() {
     if (steerId) wrap.dataset.steerId = steerId;
     wrap.dataset.raw = String(text || '');
     wrap.dataset.steerState = 'queued';
-    wrap.title = 'Waiting for the running agent to pick this up';
-    wrap.innerHTML = `<div class="role">You <span class="steered-pill">Steering</span></div>` +
+    const hint = _steerWaitHint(sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId());
+    wrap.title = hint.title;
+    wrap.innerHTML = `<div class="role">You <span class="steered-pill">${_escapeQueueText(hint.pill)}</span></div>` +
       `<div class="body">${_escapeQueueText(text)}</div>`;
     host.appendChild(wrap);
     uiModule.scrollHistory();
     return wrap;
+  }
+
+  // What each running turn is doing right now, read off its own stream, so a
+  // steered bubble can say what it is waiting for. A steer is read only when
+  // the current step ends, and until 2026-10-02 the bubble said just "Steering"
+  // while a 20-minute tool call or a model call held it.
+  const _liveActivity = new Map(); // session id -> { tool, startedAt (ms) }
+
+  function _trackLiveActivity(sessionId, ev) {
+    const sid = String(sessionId || '');
+    if (!sid || !ev) return;
+    if (ev.type === 'tool_start') {
+      const started = Number(ev.started_at) > 0 ? Number(ev.started_at) * 1000 : Date.now();
+      _liveActivity.set(sid, { tool: String(ev.tool || ''), startedAt: started });
+    } else if (ev.type === 'tool_output' || ev.type === 'agent_step') {
+      _liveActivity.delete(sid);
+    }
+  }
+
+  function _formatWaitDuration(ms) {
+    const secs = Math.max(0, Math.round(ms / 1000));
+    if (secs < 60) return `${secs}s`;
+    const mins = Math.floor(secs / 60);
+    return mins < 60 ? `${mins}m ${secs % 60}s` : `${Math.floor(mins / 60)}h ${mins % 60}m`;
+  }
+
+  /** Pill text and tooltip for a steer that is still waiting to be read. */
+  function _steerWaitHint(sessionId) {
+    const act = _liveActivity.get(String(sessionId || ''));
+    if (act && act.tool) {
+      const dur = _formatWaitDuration(Date.now() - act.startedAt);
+      return {
+        pill: `After ${act.tool} · ${dur}`,
+        title: `Waiting for ${act.tool}, running for ${dur}. The agent reads your message when it finishes.`,
+      };
+    }
+    return {
+      pill: 'After this step',
+      title: "Waiting for the model's current step to finish. The agent reads your message right after.",
+    };
+  }
+
+  // Where an injected steer goes: after everything the agent has finished and
+  // before the round now being written. That round is the newest streaming
+  // assistant bubble. Putting the bubble before the queued host instead stacked
+  // every steer at the host's first position, below the replies that came after
+  // the first steer.
+  function _currentRoundAnchor() {
+    if (typeof document === 'undefined' || !document.querySelectorAll) return null;
+    const live = document.querySelectorAll('#chat-history .msg-ai.streaming');
+    return live && live.length ? live[live.length - 1] : null;
   }
 
   function _trackedSteers(sessionId) {
@@ -1190,7 +1308,7 @@ function _personaNameForTurn() {
     }
   }
 
-  function _promoteInjectedSteeredBubble(sessionId, steerId, bubble) {
+  function _promoteInjectedSteeredBubble(sessionId, steerId, bubble, anchor = null) {
     // The route has persisted this exact text as a normal user turn before it
     // forwards `steer_applied`. Move the optimistic DOM node out of the pending
     // host and strip only the lifecycle affordance, so the user does not watch
@@ -1198,7 +1316,8 @@ function _personaNameForTurn() {
     const host = bubble.parentNode;
     const transcript = host && host.parentNode;
     if (transcript && host.classList?.contains('chat-queued-bubble-host')) {
-      transcript.insertBefore(bubble, host);
+      const target = anchor || _currentRoundAnchor();
+      transcript.insertBefore(bubble, target && target.parentNode === transcript ? target : host);
     }
     bubble.classList.remove('msg-user-steered');
     delete bubble.dataset.steerState;
@@ -1229,7 +1348,7 @@ function _personaNameForTurn() {
     if (bubble) _promoteInjectedSteeredBubble(sessionId, steer?.id, bubble);
   }
 
-  function _applySteeredBubbleState(sessionId, steer) {
+  function _applySteeredBubbleState(sessionId, steer, anchor = null) {
     const steerId = String(steer && steer.id || '');
     const bubble = _steeredBubbles.get(String(sessionId || ''))?.get(steerId);
     if (!bubble) return;
@@ -1268,8 +1387,9 @@ function _personaNameForTurn() {
         try { uiModule.showError && uiModule.showError('Steering is no longer in the live queue. See Agent Control Room for the recorded message.'); } catch (_) {}
         return;
       }
-      bubble.title = 'Waiting for the running agent to pick this up';
-      if (pill) pill.textContent = 'Steering';
+      const hint = _steerWaitHint(sessionId);
+      bubble.title = hint.title;
+      if (pill) pill.textContent = hint.pill;
       return;
     }
     if (steerState === 'acknowledged') {
@@ -1280,7 +1400,7 @@ function _personaNameForTurn() {
     }
 
     if (steerState === 'injected') {
-      _promoteInjectedSteeredBubble(sessionId, steerId, bubble);
+      _promoteInjectedSteeredBubble(sessionId, steerId, bubble, anchor);
       return;
     }
     if (!['cancelled', 'failed'].includes(steerState)) return;
@@ -1313,14 +1433,15 @@ function _personaNameForTurn() {
     }
   }
 
-  function _handleSteerApplied(sessionId, event) {
+  function _handleSteerApplied(sessionId, event, anchor = null) {
     const steerId = event && event.steer_id;
     if (!steerId || event?.kind === 'peer') return;
     // The stream is the immediate confirmation path for the tab that sent the
     // instruction. It means "injected into the model", not "completed".
+    // `anchor` is the round holder the stream is about to write into.
     _applySteeredBubbleState(sessionId, {
       id: steerId, text: event.text, state: 'injected', round: event.round,
-    });
+    }, anchor);
   }
 
   function _handleSteerDropped(sessionId, event) {
@@ -1341,9 +1462,24 @@ function _personaNameForTurn() {
       _forgetSteeredBubble(sessionId, String(msg.id || ''));
     }
 
+    const texts = mine.map((m) => String(m.text || '').trim());
+    if (event.carry) {
+      // The turn ended on purpose (it asked a question, hit its budget, or
+      // finished a document) before it could read the message. Nothing is
+      // wrong with the message, so send it as the next request instead of
+      // asking the user to retype it.
+      if (sessionModule.getCurrentSessionId?.() === String(sessionId || '')) {
+        texts.forEach((t) => _queueAgentRequest(t));
+        const why = event.reason ? ` (${event.reason})` : '';
+        try {
+          uiModule.showToast && uiModule.showToast(
+            `Your message arrived after the turn stopped${why}. It will send next.`);
+        } catch (_) {}
+      }
+      return;
+    }
     // Only restore into the composer for the chat the user is looking at, and
     // never clobber something they have already started typing.
-    const texts = mine.map((m) => String(m.text || '').trim());
     if (sessionModule.getCurrentSessionId?.() === String(sessionId || '')) {
       const input = uiModule.el('message');
       if (input && !String(input.value || '').trim()) {
@@ -1646,6 +1782,9 @@ function _personaNameForTurn() {
     const _sendPerf = _createChatSendPerf();
     _sendInFlight = true;
     const approvalForSend = _pendingToolApproval;
+    // Set once the server has accepted an approval send. Before that, a failure
+    // means the approval was not consumed and its card has to come back.
+    let _approvalDelivered = false;
     _setForegroundChatBusy(true);
     // Instant visual feedback so the user sees their click was accepted
     // even before the streaming button state kicks in below.
@@ -2489,13 +2628,18 @@ function _personaNameForTurn() {
         let errText = `Error ${res.status}`;
         try {
           const errBody = await res.text();
-          // Parse nested JSON error if present
-          const m = errBody.match(/"message"\s*:\s*"([^"]+)"/);
-          if (m) errText = m[1].replace(/\\"/g, '"');
-          else if (errBody.length < 200) errText = errBody;
+          // FastAPI answers {"detail": ...}; providers nest {"error":{"message"}}.
+          errText = _serverErrorText(errBody) || (errBody.length < 200 ? errBody : errText);
         } catch {}
-        // Auto-switch to chat mode for tool-related errors
-        if (errText.includes('tool') || errText.includes('auto')) {
+        // An approval send that the server refused says why (expired, replaced,
+        // another thread). It is never a model-capability problem, and the card
+        // comes back instead of the click vanishing (2026-10-02: every refusal
+        // contained "tool", so it was shown as "This model doesn't support agent
+        // tools" and the mode toggle was flipped to Chat).
+        if (approvalForSend) {
+          _settleFailedApproval(approvalForSend, res.status, errText);
+        } else if (_isToolSupportError(errText)) {
+          // Auto-switch to chat mode only when the model really cannot use tools
           errText = 'This model doesn\'t support agent tools — switched to Chat mode. Try again.';
           const _ab = document.getElementById('mode-agent-btn');
           const _cb = document.getElementById('mode-chat-btn');
@@ -2515,6 +2659,7 @@ function _personaNameForTurn() {
         enableResearchBtn();
         return;
       }
+      _approvalDelivered = true;
       const streamRunId = res.headers.get('X-Odysseus-Run-Id') || '';
       if (streamRunId) _rememberStreamRunId(streamSessionId, streamRunId, streamGeneration);
 
@@ -2557,6 +2702,34 @@ function _personaNameForTurn() {
         _generatedImagesForTurn.push({ ...data, image_url: imageUrl, url: imageUrl });
       }
       // _keepResearchOn removed — clarification state now persisted server-side via DB mode
+      // The server splits the saved reply at a steer, so the round that follows
+      // is a new assistant message: give it its own header and timestamp (not a
+      // `msg-continuation`) and make it the holder the footer, metrics and
+      // message_saved id attach to. The message before it is finished.
+      function _startMessageAfterSteer() {
+        const hadOutput = !!String(accumulated || '').trim() || !!lastToolThread;
+        if (!hadOutput || !roundHolder || roundHolder === holder) return;
+        const finished = holder;
+        finished.classList.remove('streaming');
+        finished.dataset.raw = accumulated;
+        roundHolder.classList.remove('msg-continuation');
+        const role = roundHolder.querySelector('.role');
+        if (role && !role.querySelector('.role-timestamp')) {
+          const ts = document.createElement('span');
+          ts.className = 'role-timestamp';
+          ts.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          role.appendChild(document.createTextNode(' '));
+          role.appendChild(ts);
+        }
+        holder = roundHolder;
+        currentHolder = holder;
+        const active = _activeStreams.get(streamSessionId);
+        if (active) active.holder = holder;
+        _syncForegroundStreamGlobals();
+        accumulated = '';
+        lastToolThread = null;
+        lastContentRoundHolder = null;
+      }
       function _metricsTargetForTurn() {
         const visibleRound = (roundHolder && roundHolder.style.display !== 'none') ? roundHolder : null;
         const visibleText = visibleRound ? (visibleRound.querySelector('.body')?.textContent || '').trim() : '';
@@ -3263,11 +3436,18 @@ function _personaNameForTurn() {
                 if (spinner && spinner.element) spinner.destroy();
                 break;
               }
+              _trackLiveActivity(streamSessionId, json);
               if (json.type === 'steer_applied') {
                 // This is the low-latency path for the foreground stream. The
                 // status poll remains the reconciliation fallback after an SSE
                 // reconnect or an event the browser did not receive.
-                _handleSteerApplied(streamSessionId, json);
+                // The bubble goes before the round holder the stream is now
+                // writing into, then that holder becomes a full assistant
+                // message: the server saved the reply so far as its own message
+                // (routes/chat_routes.py), so the reply to a steer is a new one.
+                const _steerAnchor = (!_isBg && roundHolder && roundHolder.isConnected) ? roundHolder : null;
+                _handleSteerApplied(streamSessionId, json, _steerAnchor);
+                if (!_isBg) _startMessageAfterSteer();
                 continue;
               }
               if (json.type === 'steer_dropped') {
@@ -4689,6 +4869,11 @@ function _personaNameForTurn() {
       } // end if (!_isBgFinal)
 
     } catch (err) {
+      // The approval never reached the server (network drop before a response):
+      // it was not consumed, so offer it again.
+      if (approvalForSend && !_approvalDelivered && !(abortCtrl && abortCtrl.signal && abortCtrl.signal.aborted)) {
+        _settleFailedApproval(approvalForSend, 0, '');
+      }
       // If a Stop or timeout was waiting for an identity header and the POST
       // failed before producing one, keep this on the cancellation path. There
       // is no safe headerless server cancel to send, but it must not be turned
@@ -5473,7 +5658,7 @@ function _personaNameForTurn() {
     // for a same-tab POST stream and spawn its own spinner+poll on re-entry.
     _resumingStreams.add(sessionId);
 
-    const holder = document.createElement('div');
+    let holder = document.createElement('div');
     holder.className = 'msg msg-ai';
     const meta = sessionModule.getSessions().find(s => s.id === sessionId);
     const roleLabel = _shortModel(meta && meta.model);
@@ -5484,13 +5669,15 @@ function _personaNameForTurn() {
     holder._requestedModel = meta && meta.model;
     holder._actualModel = holder._requestedModel;
     _applyModelColor(holder.querySelector('.role'), meta && meta.model);
-    const contentDiv = holder.querySelector('.stream-content');
+    let contentDiv = holder.querySelector('.stream-content');
     box.appendChild(holder);
 
-    const spinner = spinnerModule.create('Generating response...', 'right');
+    let spinner = spinnerModule.create('Generating response...', 'right');
     holder.querySelector('.body').appendChild(spinner.createElement());
     spinner.start();
-    const activity = _createResumeActivity(contentDiv);
+    let activity = _createResumeActivity(contentDiv);
+    // Holders finished by a steer. The canonical reload below replaces them.
+    const priorHolders = [];
     uiModule.scrollHistory();
 
     // This tab rejoins the run like the tab that sent it: the composer shows
@@ -5564,12 +5751,41 @@ function _personaNameForTurn() {
           }
           let json;
           try { json = JSON.parse(payload); } catch (_) { continue; }
+          _trackLiveActivity(sessionId, json);
           if (eventIsError) {
             replayError = createTerminalStreamError(json);
           } else if (json.type === 'steer_applied') {
             // Resume replays the same event stream as the live reader, so it
-            // must settle a local steer chip the same way.
-            _handleSteerApplied(sessionId, json);
+            // must settle a local steer chip the same way, and start a new
+            // assistant message after it: the server saved the reply so far
+            // as its own message, and what follows is another one.
+            if (gotDelta || rich) {
+              try { spinner.destroy(); } catch (_) {}
+              activity.stop();
+              renderDelta();
+              priorHolders.push(holder);
+              holder = document.createElement('div');
+              holder.className = 'msg msg-ai';
+              holder.innerHTML = '<div class="role">' + uiModule.esc(roleLabel) +
+                ' <span class="role-timestamp">' +
+                new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + '</span></div>' +
+                '<div class="body"><div class="stream-content"></div></div>';
+              holder._requestedModel = meta && meta.model;
+              holder._actualModel = holder._requestedModel;
+              _applyModelColor(holder.querySelector('.role'), meta && meta.model);
+              contentDiv = holder.querySelector('.stream-content');
+              box.appendChild(holder);
+              spinner = spinnerModule.create('Generating response...', 'right');
+              holder.querySelector('.body').appendChild(spinner.createElement());
+              spinner.start();
+              activity = _createResumeActivity(contentDiv);
+              roundText = '';
+              gotDelta = false;
+              rich = true;
+              _handleSteerApplied(sessionId, json, holder);
+            } else {
+              _handleSteerApplied(sessionId, json, holder);
+            }
           } else if (json.type === 'steer_dropped') {
             _handleSteerDropped(sessionId, json);
           } else if (json.delta) {
@@ -5663,7 +5879,11 @@ function _personaNameForTurn() {
 
     cleanup();
     if (docFenceOpened) _finishDocumentWritingStatus(holder, true);
-    if (leftSession) { if (holder.parentNode) holder.remove(); return true; }
+    if (leftSession) {
+      priorHolders.forEach((h) => { if (h.parentNode) h.remove(); });
+      if (holder.parentNode) holder.remove();
+      return true;
+    }
 
     const onThisSession = sessionModule.getCurrentSessionId &&
                           sessionModule.getCurrentSessionId() === sessionId;
@@ -5697,6 +5917,7 @@ function _personaNameForTurn() {
     // Rich response (tools, sources, docs, multi-round) or user moved on:
     // reload from the DB for the full canonical render.
     if (holder._docWritingThread && holder._docWritingThread.parentNode) holder._docWritingThread.remove();
+    priorHolders.forEach((h) => { if (h.parentNode) h.remove(); });
     if (holder.parentNode) holder.remove();
     if (metricsData) {
       chatRenderer.recordSessionMetricsCost(metricsData, sessionId);

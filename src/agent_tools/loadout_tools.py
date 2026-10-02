@@ -897,6 +897,7 @@ async def _status(args: Dict[str, Any], session_id: Optional[str],
                 "progress_key": "[]"}
 
     waited = 0.0
+    steered = False
     running_ids = [row["run_id"] for row in rows if row.get("status") == "running"]
     if running_ids:
         key = f"{session_id}|{run_id or '*'}"
@@ -904,10 +905,17 @@ async def _status(args: Dict[str, Any], session_id: Optional[str],
         if wait > 0:
             started = time.monotonic()
             deadline = started + wait
-            from src import agent_activity
+            from src import agent_activity, agent_control
 
             while time.monotonic() < deadline:
-                await asyncio.sleep(min(_STATUS_WAIT_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
+                # A user message ends the wait: it is only read at the start of
+                # the next round, so holding it here for up to MAX_STATUS_WAIT_S
+                # left it on "Steering" (2026-10-02).
+                if await agent_control.wait_or_steer(
+                    session_id, min(_STATUS_WAIT_POLL_SECONDS, max(0.0, deadline - time.monotonic()))
+                ):
+                    steered = True
+                    break
                 if any((agent_activity.get_run(rid) or {}).get("status", "running") != "running"
                        for rid in running_ids):
                     break
@@ -945,6 +953,10 @@ async def _status(args: Dict[str, Any], session_id: Optional[str],
         out["loadout"] = loadout
     if waited:
         out["waited_seconds"] = waited
+    if steered:
+        from src import agent_control
+        out["steer_note"] = agent_control.STEER_WAIT_NOTE
+        out["response"] += " " + agent_control.STEER_WAIT_NOTE
     # The loop's stall detector reads this instead of the whole result, so a
     # re-check that shows only a later timestamp is not taken for progress.
     out["progress_key"] = json.dumps(

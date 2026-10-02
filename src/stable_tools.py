@@ -90,6 +90,35 @@ def _name(schema: dict) -> str:
     return str(fn.get("name") or "")
 
 
+def _strip_prose(node):
+    """``node`` without any `description`/`title`/`examples` text, recursively."""
+    if isinstance(node, dict):
+        return {k: _strip_prose(v) for k, v in node.items() if k not in ("description", "title", "examples")}
+    if isinstance(node, list):
+        return [_strip_prose(v) for v in node]
+    return node
+
+
+def _callable_shape(schema: dict) -> str:
+    """What a call depends on: the name and the parameter structure, not the prose.
+
+    A declared tool is replaced only when this changes. On 2026-10-02 a chat's
+    tools hash moved `e0dd1d7baf(95)` -> `a674d8987f(95)` at round 17 with the
+    same tool count: MCP descriptions are built per request from live state
+    (`[MCP:server (identity)]` once the identity probe lands, a server's own
+    tools/list refresh), so `entry.get(name) != schema` rewrote an entry in
+    place and the next request re-billed 68k tokens at 0% cache (tools precede
+    input in the prefix). The model reads the first description it was given
+    just as well; only a parameter change makes the old definition wrong.
+    """
+    fn = schema.get("function") if isinstance(schema.get("function"), dict) else schema
+    params = fn.get("parameters") if isinstance(fn, dict) else None
+    try:
+        return json.dumps(_strip_prose(params), sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return repr(params)
+
+
 def _store_dir() -> str:
     from src import constants
 
@@ -168,7 +197,8 @@ def declare(session_id: Optional[str], schemas: List[dict]) -> Tuple[List[dict],
         before = list(entry.items())
         for schema in active:
             name = _name(schema)
-            if entry.get(name) != schema:
+            current = entry.get(name)
+            if current is None or _callable_shape(current) != _callable_shape(schema):
                 entry[name] = schema
         if len(entry) > MAX_DECLARED:
             logger.info("[stable-tools] session=%s declared %d tools (cap %d); starting over from this round's %d",

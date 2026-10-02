@@ -77,6 +77,20 @@ class TurnTrail:
             event.update({k: data[k] for k in _EVENT_KEYS if k in data})
             self.tool_events.append(event)
 
+    def take_before(self, round_num: int) -> Tuple[List[str], List[Dict]]:
+        """Remove and return what rounds before ``round_num`` produced.
+
+        A steer splits the reply there (2026-10-02): the pieces so far are
+        saved as their own assistant message, and what this trail reports from
+        then on, including a stopped turn's record, is only what came after.
+        Returns ``(round_texts, tool_events)``; the texts list has one entry
+        per round, so an index is that round minus one, as in saved metadata.
+        """
+        texts = [self._texts.pop(r, "") for r in range(1, round_num)]
+        taken = [e for e in self.tool_events if int(e.get("round") or 1) < round_num]
+        self.tool_events = [e for e in self.tool_events if int(e.get("round") or 1) >= round_num]
+        return texts, taken
+
     def has_work(self) -> bool:
         return bool(self.tool_events or self._running)
 
