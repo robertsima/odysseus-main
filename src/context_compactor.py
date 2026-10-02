@@ -9,6 +9,9 @@ import json
 import logging
 import os
 import re
+import threading
+import time
+from collections import deque
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.model_context import get_context_length, estimate_tokens
@@ -987,8 +990,24 @@ LEDGER_KEEP_ROUNDS = 3
 LEDGER_SLACK_ROUNDS = 4
 # Below this, a result is facts rather than bulk — leave it alone.
 LEDGER_MIN_RESULT_CHARS = 600
-# Ceiling on the fact text a single entry may carry forward.
-LEDGER_MAX_ENTRY_CHARS = 900
+# A result with no stored copy is only collapsed (and so only written to the
+# store) from this size. 2026-10-02: 55 of 93 offloads in an hour were under
+# 4,000 chars (an `update_plan` of 731 chars, for one). Storing them cost a
+# disk write and an index entry each and saved ~150 tokens apiece, and a
+# collapsed one is a recall away from being needed again. Below the floor the
+# result stays inline. A result that is already an offload excerpt carries its
+# ref, so it collapses from LEDGER_MIN_RESULT_CHARS without a second copy.
+LEDGER_STORE_MIN_CHARS = 4000
+# Ceiling on the fact text a single entry may carry forward. Raised from 900 on
+# 2026-10-02 so the entry can hold the first and last lines of the output it
+# replaces: the model recalled a collapsed output 17 s after the collapse to
+# get back a detail that sat in those lines.
+LEDGER_MAX_ENTRY_CHARS = 1200
+# Lines kept from each end of a fenced output, and the width of each.
+_LEDGER_EXCERPT_LINES = 2
+_LEDGER_EXCERPT_LINE_CHARS = 140
+# A fenced block this small is kept whole: an excerpt of it would not be shorter.
+_LEDGER_FENCE_KEEP_CHARS = 300
 # Per-line ceiling, so one pathological unfenced line cannot fill the entry.
 _LEDGER_MAX_LINE_CHARS = 240
 
@@ -1115,13 +1134,39 @@ def _ledger_facts(text: str) -> str:
     in_fence = False
     fence_chars = 0
     fence_lines = 0
+    fence_body: List[str] = []
+    fence_head: List[str] = []
+    fence_tail: "deque[str]" = deque(maxlen=_LEDGER_EXCERPT_LINES)
 
     def _flush_fence() -> None:
-        nonlocal fence_chars, fence_lines
+        nonlocal fence_chars, fence_lines, fence_body, fence_head, fence_tail
         if fence_chars:
-            kept.append(f"[{fence_chars:,} chars / {fence_lines:,} lines of output omitted]")
+            if fence_chars <= _LEDGER_FENCE_KEEP_CHARS:
+                kept.extend(ln.strip() for ln in fence_body if ln.strip())
+            else:
+                # First and last lines are where the command echo, the shape of
+                # the output and the final status or error usually are. One
+                # structural line, so the entry budget cannot drop it.
+                n = _LEDGER_EXCERPT_LINES
+                width = _LEDGER_EXCERPT_LINE_CHARS
+
+                def _cut(text: str) -> str:
+                    return text if len(text) <= width else text[:width].rstrip() + "…"
+
+                head = [_cut(ln) for ln in fence_head]
+                # Lines already in the head never enter the tail.
+                tail = [_cut(ln) for ln in fence_tail]
+                note = f"[{fence_chars:,} chars / {fence_lines:,} lines of output omitted"
+                if head:
+                    note += "; first: " + " | ".join(head)
+                if tail:
+                    note += "; last: " + " | ".join(tail)
+                kept.append(note + "]")
         fence_chars = 0
         fence_lines = 0
+        fence_body = []
+        fence_head = []
+        fence_tail.clear()
 
     for line in (text or "").splitlines():
         if _LEDGER_FENCE_RE.match(line):
@@ -1132,6 +1177,13 @@ def _ledger_facts(text: str) -> str:
         if in_fence:
             fence_chars += len(line) + 1
             fence_lines += 1
+            if fence_chars <= _LEDGER_FENCE_KEEP_CHARS:
+                fence_body.append(line)
+            if line.strip():
+                if len(fence_head) < _LEDGER_EXCERPT_LINES:
+                    fence_head.append(line.strip())
+                else:
+                    fence_tail.append(line.strip())
             continue
         stripped = line.strip()
         if not stripped:
@@ -1162,14 +1214,32 @@ def _ledger_facts(text: str) -> str:
         i for i, ln in enumerate(kept) if ln.startswith(_LEDGER_STRUCTURAL_PREFIXES)
     }
     room = LEDGER_MAX_ENTRY_CHARS - sum(len(kept[i]) + 1 for i in structural)
+    # Spend the prose room on both ends of the result, in original order: the
+    # opening lines say what was run, the closing lines say how it ended. Filling
+    # from the front alone dropped the tail of an offload excerpt every time.
+    prose = [i for i in range(len(kept)) if i not in structural]
+    chosen: set = set()
+    front_room = max(room, 0) * 6 // 10
+    for i in prose:
+        cost = len(kept[i]) + 1
+        if front_room - cost < 0:
+            break
+        chosen.add(i)
+        front_room -= cost
+        room -= cost
+    for i in reversed(prose):
+        if i in chosen:
+            continue
+        cost = len(kept[i]) + 1
+        if room - cost < 0:
+            break
+        chosen.add(i)
+        room -= cost
     out: List[str] = []
     dropped = 0
     for i, line in enumerate(kept):
-        if i in structural:
+        if i in structural or i in chosen:
             out.append(line)
-        elif room - (len(line) + 1) >= 0:
-            out.append(line)
-            room -= len(line) + 1
         else:
             dropped += len(line) + 1
     if dropped:
@@ -1383,12 +1453,19 @@ def _ledger_collapse(body: str, session_id, resolved: set, store) -> tuple:
     framing, inner, closing = guard if guard else ("", body, "")
     refs = _LEDGER_REF_RE.findall(inner)
     record = None
-    try:
-        # The whole message goes to the store, guard and all, so what
-        # `recall_tool_output` hands back is exactly what was in the transcript.
-        record = store(body, tool=tool, command="execution-ledger", session_id=session_id)
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.debug("execution ledger offload failed for %s: %s", tool, exc)
+    if not refs:
+        if len(body) < LEDGER_STORE_MIN_CHARS:
+            # Small and not stored anywhere: leave it inline (see the floor's note).
+            return None, False
+        try:
+            # The whole message goes to the store, guard and all, so what
+            # `recall_tool_output` hands back is exactly what was in the transcript.
+            record = store(body, tool=tool, command="execution-ledger", session_id=session_id)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("execution ledger offload failed for %s: %s", tool, exc)
+    # A body that already names a ref IS an offload excerpt: the full text is
+    # stored under that ref, so a second store of the excerpt would only add a
+    # write and a second ref to a shortened copy.
     if record is None and not refs:
         # Nothing would remain recoverable. Leave the exchange verbatim: losing a
         # path costs a re-read, which costs more than this entry would have saved
@@ -1407,7 +1484,11 @@ def _ledger_collapse(body: str, session_id, resolved: set, store) -> tuple:
 # resends it, so only the newest few stay as pixels.
 TOOL_IMAGES_SOURCE = "tool_images"
 TOOL_IMAGES_KEEP = 2
-TOOL_IMAGES_SLACK = 2
+# Safety cap on image blocks still carrying pixels. There is no round schedule
+# any more: an image prune breaks the cached prefix, so it runs only in the same
+# edit as another history rewrite (ledger, trim, reasoning cut), or when the
+# images alone pass this cap (~1-2k tokens each, so ~12-24k).
+TOOL_IMAGES_CAP = 12
 
 
 def _live_tool_image_messages(messages: List[Dict]) -> List[Dict]:
@@ -1424,33 +1505,42 @@ def _live_tool_image_messages(messages: List[Dict]) -> List[Dict]:
     return live
 
 
+def count_live_tool_images(messages: List[Dict]) -> int:
+    """Image blocks in tool-image messages that still carry pixels."""
+    return sum(
+        1
+        for msg in _live_tool_image_messages(messages)
+        for b in msg["content"]
+        if isinstance(b, dict) and b.get("type") == "image_url"
+    )
+
+
 def prune_tool_images(
     messages: List[Dict],
     *,
     keep: int = TOOL_IMAGES_KEEP,
-    slack: int = TOOL_IMAGES_SLACK,
+    cap: int = TOOL_IMAGES_CAP,
     force: bool = False,
 ) -> int:
-    """Replace older tool-image messages with a one-line text placeholder, in
-    batches. Mutates `messages` in place; returns how many it rewrote.
+    """Replace older tool-image messages with a one-line text placeholder.
+    Mutates `messages` in place; returns how many it rewrote.
 
-    Batched for the same reason as the reasoning-item window and the execution
-    ledger: rewriting the oldest image message every round would move the
-    provider's cached-prefix boundary back to it every round. Nothing happens
-    until more than `keep + slack` image messages carry pixels; then every one
-    but the newest `keep` is rewritten at once. Each message is therefore
-    rewritten at most once (a placeholder has no image part, so it is never a
-    candidate again), the prefix breaks once per `slack + 1` image rounds, and
-    at most `keep + slack` image messages are in flight at the peak.
+    Rewriting an old image message moves the provider's cached-prefix boundary
+    back to it, so this never runs on a schedule. The caller passes `force` in
+    the same edit as another history rewrite (the prefix breaks there anyway),
+    and without it nothing happens until more than `cap` image blocks carry
+    pixels. Either way every message but the newest `keep` is rewritten at once,
+    and each is rewritten at most once (a placeholder has no image part).
 
-    `force` skips the slack and prunes whatever is older than `keep`: the agent
-    loop passes it on the round it already rewrites the reasoning items, so the
-    two edits break the cached prefix once instead of on separate rounds
-    (2026-10-02: `history_shrank` rounds cost 707k uncached tokens in an hour).
+    History: a keep-2/slack-2 schedule pruned images every third image round,
+    and on 2026-10-02 those rewrites (with the reasoning prune) cost 707k
+    uncached tokens in an hour.
     """
     keep = max(1, int(keep))
     live = _live_tool_image_messages(messages)
-    if len(live) <= (keep if force else keep + max(1, int(slack))):
+    if len(live) <= keep:
+        return 0
+    if not force and count_live_tool_images(messages) <= max(1, int(cap)):
         return 0
     rewritten = 0
     for msg in live[:-keep]:
@@ -1472,3 +1562,38 @@ def prune_tool_images(
         }]
         rewritten += 1
     return rewritten
+
+
+# What rewrote the conversation before the next request, for the
+# `[prompt-prefix] rewrite=` log field. The agent loop sets it in the edit and
+# llm_core reads it once when it logs that request, so a `history_shrank` round
+# in the logs names its cause. Keyed by chat id because rounds of different chats
+# interleave; entries expire so a tag that no request consumes cannot label a
+# later, unrelated round.
+REWRITE_KINDS = ("reasoning", "images", "ledger", "trim")
+_REWRITE_TTL_SECONDS = 120.0
+_rewrite_tags: Dict[str, Tuple[str, float]] = {}
+_rewrite_lock = threading.Lock()
+
+
+def note_history_rewrite(session_id: Optional[str], kind: str) -> None:
+    """Record that history was rewritten for this chat's next request."""
+    if not session_id or kind not in REWRITE_KINDS:
+        return
+    now = time.monotonic()
+    with _rewrite_lock:
+        if len(_rewrite_tags) > 256:
+            for key in [k for k, (_, at) in _rewrite_tags.items() if now - at > _REWRITE_TTL_SECONDS]:
+                _rewrite_tags.pop(key, None)
+        _rewrite_tags[str(session_id)] = (kind, now)
+
+
+def pop_history_rewrite(session_id: Optional[str]) -> str:
+    """The rewrite recorded for this chat since the last request, or "none"."""
+    if not session_id:
+        return "none"
+    with _rewrite_lock:
+        entry = _rewrite_tags.pop(str(session_id), None)
+    if not entry or time.monotonic() - entry[1] > _REWRITE_TTL_SECONDS:
+        return "none"
+    return entry[0]

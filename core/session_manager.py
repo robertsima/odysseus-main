@@ -278,6 +278,9 @@ class SessionManager:
             message: ChatMessage to add
         """
         session = self.get_session(session_id)
+        from src.turn_trail import attach_model_trail
+
+        attach_model_trail(message, session_id)
         session.history.append(message)
         session._history = session.history
         session.message_count = len(session.history)

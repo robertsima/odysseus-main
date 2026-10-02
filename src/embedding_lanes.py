@@ -9,6 +9,7 @@ Remote/custom endpoints and legacy unsuffixed collections are not runtime paths.
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 import hashlib
 import logging
@@ -51,6 +52,27 @@ _LEGACY_MISSING_TTL_SECONDS = 300.0
 _legacy_missing_until: Dict[tuple[int, str], float] = {}
 
 
+# Query-text embedding cache. One user turn embeds the same text several times:
+# VectorRAG.search encodes the query once per query_lanes call (main pass, one
+# named-document pass per distinctive token, link expansion), and the memory,
+# tool and skill retrievers embed the same message again. 2026-10-02 audit of the
+# turn path found up to 4+ identical ONNX encodes per message. Keyed on
+# (model, client, text) so a model change never serves another model's vectors; the TTL
+# bounds how long a vector survives if the embedder is swapped at runtime
+# (reset_embedding_lane_state also clears it). Long texts (document chunks being
+# indexed) are not cached: they are never asked for twice and would evict queries.
+_ENCODE_CACHE_MAX = 512
+_ENCODE_CACHE_TTL_SECONDS = 300.0
+_ENCODE_CACHE_MAX_CHARS = 1500
+_encode_cache: "OrderedDict[tuple[str, str], tuple[float, List[float]]]" = OrderedDict()
+_encode_cache_lock = threading.Lock()
+
+
+def clear_encode_cache() -> None:
+    with _encode_cache_lock:
+        _encode_cache.clear()
+
+
 def _is_missing_collection_error(exc: Exception) -> bool:
     text = str(exc).lower()
     return any(marker in text for marker in (
@@ -86,8 +108,58 @@ class EmbeddingLane:
         return self.collection is not None and self.client is not None
 
     def encode(self, texts: Sequence[str]) -> List[List[float]]:
-        vecs = self.client.encode(list(texts), normalize_embeddings=True)
-        return vecs.tolist() if hasattr(vecs, "tolist") else [list(v) for v in vecs]
+        texts = list(texts)
+        # id(client) as well as the model: two clients can report one model name
+        # (a rebuilt client, a test double) and must not share vectors.
+        model = f"{self.model or ''}#{id(self.client)}"
+        now = time.monotonic()
+        out: List[Optional[List[float]]] = [None] * len(texts)
+        missing: Dict[str, List[int]] = {}
+        with _encode_cache_lock:
+            for i, text in enumerate(texts):
+                hit = _encode_cache.get((model, text)) if len(text) <= _ENCODE_CACHE_MAX_CHARS else None
+                if hit is not None and now - hit[0] < _ENCODE_CACHE_TTL_SECONDS:
+                    _encode_cache.move_to_end((model, text))
+                    out[i] = hit[1]
+                else:
+                    missing.setdefault(text, []).append(i)
+        if missing:
+            unique = list(missing)
+            vecs = self.client.encode(unique, normalize_embeddings=True)
+            vecs = vecs.tolist() if hasattr(vecs, "tolist") else [list(v) for v in vecs]
+            with _encode_cache_lock:
+                for text, vec in zip(unique, vecs):
+                    for i in missing[text]:
+                        out[i] = vec
+                    if len(text) <= _ENCODE_CACHE_MAX_CHARS:
+                        _encode_cache[(model, text)] = (now, vec)
+                while len(_encode_cache) > _ENCODE_CACHE_MAX:
+                    _encode_cache.popitem(last=False)
+        return [list(v) for v in out]
+
+    def query(self, n_results: int, **kwargs: Any) -> Dict[str, Any]:
+        """collection.query without a preceding count() round trip.
+
+        The count only guarded an empty collection and clamped n_results, and it
+        cost an HTTP request on every search (2026-10-02 production log: Chroma
+        queries take 10-40 ms, each preceded by a GET .../count). Query
+        directly; only when Chroma rejects the call do we ask for the count, then
+        return an empty result for an empty collection or retry once with n
+        clamped to what exists. A failed count re-raises the original error, so
+        a dead backend is never reported as an empty collection.
+        """
+        try:
+            return self.collection.query(n_results=n_results, **kwargs)
+        except Exception as first:
+            try:
+                size = int(self.collection.count())
+            except Exception:
+                raise first
+            if size == 0:
+                return {"ids": [[]], "documents": [[]], "metadatas": [[]], "distances": [[]]}
+            if size >= n_results:
+                raise
+            return self.collection.query(n_results=size, **kwargs)
 
     def count(self) -> int:
         cached = getattr(self, "_count_cached", None)
@@ -129,6 +201,7 @@ def reset_embedding_lane_state() -> None:
     global _fastembed_client
 
     _legacy_missing_until.clear()
+    clear_encode_cache()
 
     # The cached fallback client keys off FASTEMBED_MODEL, read once at
     # construction. Drop it here so this stays the one hook that clears every
@@ -368,16 +441,12 @@ def query_lanes(
     failures: List[str] = []
     for lane in lanes:
         try:
-            count = lane.count()
-            if count == 0:
-                continue
             attempted += 1
-            n = min(n_results(lane), count)
+            n = n_results(lane)
             if n <= 0:
                 continue
             query_kwargs = {
                 "query_embeddings": lane.encode([query]),
-                "n_results": n,
                 "where": where,
                 "include": list(include),
             }
@@ -387,7 +456,11 @@ def query_lanes(
             # relies on the plain metadata-filtered query.
             if where_document is not None:
                 query_kwargs["where_document"] = where_document
-            results = lane.collection.query(**query_kwargs)
+            results = lane.query(n, **query_kwargs)
+            if not ((results or {}).get("ids") or [[]])[0]:
+                # Same as the old count()==0 skip: an empty lane contributes
+                # nothing (and a filter matching nothing is equivalent).
+                continue
             out.append((lane, results))
         except Exception as e:
             failures.append(f"{lane.name}: {e}")

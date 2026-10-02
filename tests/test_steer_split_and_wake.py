@@ -186,9 +186,11 @@ def test_the_model_sees_the_whole_turn_in_the_order_it_happened(feed):
     sess.add_message(ChatMessage("user", "thanks"))
 
     roles = [(m["role"], m["content"]) for m in sess.get_context_messages()]
+    # The piece that ran tools also carries the record of them (src/turn_trail.py).
+    trail = sess.history[1].metadata["model_trail"]
     assert roles == [
         ("user", "audit the repo"),
-        ("assistant", "I read the config."),
+        ("assistant", "I read the config." + chr(10) * 2 + trail),
         ("user", "skip tests"),
         ("assistant", "Audit done, tests skipped."),
         ("user", "thanks"),

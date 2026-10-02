@@ -88,13 +88,21 @@ def _model_view(message: Dict[str, Any]) -> Dict[str, Any]:
     if message.get("role") != "assistant":
         return message
     metadata = message.get("metadata") or {}
-    if not (metadata.get("stopped") or metadata.get("cancelled")):
-        return message
     content = message.get("content")
-    if isinstance(content, str) and not content.strip():
+    if (metadata.get("stopped") or metadata.get("cancelled")) and isinstance(content, str) and not content.strip():
         from src.intent_assessment import STOPPED_BEFORE_REPLY_TEXT
 
-        return {**message, "content": STOPPED_BEFORE_REPLY_TEXT}
+        message = {**message, "content": STOPPED_BEFORE_REPLY_TEXT}
+        content = STOPPED_BEFORE_REPLY_TEXT
+    # The record of the turn's tool calls, rendered once at save time
+    # (src/turn_trail.py) so these bytes never change on a later turn. Model
+    # only: display, export and search read the stored content.
+    trail = metadata.get("model_trail")
+    if isinstance(trail, str) and trail and isinstance(content, str):
+        from src.turn_trail import STEER_SPLIT_NO_TEXT
+
+        base = "" if content.strip() == STEER_SPLIT_NO_TEXT else content.rstrip()
+        return {**message, "content": f"{base}\n\n{trail}" if base else trail}
     return message
 
 
@@ -166,6 +174,9 @@ class Session:
         message_count. Delegates to SessionManager for persistence
         if available.
         """
+        from src.turn_trail import attach_model_trail
+
+        attach_model_trail(message, self.id)
         self.history.append(message)
         self.message_count = len(self.history)
 

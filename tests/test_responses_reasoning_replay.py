@@ -140,22 +140,74 @@ def _run_rounds(n):
     return messages
 
 
-def test_replay_window_prunes_in_batches_not_every_round():
-    """Every pop edits an already-sent assistant turn in the middle of the
-    input, which moved the provider's cache boundary on every round
-    (cached=16896 flat across a 28-round turn in the 2026-09-10 logs). The
-    window is allowed to overrun by a slack, then cut back in one go."""
-    from src.agent_loop import _MAX_REASONING_REPLAY_ROUNDS as window
-    from src.agent_loop import _REASONING_PRUNE_SLACK
+def _reasoning_turns(messages):
+    return [m for m in messages if m.get("reasoning_items")]
 
-    slack = max(_REASONING_PRUNE_SLACK, window)
-    # Inside window + slack: nothing is touched, the prefix stays byte-stable.
-    kept = [m for m in _run_rounds(window + slack) if m.get("reasoning_items")]
-    assert len(kept) == window + slack
-    # One round past it: cut back to the window in a single edit.
-    kept = [m for m in _run_rounds(window + slack + 1) if m.get("reasoning_items")]
-    assert len(kept) == window, "opaque payload must not accumulate for a whole 30-round turn"
-    assert kept[-1]["reasoning_items"][0]["id"] == f"rs_{window + slack}"
+
+def test_reasoning_items_are_not_pruned_on_a_round_schedule():
+    """2026-10-02: a prune every 9 rounds rewrote history mid-turn, and the
+    provider re-read 30-80k tokens after each one. Below the safety cap every
+    item of the turn stays, however many rounds run."""
+    messages = _run_rounds(60)
+    assert len(_reasoning_turns(messages)) == 60
+    assert messages[0]["reasoning_items"][0]["id"] == "rs_0"
+
+
+def test_reasoning_is_cut_back_in_one_edit_at_the_carry_cap(monkeypatch):
+    import src.agent_loop as al
+
+    # Each item is 400 chars = 100 estimated tokens; cap at 2,500 tokens.
+    big = dict(REASONING_ITEM, encrypted_content="A" * 400)
+    monkeypatch.setattr(al, "_REASONING_CARRY_CAP_TOKENS", 2_500)
+    messages = []
+    counts = []
+    for i in range(40):
+        al._append_tool_results(
+            messages, "", [{"id": f"c{i}", "name": "bash", "arguments": "{}"}],
+            [f"r{i}"], [f"r{i}"], True, i,
+            round_reasoning_items=[dict(big, id=f"rs_{i}")],
+        )
+        counts.append(len(_reasoning_turns(messages)))
+    # Grows one per round up to the cap, then drops once to the window.
+    assert counts[:25] == list(range(1, 26))
+    assert counts[25] == al._MAX_REASONING_REPLAY_ROUNDS
+    assert max(counts) == 25
+    kept = _reasoning_turns(messages)
+    assert kept[-1]["reasoning_items"][0]["id"] == "rs_39"
+
+
+def test_a_ledger_rewrite_cuts_reasoning_and_images_in_the_same_edit(monkeypatch, tmp_path):
+    """One prefix break, not three: when the ledger collapses results it also
+    cuts reasoning back to the window and prunes old tool images."""
+    import src.agent_loop as al
+    import src.constants as constants
+    from src.context_compactor import (
+        LEDGER_KEEP_ROUNDS, LEDGER_SLACK_ROUNDS, TOOL_IMAGES_SOURCE, pop_history_rewrite,
+    )
+
+    monkeypatch.setattr(constants, "DATA_DIR", str(tmp_path), raising=False)
+    messages = []
+    n = LEDGER_KEEP_ROUNDS + LEDGER_SLACK_ROUNDS + 1
+    for i in range(n):
+        body = f"### read_file: /a/b{i}.py\n```\n{'x' * 6000}\n```"
+        al._append_tool_results(
+            messages, "", [{"id": f"c{i}", "name": "read_file", "arguments": "{}"}],
+            [body], [body], True, i,
+            round_reasoning_items=[dict(REASONING_ITEM, id=f"rs_{i}")],
+            ledger_budget=0, session_id="sess-1",
+        )
+        if i == 1:
+            messages.append({"role": "user", "metadata": {"source": TOOL_IMAGES_SOURCE},
+                             "content": [{"type": "text", "text": "1. shot"},
+                                         {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}}]})
+            messages.append(dict(messages[-1]))
+            messages.append(dict(messages[-1]))
+    assert len(_reasoning_turns(messages)) == al._MAX_REASONING_REPLAY_ROUNDS
+    live = [m for m in messages if m.get("metadata", {}).get("source") == TOOL_IMAGES_SOURCE
+            and any(b.get("type") == "image_url" for b in m["content"])]
+    assert len(live) == 2
+    assert pop_history_rewrite("sess-1") == "ledger"
+    assert pop_history_rewrite("sess-1") == "none"
 
 
 def test_loop_attaches_items_phase_and_replays_in_order():

@@ -173,3 +173,17 @@ def _isolate_integration_skill_registrations():
             late._integration_skill_dirs.clear()
             if saved is not None and late is mod:
                 late._integration_skill_dirs.update(saved)
+
+
+@pytest.fixture(autouse=True)
+def _clear_embedding_and_cache_key_memory():
+    """Process-level memos (query-embedding LRU, per-session prompt_cache_key)
+    must not carry one test's fake embedder output or session keys into the next."""
+    try:
+        from src.embedding_lanes import clear_encode_cache
+        clear_encode_cache()
+        from src import llm_core
+        llm_core._SESSION_CACHE_KEYS.clear()
+    except Exception:
+        pass
+    yield

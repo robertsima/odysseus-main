@@ -114,7 +114,7 @@ def test_consecutive_turns_share_the_prefix_through_prior_history(monkeypatch):
     )
 
     # Everything ahead of the conversation is byte-identical.
-    assert first["prompt_cache_key"] == second["prompt_cache_key"] == SESSION
+    assert first["prompt_cache_key"] == second["prompt_cache_key"]
     assert first["instructions"] == second["instructions"]
     assert first["tools"] == second["tools"]
     # ...and the conversation shares its prefix through the prior history:

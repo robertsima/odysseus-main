@@ -198,4 +198,4 @@ def test_affinity_headers_do_not_overwrite_caller_headers(monkeypatch):
 def test_streaming_codex_requests_send_the_affinity_headers():
     from src import llm_core
     src = inspect.getsource(llm_core._stream_llm_inner)
-    assert "h = _chatgpt_affinity_headers(_provider_headers(provider, headers), session_id)" in src
+    assert "h = _chatgpt_affinity_headers(h, payload.get(\"prompt_cache_key\") or session_id)" in src

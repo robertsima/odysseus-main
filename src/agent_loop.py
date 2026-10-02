@@ -1101,14 +1101,45 @@ _ADMIN_SCHEMA_NAMES = frozenset([
 ])
 _TOOL_SELECTION_TIMEOUT_SECONDS = 1.5
 # How many recent assistant rounds keep their encrypted Responses reasoning
-# items (re-ported from 8cca5a1e, lost in the 2026-09-18 upstream sync).
+# when it IS cut (re-ported from 8cca5a1e, lost in the 2026-09-18 upstream sync).
 _MAX_REASONING_REPLAY_ROUNDS = 3
-# Rounds the reasoning window may overrun before it is cut back in one edit.
-# Each cut rewrites earlier history and costs one uncached re-read of the
-# prompt: with a slack of 4 that happened every 5 rounds, the largest source of
-# uncached tokens in the 2026-10-02 logs (707k in one hour). 6 more rounds of
-# opaque items ride in the cached prefix instead.
-_REASONING_PRUNE_SLACK = 8
+# Reasoning items are no longer cut on a round schedule. OpenAI's tool-loop
+# guidance is to pass back every reasoning item since the last user message, and
+# Codex CLI never prunes inside a turn. 2026-10-02 logs: the 9-round prune was
+# the main rewrite behind 707k uncached tokens in an hour (18 `history_shrank`
+# rounds), because after a rewrite the provider falls back to an early cache
+# checkpoint (35,712 cached across five rewrites) and re-reads 30-80k tokens,
+# to save a few hundred cached tokens per item. Items are now cut only (a) in
+# the same edit as a ledger or trim rewrite, which breaks the prefix anyway, or
+# (b) when the carried `encrypted_content` passes this estimate, so a 200-round
+# turn cannot grow without bound.
+_REASONING_CARRY_CAP_TOKENS = 60_000
+_REASONING_CARRY_CAP_BUDGET_SHARE = 0.25
+# Encrypted content is base64 of the model's reasoning, so characters / 4
+# over-counts the tokens it bills. The over-count is deliberate: the cap errs
+# toward cutting a little early.
+_REASONING_CHARS_PER_TOKEN = 4
+
+
+def _reasoning_carried_tokens(messages: List[Dict]) -> int:
+    """Estimated tokens of encrypted reasoning the history carries."""
+    chars = 0
+    for m in messages:
+        if m.get("role") == "assistant":
+            for item in m.get("reasoning_items") or ():
+                if isinstance(item, dict):
+                    chars += len(item.get("encrypted_content") or "")
+    return chars // _REASONING_CHARS_PER_TOKEN
+
+
+def _cut_reasoning_items(messages: List[Dict], window: int) -> int:
+    """Drop reasoning items from all but the newest `window` assistant turns that
+    carry them. Returns how many turns lost theirs."""
+    turns = [m for m in messages if m.get("role") == "assistant" and m.get("reasoning_items")]
+    cut = turns[:-window] if window > 0 else turns
+    for m in cut:
+        m.pop("reasoning_items", None)
+    return len(cut)
 
 
 def _is_ollama_openai_compat_url(endpoint_url: str) -> bool:
@@ -4536,8 +4567,24 @@ def _resolve_tool_blocks(
 # 0.6 skips 8 of 9 batches (prompts up to ~118k estimated in a 200k budget),
 # about 114k uncached tokens avoided for ~17k of cached-rate savings forgone,
 # and still leaves 40% of the budget -- several research rounds -- before trim.
+#
+# 2026-10-02 retune: the gate is the HIGH watermark and a collapse leaves the
+# prompt near the keep window (119k -> 66k and 138k -> 86k that day, about 0.3-0.4
+# of the budget), so the span between them decides how often the prefix breaks.
+# Each break re-reads 30-80k tokens uncached. On a 200k budget (a 400k window is
+# capped by `agent_input_token_hard_max`) 0.7 fires at 140k and leaves 60k, ~12
+# max-size read_file rounds, before the trim at 200k. On a 109k budget (a 128k
+# window at 0.85 headroom) 0.7 would leave 33k, too little, so small budgets keep
+# 0.6 (65k, 44k of room). The span to the ~0.3 low mark is 80k vs 60k, so large
+# windows fire about a third less often.
 _LEDGER_PRESSURE_RATIO = 0.6
+_LEDGER_PRESSURE_RATIO_LARGE = 0.7
+_LEDGER_LARGE_BUDGET_TOKENS = 150_000
 _LEDGER_REWIND_RATIO = 0.85
+
+
+def _ledger_pressure_ratio(budget: int) -> float:
+    return _LEDGER_PRESSURE_RATIO_LARGE if budget >= _LEDGER_LARGE_BUDGET_TOKENS else _LEDGER_PRESSURE_RATIO
 
 
 _TOOL_IMAGE_MODEL_RE = re.compile(
@@ -4728,13 +4775,11 @@ def _append_tool_results(
     # view_image, they go in ONE user message after the round's tool messages. It
     # is harness-sourced (HARNESS_USER_SOURCES, untrusted) and lives only in this
     # in-turn list, which is never saved to chat history, so no base64 is
-    # persisted. Older ones are pruned in batches (prune_tool_images) so the
-    # cached prefix is rewritten once per few image rounds, not every round.
+    # persisted. Older ones are pruned only in the same edit as another history rewrite,
+    # or past a cap (prune_tool_images), never on their own schedule.
     # This sits before the ledger's pressure gate below, which can `return`.
     try:
         from src.agent_tools.preview_tools import model_image_followup
-        from src.context_compactor import prune_tool_images
-
         _image_records = []
         for _j, _rec in enumerate(tool_result_records):
             if not isinstance(_rec, dict):
@@ -4746,75 +4791,67 @@ def _append_tool_results(
         _image_msg = model_image_followup(_image_records, accept_images=accept_tool_images)
         if _image_msg is not None:
             messages.append(_image_msg)
-        prune_tool_images(messages)
     except Exception as _image_exc:
         logger.warning("[agent] tool images skipped: %s", _image_exc)
 
-    # Encrypted Responses reasoning is the thread that keeps a multi-round turn
-    # coherent (2026-10-01 logs: 37-142 output tokens per round, one call per
-    # round, because the loop dropped the items and the model re-planned from
-    # the transcript each time). Keep a sliding window of recent rounds, not
-    # every round of a 30-round run. Pruning is batched: popping one item per
-    # round edits an already-sent assistant turn mid-input and moves the
-    # provider's cache boundary every round (cached=16896 flat across 28 rounds
-    # on 2026-09-10). The window may overrun by a slack of the same size, then
-    # is cut back in one go, so the prefix breaks once per ~window rounds.
-    _reasoning_turns = [
-        _m for _m in messages
-        if _m.get("role") == "assistant" and _m.get("reasoning_items")
-    ]
-    _replay_window = max(1, int(reasoning_replay_rounds or _MAX_REASONING_REPLAY_ROUNDS))
-    if len(_reasoning_turns) > _replay_window + max(_REASONING_PRUNE_SLACK, _replay_window):
-        for _m in _reasoning_turns[:-_replay_window]:
-            _m.pop("reasoning_items", None)
-        # The prefix breaks here anyway, so prune old images in the same edit
-        # instead of on their own schedule (one cache miss instead of two).
-        try:
-            from src.context_compactor import prune_tool_images
-
-            prune_tool_images(messages, force=True)
-        except Exception as _image_exc:
-            logger.warning("[agent] aligned image prune skipped: %s", _image_exc)
-
-    # Execution ledger, re-ported from the fork (lost in the 2026-09-18 upstream
-    # sync, which left `recall_tool_output` offered with nothing to recall).
-    # Completed tool exchanges older than the keep window collapse to what is
-    # still true (the path read, the query run, ids, outcome) plus a
-    # `toolout-...` ref to the verbatim text. Without it every result stayed in
-    # the loop's history in full: a research turn grew to 700k tokens and the
-    # per-round trim to the context budget dropped whole results, so the agent
-    # re-read what it had lost and every round was a full-prompt cache miss.
-    # Batched (see the design note in context_compactor) so it invalidates the
-    # cached prefix once per window, not every round. Under a budget it waits
-    # for context pressure: a batch re-bills everything after its first rewrite
-    # and is paid back only at the cached rate on the rounds left: on
-    # 2026-09-27 nine batches on 40-108k prompts in a 400k window re-sent ~165k
-    # tokens uncached to save ~17k. Never raises.
+    # ONE history rewrite, not three. Editing anything already sent breaks the
+    # provider's cached prefix at its first changed item and everything after is
+    # re-read uncached, so the ledger collapse, the reasoning cut and the image
+    # prune run together or not at all. Trigger: the ledger (context pressure),
+    # or a safety cap on carried reasoning or images. A cap that fires also
+    # lets the ledger run past its pressure gate, since the prefix breaks early
+    # anyway and the collapse is then nearly free. (The per-request trim in
+    # `_trim_route_request_messages` joins the same cut when it drops history.)
+    _rewrite_kind = ""
     try:
-        from src.context_compactor import compact_tool_exchanges
+        from src.context_compactor import (
+            compact_tool_exchanges, count_live_tool_images, note_history_rewrite,
+            prune_tool_images, TOOL_IMAGES_CAP,
+        )
 
+        # The cap also scales with the route's budget: 60k of opaque items is
+        # 55% of a 109k budget (a 128k window) but only 30% of 200k, so it is
+        # held to a quarter of the budget when that is smaller.
+        _reasoning_cap = _REASONING_CARRY_CAP_TOKENS
+        if ledger_budget and ledger_budget > 0:
+            _reasoning_cap = min(_reasoning_cap, int(ledger_budget * _REASONING_CARRY_CAP_BUDGET_SHARE))
+        _reasoning_over = _reasoning_carried_tokens(messages) > _reasoning_cap
+        _images_over = count_live_tool_images(messages) > TOOL_IMAGES_CAP
+        _run_ledger = True
         _ledger_prompt = 0
         _ledger_rewind = False
         if ledger_budget and ledger_budget > 0:
             _ledger_prompt = estimate_tokens(messages)
-            if _ledger_prompt < ledger_budget * _LEDGER_PRESSURE_RATIO:
-                return
             _ledger_rewind = _ledger_prompt >= ledger_budget * _LEDGER_REWIND_RATIO
-        # The chat's id goes on each stored original, so recall_tool_output
-        # lists it in this chat only (it was stored with none and listed in
-        # every chat).
-        _ledger_stats = compact_tool_exchanges(messages, rewind=_ledger_rewind, session_id=session_id)
-        if _ledger_stats.get("entries"):
-            logger.info(
-                "[agent] execution ledger: %s exchange(s) in %s round(s) compacted, "
-                "%s -> %s chars (round %s) first_index=%s prompt=%s budget=%s rewind=%s",
-                _ledger_stats["entries"], _ledger_stats["groups"],
-                _ledger_stats["chars_before"], _ledger_stats["chars_after"],
-                round_num, _ledger_stats.get("first_index", -1),
-                _ledger_prompt or "-", ledger_budget or "-", _ledger_rewind,
-            )
+            if _ledger_prompt < ledger_budget * _ledger_pressure_ratio(ledger_budget):
+                _run_ledger = _reasoning_over or _images_over
+        if _run_ledger:
+            # The chat's id goes on each stored original, so recall_tool_output
+            # lists it in this chat only (it was stored with none and listed in
+            # every chat).
+            _ledger_stats = compact_tool_exchanges(messages, rewind=_ledger_rewind, session_id=session_id)
+            if _ledger_stats.get("entries"):
+                _rewrite_kind = "ledger"
+                logger.info(
+                    "[agent] execution ledger: %s exchange(s) in %s round(s) compacted, "
+                    "%s -> %s chars (round %s) first_index=%s prompt=%s budget=%s rewind=%s",
+                    _ledger_stats["entries"], _ledger_stats["groups"],
+                    _ledger_stats["chars_before"], _ledger_stats["chars_after"],
+                    round_num, _ledger_stats.get("first_index", -1),
+                    _ledger_prompt or "-", ledger_budget or "-", _ledger_rewind,
+                )
+        if not _rewrite_kind:
+            if _reasoning_over:
+                _rewrite_kind = "reasoning"
+            elif _images_over:
+                _rewrite_kind = "images"
+        if _rewrite_kind:
+            _replay_window = max(1, int(reasoning_replay_rounds or _MAX_REASONING_REPLAY_ROUNDS))
+            _cut_reasoning_items(messages, _replay_window)
+            prune_tool_images(messages, force=True)
+            note_history_rewrite(session_id, _rewrite_kind)
     except Exception as _ledger_exc:
-        logger.warning("[agent] execution ledger skipped: %s", _ledger_exc)
+        logger.warning("[agent] history rewrite skipped: %s", _ledger_exc)
 
 
 def _compute_final_metrics(
@@ -7298,6 +7335,12 @@ async def stream_agent_loop(
                 hard_max=hard_max,
             )
             _route_input_budgets[(candidate_url, candidate_model)] = int(effective_budget or 0)
+            _trim_key = (candidate_url, candidate_model)
+            _trim_system_key = ("system-trim",) + _trim_key
+            _dropped_before = (
+                len(_route_trim_dropped.get(_trim_key) or ())
+                + len(_route_trim_dropped.get(_trim_system_key) or ())
+            )
             trimmed_messages = _sticky_trim(
                 _route_trim_dropped,
                 (candidate_url, candidate_model),
@@ -7311,6 +7354,24 @@ async def stream_agent_loop(
                     target_ratio=_AGENT_TRIM_TARGET_RATIO,
                 ),
             )
+            if (
+                len(_route_trim_dropped.get(_trim_key) or ())
+                + len(_route_trim_dropped.get(_trim_system_key) or ())
+            ) > _dropped_before:
+                # The trim just cut deeper, so the cached prefix breaks on this
+                # request regardless. Cut the opaque reasoning items and old
+                # tool images in the same edit (they are otherwise only cut
+                # past a cap), on the loop's history so later rounds keep the
+                # cut, and on this request's copies.
+                try:
+                    from src.context_compactor import note_history_rewrite, prune_tool_images
+
+                    for _target in (messages, trimmed_messages):
+                        _cut_reasoning_items(_target, _MAX_REASONING_REPLAY_ROUNDS)
+                        prune_tool_images(_target, force=True)
+                    note_history_rewrite(session_id, "trim")
+                except Exception:
+                    logger.debug("trim-aligned reasoning/image cut skipped", exc_info=True)
             after_trim_tokens = estimate_tokens(trimmed_messages)
             if after_trim_tokens < before_trim_tokens:
                 logger.info(
@@ -9842,9 +9903,14 @@ async def stream_agent_loop(
                         round_num=round_num,
                         profile=_offload_profile or None,
                     )
-                    if _offload_record is not None and isinstance(_relevant_tools, set):
-                        # The excerpt tells the model to call this; offer it.
-                        _relevant_tools.add("recall_tool_output")
+                    if _offload_record is not None:
+                        # The saved work trail (turn_trail.render_model_trail)
+                        # names this ref so a later turn recalls the whole output.
+                        if isinstance(_offload_record, dict) and _offload_record.get("ref"):
+                            tool_event["output_ref"] = _offload_record["ref"]
+                        if isinstance(_relevant_tools, set):
+                            # The excerpt tells the model to call this; offer it.
+                            _relevant_tools.add("recall_tool_output")
                 except Exception as _offload_exc:
                     logger.warning("[tool-output] offload skipped: %s", _offload_exc)
             tool_results.append(formatted)
@@ -9913,7 +9979,12 @@ async def stream_agent_loop(
         # tool_blocks but stayed in native_tool_calls, so indexing results by
         # native position mis-attached each result to the wrong tool_call_id
         # (and left the real call answered empty).
-        _append_tool_results(messages, round_response, converted_calls,
+        # Off the event loop: the ledger can collapse dozens of results in one
+        # call (regexes, store writes), which froze every chat for ~4.5 s on
+        # 2026-10-02. `messages` is only touched by this coroutine meanwhile
+        # (steers are queued, not appended, until after this returns).
+        await asyncio.to_thread(
+                             _append_tool_results, messages, round_response, converted_calls,
                              tool_results, tool_result_texts, used_native, round_num,
                              round_reasoning=round_reasoning,
                              responses_phase=round_responses_phase,

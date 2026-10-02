@@ -149,15 +149,15 @@ def test_non_vision_model_gets_a_text_note_not_pixels():
     assert not al._model_takes_tool_images("qwen2.5-coder-7b", "")
 
 
-def test_old_images_are_pruned_once_and_in_a_batch():
+def test_images_are_not_pruned_on_a_schedule_only_past_the_cap():
     messages = [{"role": "user", "content": "go"}]
     live_counts = []
-    for n in range(1, 9):
+    for n in range(1, 16):
         _round(messages, n)
         live_counts.append(len(_live(messages)))
-    assert live_counts[:4] == [1, 2, 3, 4]   # nothing touched inside the window
-    assert live_counts[4] == 2               # the 5th image cuts back to keep=2 at once
-    assert max(live_counts) <= 5
+    # No schedule: every image stays until the carried count passes the cap (12).
+    assert live_counts[:12] == list(range(1, 13))
+    assert live_counts[12] == 2          # the 13th image cuts back to keep=2 at once
     # Placeholders name what they were and carry no pixels.
     live = _live(messages)
     pruned = [m for m in _image_msgs(messages) if all(m is not x for x in live)]
@@ -166,7 +166,7 @@ def test_old_images_are_pruned_once_and_in_a_batch():
     assert B64 not in json.dumps(pruned)
     # Nothing already sent is rewritten a second time while the window refills.
     before = json.dumps(messages[:12])
-    _round(messages, 9)
+    _round(messages, 16)
     assert json.dumps(messages[:12]) == before
     assert prune_tool_images(messages) == 0
 
@@ -187,7 +187,7 @@ def test_loop_never_writes_its_messages_to_chat_history():
     assert "history.append" not in inspect.getsource(al)
 
 
-def test_prune_tool_images_force_skips_the_slack():
+def test_prune_tool_images_force_cuts_below_the_cap():
     from src.context_compactor import TOOL_IMAGES_SOURCE, prune_tool_images
 
     def img(i):
@@ -195,6 +195,6 @@ def test_prune_tool_images_force_skips_the_slack():
                 "content": [{"type": "text", "text": f"{i}. shot"},
                             {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}}]}
 
-    msgs = [img(i) for i in range(1, 5)]  # keep=2, slack=2 -> 4 is inside the slack
-    assert prune_tool_images(msgs, keep=2, slack=2) == 0
-    assert prune_tool_images(msgs, keep=2, slack=2, force=True) == 2
+    msgs = [img(i) for i in range(1, 5)]  # 4 images, well under the cap of 12
+    assert prune_tool_images(msgs, keep=2) == 0
+    assert prune_tool_images(msgs, keep=2, force=True) == 2

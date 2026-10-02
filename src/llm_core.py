@@ -7,6 +7,7 @@ import time
 import json
 import logging
 import hashlib
+from collections import OrderedDict
 import threading
 import re
 import os
@@ -1715,8 +1716,11 @@ def _build_chatgpt_responses_payload(
     target_url_hint: str = "",
     cache_key: Optional[str] = None,
     allowed_tools: Optional[List[str]] = None,
+    cache_scope: str = "",
 ) -> Dict:
-    """``allowed_tools`` (src/stable_tools.py): ``tools`` is the chat's whole
+    """``cache_scope`` is the account the bearer belongs to; it keeps the shared
+    prompt_cache_key (_shared_prompt_cache_key) from crossing accounts.
+    ``allowed_tools`` (src/stable_tools.py): ``tools`` is the chat's whole
     declared list, sent unchanged so the cached prefix survives, and only these
     names may be called this round (none: a tool-free round)."""
     from src.chatgpt_subscription import build_responses_input, build_responses_tools
@@ -1778,7 +1782,9 @@ def _build_chatgpt_responses_payload(
     # shards and miss a prefix it holds elsewhere. Codex CLI sends the same
     # field for the same reason.
     if cache_key and _responses_prompt_cache_key_enabled():
-        payload["prompt_cache_key"] = str(cache_key)[:128]
+        payload["prompt_cache_key"] = _shared_prompt_cache_key(
+            str(cache_key), model, payload, cache_scope
+        )[:128]
     # How much the model thinks before each step. Unset, the provider default
     # applied to every round of every agent, including workers that only skim
     # search results, and a round's first event took 4-16 s even at 95%+ cache
@@ -1943,6 +1949,15 @@ def _log_prompt_prefix(session_id: Optional[str], model: str, payload: dict) -> 
             extra += " callable=%d" % len(choice.get("tools") or [])
         elif choice == "none" and raw_tools:
             extra += " callable=0"
+        # What the agent loop rewrote since the last request: reasoning | images |
+        # ledger | trim | none. A `history_shrank` round in 2026-10-02's logs could
+        # not be traced to its cause without it.
+        try:
+            from src.context_compactor import pop_history_rewrite
+
+            extra += " rewrite=" + pop_history_rewrite(session_id)
+        except Exception:
+            extra += " rewrite=none"
         # `changed=` stays the last field: existing log readers split on it.
         logger.info(
             "[prompt-prefix] session=%s model=%s instructions=%s tools=%s(%d) input_items=%d%s changed=%s",
@@ -1951,6 +1966,68 @@ def _log_prompt_prefix(session_id: Optional[str], model: str, payload: dict) -> 
         )
     except Exception:
         logger.debug("prompt-prefix fingerprint skipped", exc_info=True)
+
+
+# session id -> the prompt_cache_key its first request chose. Bounded; a restart
+# or eviction only costs one re-derivation (one possible cache miss).
+_SESSION_CACHE_KEYS: "OrderedDict[str, str]" = OrderedDict()
+_SESSION_CACHE_KEYS_MAX = 4096
+
+
+def _shared_prompt_cache_key_enabled() -> bool:
+    try:
+        from src.settings import get_setting
+        return bool(get_setting("chatgpt_shared_prompt_cache_key", False))
+    except Exception:
+        return False
+
+
+def _shared_prompt_cache_key(session_id: str, model: str, payload: Dict, scope: str = "") -> str:
+    """The prompt_cache_key for this session's Responses requests.
+
+    2026-10-02 production log: two critic workers had identical instructions
+    (fc278b1473) and tools (7483dc1e8f) and both first requests were 0% cached,
+    because the key was the session id and OpenAI routes on prefix hash plus
+    key. New chats start 25-38k tokens in, and workers start often.
+
+    The first request of a session derives the key from model, instructions and
+    declared tools, so sessions with the same prefix share a routing key. Later
+    requests reuse it even after tools or instructions change: the key must stay
+    fixed for one session so its own rounds keep landing on the same shard.
+    `scope` (the ChatGPT account) is hashed in so two accounts never share a
+    key; OpenAI scopes caches per account anyway. Off switch:
+    `chatgpt_shared_prompt_cache_key` (falls back to the session id).
+    """
+    if not _shared_prompt_cache_key_enabled():
+        return session_id
+    remembered = _SESSION_CACHE_KEYS.get(session_id)
+    if remembered:
+        _SESSION_CACHE_KEYS.move_to_end(session_id)
+        return remembered
+    try:
+        digest = hashlib.sha256(json.dumps(
+            [scope, model, payload.get("instructions") or "", payload.get("tools") or []],
+            sort_keys=True, default=str, ensure_ascii=False,
+        ).encode("utf-8")).hexdigest()[:32]
+    except Exception:
+        return session_id
+    key = f"ody-{digest}"
+    _SESSION_CACHE_KEYS[session_id] = key
+    while len(_SESSION_CACHE_KEYS) > _SESSION_CACHE_KEYS_MAX:
+        _SESSION_CACHE_KEYS.popitem(last=False)
+    return key
+
+
+def _bearer_scope(h: Dict[str, str]) -> str:
+    """Account identity of the request's bearer, "" when unreadable."""
+    try:
+        from src.chatgpt_subscription import _token_identity
+
+        token = str((h or {}).get("Authorization") or "").removeprefix("Bearer ").strip()
+        ident = _token_identity(token) if token else None
+        return "|".join(ident) if ident else ""
+    except Exception:
+        return ""
 
 
 def _responses_prompt_cache_key_enabled() -> bool:
@@ -3917,12 +3994,16 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         )
     elif provider == "chatgpt-subscription":
         target_url = _normalize_chatgpt_subscription_url(url)
-        h = _chatgpt_affinity_headers(_provider_headers(provider, headers), session_id)
+        h = _provider_headers(provider, headers)
         payload = _build_chatgpt_responses_payload(
             model, messages_copy, temperature, max_tokens,
             stream=True, tools=tools, tool_choice_none=tool_choice_none,
             target_url_hint=target_url, cache_key=session_id, allowed_tools=allowed_tools,
+            cache_scope=_bearer_scope(h),
         )
+        # The routing headers follow the payload's key, so they are shared
+        # exactly when the body key is.
+        h = _chatgpt_affinity_headers(h, payload.get("prompt_cache_key") or session_id)
         _log_prompt_prefix(session_id, model, payload)
     else:
         target_url = _normalize_openai_chat_url(url)

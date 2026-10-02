@@ -571,4 +571,14 @@ def estimate_tokens(messages: List[Dict]) -> int:
                     args = str(args)  # some shapes store arguments as a dict
                 total += 4  # per tool-call overhead (id, type, wrapper)
                 total += int((len(str(name)) + len(args)) * 0.3)
+        # Encrypted Responses reasoning is replayed as input too. Since
+        # 2026-10-02 a turn carries it until a rewrite or a 60k cap instead of
+        # ~3 rounds, so leaving it out let the ledger and trim gates under-count
+        # a request by up to that cap (a 128k-window model could overflow).
+        # Same chars/4 rule as agent_loop._reasoning_carried_tokens.
+        reasoning = msg.get("reasoning_items")
+        if isinstance(reasoning, list):
+            for item in reasoning:
+                if isinstance(item, dict):
+                    total += len(item.get("encrypted_content") or "") // 4
     return total

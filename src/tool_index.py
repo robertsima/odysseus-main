@@ -447,9 +447,17 @@ class ToolIndex:
         # surfacing tools that no longer exist.
         indexed = False
         for lane in self._lanes:
+            # id -> stored text. A builtin whose indexed text is unchanged keeps
+            # its stored vector: every process start used to re-embed all of
+            # them (2026-10-02 audit). Collections are rebuilt when the embedding
+            # model changes (_get_or_reset_collection), so a matching text is
+            # still a valid vector. None = unknown, so embed everything.
+            stored: Optional[Dict[str, str]] = None
             try:
-                existing = lane.collection.get(where={"tool_type": "builtin"})
+                existing = lane.collection.get(where={"tool_type": "builtin"}, include=["documents"])
                 existing_ids = (existing or {}).get("ids") or []
+                existing_docs = (existing or {}).get("documents") or []
+                stored = dict(zip(existing_ids, existing_docs))
                 stale = [i for i in existing_ids if i not in set(ids)]
                 if stale:
                     lane.collection.delete(ids=stale)
@@ -458,12 +466,18 @@ class ToolIndex:
                 logger.debug(f"Stale-pruning skipped for {lane.name}: {e}")
 
             try:
-                lane.collection.upsert(
-                    ids=ids,
-                    documents=docs,
-                    embeddings=lane.encode(docs),
-                    metadatas=metadatas,
-                )
+                if stored is None:
+                    todo = list(range(len(ids)))
+                else:
+                    todo = [i for i, doc_id in enumerate(ids) if stored.get(doc_id) != docs[i]]
+                if todo:
+                    up_docs = [docs[i] for i in todo]
+                    lane.collection.upsert(
+                        ids=[ids[i] for i in todo],
+                        documents=up_docs,
+                        embeddings=lane.encode(up_docs),
+                        metadatas=[metadatas[i] for i in todo],
+                    )
                 indexed = True
             except Exception as e:
                 logger.warning("Builtin tool indexing failed in %s lane: %s", lane.name, e)
@@ -609,12 +623,9 @@ class ToolIndex:
         lane_priority = {LANE_CUSTOM: 0, LANE_FASTEMBED: 1}
         for lane in self._lanes:
             try:
-                count = lane.count()
-                if count == 0:
-                    continue
-                results = lane.collection.query(
+                results = lane.query(
+                    k,
                     query_embeddings=lane.encode([query]),
-                    n_results=min(k, count),
                     include=["metadatas", "distances", "documents"],
                 )
                 if not results or not results.get("metadatas"):

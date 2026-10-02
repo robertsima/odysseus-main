@@ -28,7 +28,9 @@ import json
 import logging
 import os
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -141,11 +143,18 @@ def tail_chars(profile=None) -> int:
     )
 
 
+_dir_ready: set = set()
+
+
 def _store_dir() -> str:
     from src.constants import DATA_DIR
 
     path = os.path.join(DATA_DIR, "tool_outputs")
-    os.makedirs(path, exist_ok=True)
+    # makedirs on every call was one more syscall per path lookup; the
+    # directory does not go away while the process runs.
+    if path not in _dir_ready:
+        os.makedirs(path, exist_ok=True)
+        _dir_ready.add(path)
     return path
 
 
@@ -189,6 +198,29 @@ def _chunk(text: str) -> List[str]:
     return chunks
 
 
+# Pruning walks the whole directory and stats every file. 2026-10-02: a ledger
+# collapse called store() 41-50 times in a second and each call ran _prune() on
+# the event loop; one burst blocked every chat for 4.45 s
+# (`[loop-lag] ... tool_output_store.py:206:_prune <- store`). Retention is
+# measured in days, so a sweep per minute is more than enough, and it runs on a
+# background thread so even a slow disk cannot hold the loop.
+_PRUNE_INTERVAL_SECONDS = 60.0
+_last_prune_at = 0.0
+_prune_lock = threading.Lock()
+_pool: Optional[ThreadPoolExecutor] = None
+
+
+def _background() -> ThreadPoolExecutor:
+    """One shared worker for indexing and pruning, so a burst of stores queues
+    behind it instead of spawning a thread or embedding on the caller."""
+    global _pool
+    if _pool is None:
+        with _prune_lock:
+            if _pool is None:
+                _pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tool-output-store")
+    return _pool
+
+
 def _prune(now: Optional[float] = None) -> None:
     """Drop stored outputs older than the retention window.
 
@@ -200,17 +232,31 @@ def _prune(now: Optional[float] = None) -> None:
     cutoff = now - _RETENTION_DAYS * 86400
     try:
         directory = _store_dir()
-        for name in os.listdir(directory):
-            if not name.startswith("toolout-"):
-                continue
-            path = os.path.join(directory, name)
-            try:
-                if os.path.getmtime(path) < cutoff:
-                    os.remove(path)
-            except OSError:
-                continue
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if not entry.name.startswith("toolout-"):
+                    continue
+                try:
+                    if entry.stat().st_mtime < cutoff:
+                        os.remove(entry.path)
+                except OSError:
+                    continue
     except OSError as exc:  # pragma: no cover - defensive
         logger.debug("tool output prune skipped: %s", exc)
+
+
+def _maybe_prune() -> None:
+    """Schedule at most one prune per interval, off the caller's thread."""
+    global _last_prune_at
+    now = time.monotonic()
+    with _prune_lock:
+        if _last_prune_at and now - _last_prune_at < _PRUNE_INTERVAL_SECONDS:
+            return
+        _last_prune_at = now
+    try:
+        _background().submit(_prune)
+    except RuntimeError:  # pragma: no cover - interpreter shutting down
+        pass
 
 
 _lane_cache: List[Any] = []
@@ -333,27 +379,22 @@ def store(
         logger.warning("tool output %s could not be written: %s", ref, exc)
         return None
 
-    # Embedding a long output is CPU work and the caller is mid-round inside
-    # the event loop, so hand it to a thread when there is one to hand it to.
-    # The excerpt the model gets back does not depend on the index: exact
-    # slices come off disk, and a query that arrives before indexing finishes
-    # falls back to the keyword scan.
+    # Embedding a long output is CPU work, and the caller is mid-round, often on
+    # the event loop. Hand it to the shared worker whether or not a loop is
+    # running (the agent loop now calls this from a thread too). The excerpt the
+    # model gets back does not depend on the index: exact slices come off disk,
+    # and a query that arrives before indexing finishes falls back to the
+    # keyword scan.
     record["indexed_chunks"] = None
     try:
-        import asyncio
-
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-    if loop is not None:
-        loop.run_in_executor(None, _index, ref, text, dict(record))
-    else:
+        _background().submit(_index, ref, text, dict(record))
+    except RuntimeError:  # pragma: no cover - interpreter shutting down
         record["indexed_chunks"] = _index(ref, text, record)
-    _prune()
+    _maybe_prune()
     logger.info(
         "[tool-output] offloaded %s chars from %s as %s (indexing=%s)",
         record["chars"], tool or "tool", ref,
-        "background" if loop is not None else record["indexed_chunks"],
+        "background" if record["indexed_chunks"] is None else record["indexed_chunks"],
     )
     return record
 

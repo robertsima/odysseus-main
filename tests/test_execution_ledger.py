@@ -206,7 +206,8 @@ def test_ids_and_versions_outside_fences_survive():
     entry = ledger_entry(result, ["toolout-1111111111"])
     assert "doc_7f3a91" in entry
     assert "v1" in entry
-    assert "zzzz" not in entry
+    # The bulk is gone; only a bounded excerpt of its first line remains.
+    assert "z" * 200 not in entry
 
 
 # ── What must not be collapsed ──────────────────────────────────────────────
@@ -530,3 +531,68 @@ def test_a_26_round_turn_gets_materially_cheaper():
     # round is what actually flattens.
     assert after[-1] < before[-1] * 0.45
     assert sum(after) < sum(before) * 0.6
+
+
+# ── 2026-10-02: stubs carry what the model recalled, small results stay inline ──
+
+def test_the_stub_keeps_the_first_and_last_lines_of_a_fenced_output():
+    body = "\n".join(f"row {i}" for i in range(400))
+    result = f"### bash: make test\n```\n{body}\n```\n**exit_code:** 2"
+    entry = ledger_entry(result, ["toolout-1111111111"])
+    assert "make test" in entry            # tool and arguments
+    assert "exit_code:** 2" in entry       # exit status
+    assert "row 0" in entry and "row 399" in entry
+    assert "row 200" not in entry
+    assert len(entry) < 1200 + 400
+
+
+def test_a_small_unstored_result_is_left_inline_and_not_written(monkeypatch):
+    import src.tool_output_store as tos
+
+    calls = []
+    real = tos.store
+    monkeypatch.setattr(tos, "store", lambda *a, **k: (calls.append(1), real(*a, **k))[1])
+    small = "### update_plan: plan\n" + ("step line\n" * 70)       # ~730 chars
+    mid = "### bash: ls\n```\n" + "file.txt\n" * 300 + "```"       # ~2.7k chars
+    msgs = [{"role": "system", "content": "s"}, {"role": "user", "content": "go"}]
+    for i in range(LEDGER_KEEP_ROUNDS + LEDGER_SLACK_ROUNDS + 2):
+        msgs.extend(_native_round(i, small if i % 2 else mid))
+    before = [m.get("content") for m in msgs]
+    compact_tool_exchanges(msgs)
+    assert [m.get("content") for m in msgs] == before
+    assert calls == []
+
+
+def test_an_offload_excerpt_is_collapsed_without_a_second_store(monkeypatch):
+    import src.tool_output_store as tos
+
+    calls = []
+    monkeypatch.setattr(tos, "store", lambda *a, **k: calls.append(1))
+    excerpt = (
+        "### bash: cat big.log\n[Truncated bash output: 90,000 characters, stored as "
+        "`toolout-abcdef0123`. Read all of it with `recall_tool_output {\"ref\": \"toolout-abcdef0123\"}`.]\n"
+        + "line of log output\n" * 160
+        + "\n[... 80,000 of 90,000 characters held outside the conversation as `toolout-abcdef0123` ...]\n"
+        + "last line of log\n"
+    )
+    msgs = [{"role": "system", "content": "s"}, {"role": "user", "content": "go"}]
+    for i in range(LEDGER_KEEP_ROUNDS + LEDGER_SLACK_ROUNDS + 1):
+        msgs.extend(_native_round(i, excerpt))
+    stats = compact_tool_exchanges(msgs)
+    assert stats["entries"] >= 1
+    assert calls == []
+    entry = next(m["content"] for m in msgs if m.get("role") == "tool" and m.get(LEDGER_MARK))
+    assert "toolout-abcdef0123" in entry and "last line of log" in entry
+
+
+def test_the_rewrite_tag_is_consumed_once_and_expires(monkeypatch):
+    import src.context_compactor as cc
+
+    cc.note_history_rewrite("s1", "images")
+    assert cc.pop_history_rewrite("s1") == "images"
+    assert cc.pop_history_rewrite("s1") == "none"
+    cc.note_history_rewrite("s1", "bogus")
+    assert cc.pop_history_rewrite("s1") == "none"
+    cc.note_history_rewrite("s1", "trim")
+    monkeypatch.setattr(cc, "_REWRITE_TTL_SECONDS", -1.0)
+    assert cc.pop_history_rewrite("s1") == "none"

@@ -211,11 +211,9 @@ class MemoryVectorStore:
         lane_priority = {LANE_CUSTOM: 0, LANE_FASTEMBED: 1}
         for lane in self._lanes:
             try:
-                if lane.count() == 0:
-                    continue
-                results = lane.collection.query(
+                results = lane.query(
+                    k,
                     query_embeddings=lane.encode([query]),
-                    n_results=min(k, lane.count()),
                     include=["distances"],
                 )
                 for idx, mid in enumerate(results["ids"][0]):
@@ -237,11 +235,9 @@ class MemoryVectorStore:
 
         for lane in self._lanes:
             try:
-                if lane.count() == 0:
-                    continue
-                results = lane.collection.query(
+                results = lane.query(
+                    1,
                     query_embeddings=lane.encode([text]),
-                    n_results=1,
                     include=["distances"],
                 )
                 if results["ids"][0]:

@@ -1037,6 +1037,14 @@ register_all([
         group="Models", advanced=True,
     ),
     SettingSpec(
+        key="chatgpt_shared_prompt_cache_key", type="bool", label="Share ChatGPT prompt cache across chats",
+        help=("Chats and workers that start with the same instructions and tools share one cache key, so "
+              "the first request of a new chat can reuse an earlier chat's cached prefix. Off gives each chat its own key. "
+              "Experimental: parallel workers then share the backend's conversation routing headers; turn it off "
+              "if workers started together fail or stall."),
+        group="Models", advanced=True,
+    ),
+    SettingSpec(
         key="chatgpt_stable_tools", type="bool", label="Keep the tool list stable (GPT-5.6+)",
         help=("Send a chat's tools unchanged on every request and mark which ones may be called this turn, "
               "instead of re-sending a different list. A changed tool list makes the provider re-read the "

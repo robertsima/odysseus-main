@@ -281,3 +281,37 @@ def test_the_ledger_pointer_offers_the_bare_ref_read():
     entry = ledger_entry("### bash: cat big.log\nsome facts", ["toolout-0123456789"])
     assert '{"ref": "toolout-0123456789"}' in entry
     assert "do NOT re-run the tool" in entry
+
+
+def test_storing_many_outputs_does_not_walk_the_directory_each_time(store, monkeypatch):
+    """2026-10-02: a ledger collapse stored 41-50 outputs in one second and each
+    store() listed and stat'ed the whole directory on the event loop, blocking
+    every chat for 4.45 s. Pruning is now throttled and runs on a worker."""
+    store._last_prune_at = 0.0
+    walks = []
+    real_scandir, real_listdir, real_mtime = os.scandir, os.listdir, os.path.getmtime
+    monkeypatch.setattr(os, "scandir", lambda *a, **k: (walks.append("scandir"), real_scandir(*a, **k))[1])
+    monkeypatch.setattr(os, "listdir", lambda *a, **k: (walks.append("listdir"), real_listdir(*a, **k))[1])
+    monkeypatch.setattr(os.path, "getmtime", lambda *a, **k: (walks.append("getmtime"), real_mtime(*a, **k))[1])
+
+    for i in range(50):
+        assert store.store(f"payload {i}\n" * 50, tool="bash")
+    store._background().submit(lambda: None).result(timeout=10)
+
+    assert len(walks) <= 2, walks  # one throttled prune, never one per store
+    assert "getmtime" not in walks
+
+
+def test_prune_runs_off_the_calling_thread(store):
+    import threading
+
+    store._last_prune_at = 0.0
+    seen = []
+    original = store._prune
+    store._prune = lambda *a, **k: seen.append(threading.current_thread().name)
+    try:
+        store.store("x\n" * 100, tool="bash")
+        store._background().submit(lambda: None).result(timeout=10)
+    finally:
+        store._prune = original
+    assert seen and seen[0] != threading.current_thread().name

@@ -573,14 +573,14 @@ FUNCTION_TOOL_SCHEMAS = [
         "function": {
             "name": "recall_tool_output",
             "description": (
-                "Read back a tool result too large to keep in the conversation (only its head and tail stayed inline; the full text is stored under the `toolout-...` ref in that excerpt). Pass `ref` for the whole stored output (long ones page: call again with the `offset` each page names) or add `query` to search it; page through it rather than re-running the tool. No arguments lists what is stored."
+                "Read back a tool result too large to keep in the conversation (only its head and tail stayed inline; the full text is stored under the `toolout-...` ref in that excerpt), or one call from an earlier turn's work record (an `evt-...` ref). Pass `ref` for the whole stored output (long ones page: call again with the `offset` each page names) or add `query` to search it; page through it rather than re-running the tool. No arguments lists what is stored."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "ref": {
                         "type": "string",
-                        "description": "The `toolout-...` reference from the truncated tool result.",
+                        "description": "The `toolout-...` reference from the truncated tool result, or an `evt-...` reference from a work record.",
                     },
                     "query": {
                         "type": "string",

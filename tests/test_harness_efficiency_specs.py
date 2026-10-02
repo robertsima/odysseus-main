@@ -62,6 +62,7 @@ def test_no_mid_turn_system_appends_remain_in_the_round_loop():
 
 
 def test_prompt_cache_key_rides_on_the_responses_payload(monkeypatch):
+    monkeypatch.setattr("src.llm_core._shared_prompt_cache_key_enabled", lambda: False)
     payload = _build_chatgpt_responses_payload(
         "gpt-5.6-luna", [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}],
         0.7, 100, stream=True, cache_key="session-abc",

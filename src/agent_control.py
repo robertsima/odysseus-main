@@ -275,7 +275,10 @@ def persist_applied_steer(session, event: dict) -> None:
 # before a steer split it off. The model reads its own history, and an empty
 # assistant turn is rejected by some providers, so it needs words. The UI draws
 # the tool cards from metadata.tool_events and ignores this line.
-STEER_SPLIT_NO_TEXT = "[Ran tools; wrote no reply text before the user's next message.]"
+#
+# With tool events the model reads its work record (metadata.model_trail,
+# src/turn_trail.py) in place of this line; _model_view makes the swap.
+from src.turn_trail import STEER_SPLIT_NO_TEXT  # noqa: E402
 
 
 def persist_steer_split(session, *, content: str, metadata: dict) -> Optional[str]:

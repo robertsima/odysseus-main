@@ -832,6 +832,10 @@ async def _drain(sess, messages, state: Dict[str, Any], *, max_rounds: int, owne
             }
             if d.get("diff"):
                 ev["diff"] = d.get("diff")
+            # The work record a resumed worker reads (src/turn_trail.py) names
+            # the documents it created or changed.
+            if d.get("doc_id"):
+                ev["doc_id"] = d.get("doc_id")
             approval = d.get("ask_user")
             if isinstance(approval, dict):
                 # Saved with the reply, so the worker's chat shows the

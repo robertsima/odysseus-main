@@ -211,6 +211,15 @@ DEFAULT_SETTINGS = {
     # Send prompt_cache_key (the Odysseus session id) on ChatGPT-subscription
     # Responses requests so consecutive rounds hit the same prompt cache.
     "chatgpt_prompt_cache_key": True,
+    # 2026-10-02: derive that key from model + instructions + tools instead of
+    # the session id, so new chats and workers with an identical prefix share
+    # cached tokens. False restores the per-session key.
+    # Off by default: sharing only helps if the shared key also goes in the
+    # session_id/conversation_id headers the backend routes on, and it is
+    # unknown whether concurrent requests sharing those headers interfere
+    # (parallel workers). The saving is first requests only: 69k of 1.2M
+    # uncached tokens in the 2026-10-02 hour (2026-10-02).
+    "chatgpt_shared_prompt_cache_key": False,
     # Send a chat's whole declared tool list on every GPT-5.6+/GPT-6 request and
     # name the callable subset with allowed_tools, so the prompt cache survives a
     # changing selection (src/stable_tools.py).

@@ -690,7 +690,6 @@ class VectorRAG:
                 n_results=lambda lane: min(
                     (k * 6 if not allow_private else k * 3),
                     max(k, 20),
-                    lane.count(),
                 ),
                 where=where_filter,
                 include=["documents", "metadatas", "distances"],
@@ -713,7 +712,7 @@ class VectorRAG:
                     for lane, results in query_lanes(
                         self._lanes,
                         query,
-                        n_results=lambda lane: min(k, lane.count()),
+                        n_results=lambda lane: k,
                         where=where_filter,
                         where_document={"$contains": token},
                         include=["documents", "metadatas", "distances"],
@@ -786,7 +785,7 @@ class VectorRAG:
             for lane, results in query_lanes(
                 self._lanes,
                 query,
-                n_results=lambda lane: min(k, lane.count()),
+                n_results=lambda lane: k,
                 where=_with_clause(where_filter, {"note_key": {"$in": targets}}),
                 include=["documents", "metadatas", "distances"],
             ):

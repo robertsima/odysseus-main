@@ -14,6 +14,7 @@ paths they came from, so the agent can cite a source and only escalate to
 import asyncio
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -203,6 +204,53 @@ _RECALL_MAX_SLICE_CHARS = 8000
 _RECALL_FULL_CHARS = 20_000
 
 
+_EVT_REF_RE = re.compile(r"^evt-([0-9a-f]{8})-(\d{1,5})$")
+
+
+def _find_event(trail_id: str, index: int, session_id: Optional[str], owner: Optional[str]) -> Optional[Dict[str, Any]]:
+    """The saved tool event ``index`` of the message with ``trail_id``.
+
+    Searches the caller's own chat and its ancestors, same owner only (the
+    walk in attachment_access stops at a chat someone else owns).
+    """
+    if not session_id:
+        return None
+    try:
+        from core import database
+        from src.attachment_access import _lineage_session_ids
+
+        db = database.SessionLocal()
+        try:
+            chain = _lineage_session_ids(db, str(session_id), owner)
+            if not chain:
+                return None
+            rows = (
+                db.query(database.ChatMessage.meta_data)
+                .filter(
+                    database.ChatMessage.session_id.in_(chain),
+                    database.ChatMessage.role == "assistant",
+                    database.ChatMessage.meta_data.like(f"%{trail_id}%"),
+                )
+                .all()
+            )
+        finally:
+            db.close()
+    except Exception:
+        logger.warning("recall_tool_output: event lookup failed", exc_info=True)
+        return None
+    for (raw,) in rows:
+        try:
+            meta = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(meta, dict) or meta.get("trail_id") != trail_id:
+            continue
+        events = meta.get("tool_events")
+        if isinstance(events, list) and 0 <= index < len(events) and isinstance(events[index], dict):
+            return events[index]
+    return None
+
+
 class RecallToolOutputTool:
     """Read back a tool result that was too large to keep in the conversation.
 
@@ -224,12 +272,15 @@ class RecallToolOutputTool:
         query = raw
         session_id = ctx.get("session_id")
 
+        if ref.startswith("evt-"):
+            return await self._recall_event(ref, args, ctx)
+
         if ref and not store.is_ref(ref):
             return {
                 "error": (
                     f"recall_tool_output: {ref!r} is not a stored-output reference. "
-                    "Use the `toolout-...` id from the excerpt, or omit `ref` to list "
-                    "what is stored for this chat."
+                    "Use the `toolout-...` or `evt-...` id from the excerpt or the "
+                    "work record, or omit `ref` to list what is stored for this chat."
                 ),
                 "exit_code": 1,
             }
@@ -288,8 +339,49 @@ class RecallToolOutputTool:
             )
         return {"results": "\n\n".join(blocks)}
 
+    async def _recall_event(self, ref: str, args: Dict[str, Any], ctx: dict) -> Dict[str, Any]:
+        """Read back one tool call named in a saved turn's work record.
+
+        ``evt-<trail id>-<n>`` is the n-th tool event of a saved assistant
+        message (src/turn_trail.py). Looked up only in this chat and the chats
+        above it, all owned by the caller: a ref never reaches another
+        owner's transcript.
+        """
+        from src import tool_output_store as store
+
+        match = _EVT_REF_RE.match(ref)
+        if not match:
+            return {
+                "error": (
+                    f"recall_tool_output: {ref!r} is not one tool call. A ref in the work "
+                    "record looks like `evt-ab12cd34-3`; for a range such as evt-ab12cd34-3..9 "
+                    "read the calls one at a time."
+                ),
+                "exit_code": 1,
+            }
+        event = await asyncio.to_thread(
+            _find_event, match.group(1), int(match.group(2)), ctx.get("session_id"), ctx.get("owner"),
+        )
+        if event is None:
+            return {
+                "error": (
+                    f"recall_tool_output: `{ref}` is not in this chat's saved work. "
+                    "Check the ref against the work record, or re-run the tool."
+                ),
+                "exit_code": 1,
+            }
+        text = str(event.get("output") or "")
+        command = " ".join(str(event.get("command") or "").split())[:200]
+        if not text.strip():
+            return {"results": f"`{ref}`: {event.get('tool') or 'the tool'} saved no output text."}
+        return await self._read_slice(
+            store, ref, args, text=text, tool=str(event.get("tool") or "") or None,
+            command=command,
+        )
+
     async def _read_slice(self, store, ref: str, args: Dict[str, Any],
-                          text: Optional[str] = None) -> Dict[str, Any]:
+                          text: Optional[str] = None, tool: Optional[str] = None,
+                          command: str = "") -> Dict[str, Any]:
         if text is None:
             text = await asyncio.to_thread(store.load, ref)
         if text is None:
@@ -322,10 +414,10 @@ class RecallToolOutputTool:
             }
         end = offset + len(slice_text)
         record = await asyncio.to_thread(store.load_record, ref) or {}
-        tool = record.get("tool") or "the tool"
+        tool = tool or record.get("tool") or "the tool"
         if offset == 0 and end >= len(text):
             header = (f"`{ref}`: the complete stored output of {tool} "
-                      f"({len(text):,} characters)")
+                      f"({len(text):,} characters)" + (f", called as `{command}`" if command else ""))
             footer = ("\n\n[End of output. This is all of it: do not recall this ref again "
                       f"or re-run {tool}; answer from what is above.]")
             return {"results": f"{header}\n\n{slice_text}{footer}"}
