@@ -251,6 +251,10 @@ def test_workbench_draws_only_the_selected_tab(open_app, width):
     page = open_app(width)
     open_workbench(page)
     shot(page, "workbench")
+    if width <= 390:
+        tabs = page.eval("[...document.querySelectorAll('#workbench-modal [data-wb-tab]')].map(t => ({label:t.textContent.trim(), right:t.getBoundingClientRect().right, visible:getComputedStyle(t).display !== 'none'}))")
+        assert all(tab['visible'] and tab['right'] <= width + 1 for tab in tabs), tabs
+        assert any('Pull Requests' in tab['label'] for tab in tabs), tabs
     assert visible_panels(page) == ["activity"]
     for tab, label in (("changes", "Changes"), ("commits", "Commits"), ("prs", "Pull Requests"), ("activity", "Activity")):
         selector = f'#workbench-modal [data-wb-tab="{tab}"]'
@@ -299,7 +303,12 @@ def test_workbench_docks_beside_the_chat_and_keeps_working_tabs(open_app):
     time.sleep(0.4)
     shot(page, "workbench-docked")
     content = page.probe(".workbench-modal-content")
+    assert page.eval("document.getElementById('message').placeholder") == 'Message Scribe…'
     assert content["left"] > 600 and content["right"] <= 1441
+    for selector in ('.ag-run-summary', '.ag-run-timeline', '.ag-run-console', '.ag-run-detail'):
+        box = page.probe(selector)
+        assert box['visible'] and box['right'] <= 1440, (selector, box)
+    assert page.probe('.ag-run-detail')['top'] >= page.probe('.ag-run-console')['bottom']
     # The chat makes room and stays usable beside it.
     for selector in ("#chat-history", ".chat-input-bar", ".ag-context-rail"):
         assert page.probe(selector)["right"] <= content["left"] + 1, selector
@@ -396,6 +405,7 @@ def test_agents_dock_and_close_keep_working(open_app):
     time.sleep(0.4)
     shot(page, "agents-docked")
     content = page.probe(".agents-modal-content")
+    assert page.eval("document.getElementById('message').placeholder") == 'Message Scribe…'
     assert content["left"] > 500 and content["right"] <= 1441
     for selector in ("#chat-history", ".chat-input-bar", ".ag-context-rail"):
         assert page.probe(selector)["right"] <= content["left"] + 1, selector

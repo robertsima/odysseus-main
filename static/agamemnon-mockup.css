@@ -96,7 +96,7 @@ html[data-theme="dark"] .ag-context-rail dl div{display:flex;gap:6px;margin:0;wh
 html[data-theme="dark"] .ag-context-rail dl div:first-child{display:none}
 html[data-theme="dark"] .ag-context-rail dd{margin:0;color:var(--ag-text)}
 html[data-theme="dark"] .ag-context-rail i{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--ag-gold);margin-right:6px}
-html[data-theme="dark"] .ag-context-rail button{display:block;width:auto;height:auto;min-height:32px;margin:0;padding:6px 11px;text-align:left;white-space:nowrap;color:var(--ag-text);background:var(--ag-raised);border:1px solid var(--ag-border-strong);border-radius:0;font:500 13px 'Space Grotesk';cursor:pointer}
+html[data-theme="dark"] .ag-context-rail button{display:block;width:auto;height:auto;min-height:44px;margin:0;padding:6px 11px;text-align:left;white-space:nowrap;color:var(--ag-text);background:var(--ag-raised);border:1px solid var(--ag-border-strong);border-radius:0;font:500 13px 'Space Grotesk';cursor:pointer}
 html[data-theme="dark"] .ag-context-rail button:hover{border-color:var(--ag-gold);color:var(--ag-gold)}
 html[data-theme="dark"] .ag-context-rail button:focus-visible{outline:2px solid var(--ag-gold);outline-offset:2px}
 
@@ -216,9 +216,12 @@ html[data-theme="dark"] #workbench-modal .workbench-modal-body>.wb-panel{positio
 html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-body>.wb-panel{height:auto;min-height:380px}
 html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .wb-activity{min-height:280px;max-height:500px;overflow:auto}
 html[data-theme="dark"] .wb-panel[data-wb-panel="activity"]::after{content:none!important}
-/* Docked: the run summary would crowd out the working tabs in a side panel. */
-html[data-theme="dark"] #workbench-modal.modal-right-docked .ag-run-control,html[data-theme="dark"] #workbench-modal.modal-right-docked .ag-run-detail,
-html[data-theme="dark"] #workbench-modal.modal-left-docked .ag-run-control,html[data-theme="dark"] #workbench-modal.modal-left-docked .ag-run-detail{display:none}
+/* Docking rearranges the same Activity panel instead of silently removing
+   run context. The three readouts have independent scroll regions so the
+   feed remains accessible immediately below, even in a narrow side panel. */
+html[data-theme="dark"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .ag-run-control{display:grid;grid-template-rows:auto minmax(90px,110px) minmax(90px,110px);gap:8px}
+html[data-theme="dark"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .ag-run-control>section{padding:12px 14px}
+html[data-theme="dark"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .ag-run-detail{display:block;max-height:150px;padding:12px 14px}
 html[data-theme="dark"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .wb-panel[data-wb-panel="activity"]{display:flex;flex-direction:column}
 html[data-theme="dark"] #workbench-modal .wb-panel.hidden{display:none!important}
 
@@ -245,6 +248,7 @@ html[data-theme="dark"] #workbench-modal .wb-panel.hidden{display:none!important
  html[data-theme="dark"] .ag-context-rail section:has(dl),html[data-theme="dark"] .ag-context-rail h3{display:none}
  html[data-theme="dark"] .ag-context-rail section:has(>button){display:flex;flex-direction:row;gap:6px}
  html[data-theme="dark"] .ag-context-rail button{padding:6px 9px;font-size:12.5px}
+ html[data-theme="dark"] #workbench-modal .workbench-modal-body>.wb-tabs{flex-wrap:wrap!important;overflow:visible!important}
  html[data-theme="dark"] .ag-console-hero{grid-template-columns:64px minmax(0,1fr);row-gap:8px}
  html[data-theme="dark"] .ag-console-robot-bay{width:64px;height:64px}
  html[data-theme="dark"] .ag-console-status{grid-column:1/-1;flex-direction:row;flex-wrap:wrap;align-items:center;justify-content:space-between}
