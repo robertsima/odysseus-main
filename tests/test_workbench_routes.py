@@ -86,6 +86,15 @@ async def test_repo_endpoints_confine_and_answer(env, monkeypatch):
     assert ch["files"][0]["path"] == "f.txt" and ch["files"][0]["additions"] == 1
     df = await ep[("GET", "/api/workbench/repo/diff")](_req(), path=str(repo), file="f.txt", base=None, commit=None)
     assert "+two" in df["diff"]
+    opened = await ep[("GET", "/api/workbench/repo/file")](_req(), path=str(repo), file="f.txt", ref="worktree")
+    saved = await ep[("PUT", "/api/workbench/repo/file")](_req(), payload={
+        "path": str(repo), "file": "f.txt", "version": opened["version"], "content": "one\nnew\n"})
+    assert (repo / "f.txt").read_text() == "one\nnew\n" and saved["version"] != opened["version"]
+    tracked = await ep[("GET", "/api/workbench/repo/files")](_req(), path=str(repo), query="f.txt")
+    assert tracked == {"files": ["f.txt"], "truncated": False}
+    with pytest.raises(HTTPException, match="changed on disk"):
+        await ep[("PUT", "/api/workbench/repo/file")](_req(), payload={
+            "path": str(repo), "file": "f.txt", "version": opened["version"], "content": "stale"})
     log = await ep[("GET", "/api/workbench/repo/commits")](_req(), path=str(repo), limit=5, base=None)
     assert log["commits"][0]["subject"] == "first"
     with pytest.raises(HTTPException) as exc:
@@ -93,6 +102,13 @@ async def test_repo_endpoints_confine_and_answer(env, monkeypatch):
     assert exc.value.status_code == 400
     with pytest.raises(HTTPException):
         await ep[("GET", "/api/workbench/repo/diff")](_req(), path=str(repo), file="../../etc/passwd", base=None, commit=None)
+    with pytest.raises(HTTPException):
+        await ep[("PUT", "/api/workbench/repo/file")](_req(), payload={
+            "path": str(repo), "file": "../../etc/passwd", "version": saved["version"], "content": "bad"})
+    (repo / "link.txt").symlink_to(repo / "f.txt")
+    with pytest.raises(HTTPException):
+        await ep[("PUT", "/api/workbench/repo/file")](_req(), payload={
+            "path": str(repo), "file": "link.txt", "version": saved["version"], "content": "bad"})
 
 
 async def test_pr_endpoints_report_blockers_and_post_feedback(env, monkeypatch):

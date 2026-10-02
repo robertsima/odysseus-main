@@ -98,9 +98,11 @@ def visible_panels(page) -> list[str]:
                      ".map(p => p.dataset.wbPanel)")
 
 
-def open_workbench(page) -> None:
+def open_workbench(page, *, activity=True) -> None:
     page.eval("window.workbenchModule.open()")
     page.wait_for("!document.getElementById('workbench-modal').classList.contains('hidden')")
+    if activity:
+        page.click('#wb-tab-activity')  # Legacy run-layout assertions explicitly inspect Activity.
     time.sleep(0.4)
 
 
@@ -307,6 +309,8 @@ def test_navigation_opens_the_phalanx_and_the_workbench(open_app, width):
     page.click('#sidebar-command-toggle')
     page.click('#sidebar-command-menu [data-command-target="rail-workbench"]')
     page.wait_for("!document.getElementById('workbench-modal').classList.contains('hidden')")
+    assert visible_panels(page) == ['changes']
+    page.click('#wb-tab-activity')
     assert page.probe(".ag-run-summary")["visible"]
 
 
@@ -338,9 +342,9 @@ def test_non_agamemnon_navigation_and_activity_remain_intact(open_app):
     assert page.eval("document.querySelector('.ag-nav-label').textContent") == 'Phalanx'
     assert page.eval("getComputedStyle(document.querySelector('#theme-tabs [data-tab=\"theme-tab-customize\"]')).display") != 'none'
     assert page.eval("document.querySelector('link[rel=icon]').getAttribute('href')") == '/static/branding/agamemnon-trojan-helmet.svg'
-    open_workbench(page)
+    open_workbench(page, activity=False)
     assert not page.probe('.ag-run-summary')['visible']
-    assert visible_panels(page) == ['activity']
+    assert visible_panels(page) == ['changes']
     assert page.eval("document.getElementById('message').placeholder") == 'Message Scribe…'
 
 
@@ -641,9 +645,55 @@ def test_odysseus_theme_keeps_its_own_layout(open_app, width):
     bar = assert_usable(page, ".chat-input-bar")
     assert_usable(page, "#message")
     assert bar["width"] <= 802  # the base composer keeps its 800px measure
-    open_workbench(page)
+    open_workbench(page, activity=False)
     assert not page.probe(".ag-run-control")["visible"]
-    assert visible_panels(page) == ["activity"]
+    assert visible_panels(page) == ["changes"]
+    page.click('#workbench-modal [data-wb-tab="commits"]')
+    assert visible_panels(page) == ["commits"]
     page.click('#workbench-modal [data-wb-tab="changes"]')
     assert visible_panels(page) == ["changes"]
     assert_no_sideways_scroll(page)
+
+
+@pytest.mark.parametrize('width', [1440, 700, 390])
+def test_workbench_defaults_to_branch_and_can_edit_its_changed_file(open_app, width):
+    page = open_app(width)
+    open_workbench(page, activity=False)
+    page.wait_for("document.querySelector('#wb-diffpane .wb-diff')")
+    assert visible_panels(page) == ['changes']
+    assert page.eval("document.querySelector('.wb-repo-select').value") == '/repo/workbench'
+    assert page.eval("document.querySelectorAll('#wb-changes .wb-file').length") == 2
+    shot(page, 'branch-review')
+    assert_no_sideways_scroll(page, '.workbench-modal-content')
+    page.click('#wb-diffpane [data-wb-act="edit-file"]')
+    page.wait_for("document.getElementById('wb-editor-text')")
+    assert page.eval("document.activeElement.id") == 'wb-editor-text'
+    assert 'migrate' in page.eval("document.getElementById('wb-editor-text').value")
+    shot(page, 'branch-editor')
+    assert_usable(page, '#wb-diffpane [data-wb-act="save-file"]')
+    assert_no_sideways_scroll(page, '.workbench-modal-content')
+    page.click('#wb-diffpane [data-wb-act="cancel-edit"]')
+    page.click('[data-wb-act="browse-files"]')
+    page.wait_for("document.querySelectorAll('#wb-changes .wb-file').length === 3")
+    assert page.eval("document.querySelector('#wb-changes').textContent.includes('src/clean.py')")
+    page.click('#wb-changes .wb-file[data-path="src/clean.py"]')
+    page.wait_for("document.getElementById('wb-editor-text')")
+    assert page.eval("document.querySelector('.wb-repo-select').value") == '/repo/workbench'
+
+
+@pytest.mark.parametrize('theme', [None, ODYSSEUS_THEME])
+def test_navigation_and_background_effect_survive_customization(open_app, theme):
+    page = open_app(1440, theme)
+    style = page.eval('document.documentElement.dataset.style')
+    assert page.probe('.sidebar-brand-icon')['width'] == 40
+    assert page.probe('.sidebar')['width'] == 240
+    hamburger, logo = page.probe('#hamburger-btn'), page.probe('.sidebar-brand-icon')
+    assert logo['left'] - hamburger['right'] >= 8, (hamburger, logo)
+    assert page.probe('#sidebar-command-toggle')['visible'] == (style == 'agamemnon')
+    assert page.probe('#sidebar-new-chat-btn')['visible'] == (style == 'classic')
+    page.eval("document.getElementById('theme-modal').classList.remove('hidden')")
+    page.click('#theme-tabs [data-tab="theme-tab-customize"]')
+    page.eval("(() => {const sel=document.getElementById('theme-bg-pattern-select'); sel.value='dots'; sel.dispatchEvent(new Event('change',{bubbles:true}));})()")
+    assert 'bg-pattern-dots' in page.eval('document.body.className')
+    assert 'radial-gradient' in page.eval('getComputedStyle(document.body).backgroundImage')
+    shot(page, 'customization-' + style)

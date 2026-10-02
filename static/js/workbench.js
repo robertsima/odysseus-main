@@ -55,7 +55,7 @@ const state = {
   inited: false,
   enabled: true,
   autoOpen: true,
-  prefs: { tab: 'activity', mode: 'split', repo: '', scope: 'session', filter: '' },
+  prefs: { tab: 'changes', mode: 'split', repo: '', recentRepos: [], scope: 'session', filter: '' },
   sessionId: null,
   es: null,
   esKey: null,
@@ -75,6 +75,8 @@ const state = {
   selectedFile: null,
   selectedCommit: null,
   diffText: '',
+  editor: null,
+  browse: null,
   pr: { config: null, list: [], selected: null, detail: null, stateFilter: 'open', loading: false },
   chatCards: new Map(),     // run_id → element
   // run_id → row from /api/workbench/runs for the CURRENT chat. The strip is
@@ -867,12 +869,14 @@ function sourceControlHtml() {
     return `<span class="wb-ctx-chip" title="${esc(c.path || '')}">${sourceChip('claude_code')}<span class="wb-ctx-chip-label">${esc(c.label || c.taskId.slice(0, 8))}</span><button type="button" class="wb-chip-close" data-wb-act="leave-run" title="Back to the repository's working tree" aria-label="Back to repository">×</button></span>`;
   }
   if (state.reposError) return `<span class="wb-meta-item wb-text-bad" title="${esc(state.reposError)}">Repositories unavailable</span>`;
-  const options = state.repos.map((x) => `<option value="${esc(x.path)}"${x.path === c.path ? ' selected' : ''}>${esc(x.path)}${x.branch ? ` (${esc(x.branch)})` : ''}</option>`).join('');
-  return `<select class="wb-select wb-repo-select" data-wb-change="repo" title="Repository" aria-label="Repository">${c.path ? '' : '<option value="">Choose a repository…</option>'}${options}</select>`;
+  const options = state.repos.map((x) => `<option value="${esc(x.path)}"${x.path === c.path ? ' selected' : ''}>${esc(x.branch || 'detached')} · ${esc(x.path.split(/[\\/]/).pop())}${x.kind === 'worktree' ? ' · worktree' : ''}</option>`).join('');
+  return `<label class="wb-branch-picker">Branch / worktree <select class="wb-select wb-repo-select" data-wb-change="repo" title="Select an active branch checkout" aria-label="Branch or worktree">${c.path ? '' : '<option value="">Choose a branch checkout…</option>'}${options}</select></label>`;
 }
 function renderChanges() {
   const box = $('wb-changes');
   if (!box) return;
+  const draft = $('wb-editor-text')?.value;
+  const search = $('wb-file-search')?.value;
   const c = state.repoCtx;
   const total = state.files.reduce((a, f) => { a.add += f.additions || 0; a.del += f.deletions || 0; return a; }, { add: 0, del: 0 });
   const hasSource = !!(c.path || c.taskId);
@@ -880,12 +884,15 @@ function renderChanges() {
   if (state.filesLoading) list = emptyHtml('Loading changes…');
   else if (state.files.length) list = state.files.map((f) => fileRowHtml(f, f.path === state.selectedFile)).join('');
   else list = emptyHtml(hasSource ? 'Working tree is clean.' : 'Choose a repository, or open a Claude Code run from Activity.');
+  if (state.browse && c.path && !c.taskId) list = `<div class="wb-hint">Tracked files${state.browse.truncated ? ' · first 100 matches; refine search' : ''}</div>`
+    + (state.browse.files.length ? state.browse.files.map((path) => fileRowHtml({ path, status: 'tracked' }, path === state.selectedFile)).join('') : emptyHtml('No matching tracked files. Try a different path.'));
   preserveView(box, () => {
     box.innerHTML = `
       <div class="wb-toolbar">
         ${sourceControlHtml()}
         ${c.taskId ? '' : `<input class="wb-input wb-base" id="wb-base" placeholder="Compare against (default: HEAD)" value="${esc(c.base || '')}" title="Base ref: a branch, tag or commit. Enter to apply." aria-label="Base ref">`}
         <button type="button" class="wb-btn" data-wb-act="refresh-changes" title="Reload the change list">Refresh</button>
+        ${c.path && !c.taskId ? `<input id="wb-file-search" class="wb-input" type="search" aria-label="Find tracked file by path" placeholder="Find a file…" value="${esc(search || '')}"><button type="button" class="wb-btn" data-wb-act="browse-files">${state.browse ? 'Show changes' : 'Browse files'}</button>` : ''}
         <span class="wb-spacer"></span>
         ${state.files.length ? `<span class="wb-summary">${plural(state.files.length, 'file')} ${statHtml(total.add, total.del)}</span>` : ''}
         ${modeSegHtml()}
@@ -895,6 +902,7 @@ function renderChanges() {
         <div class="wb-card wb-pane" id="wb-diffpane" data-wb-scroll="diff">${diffPaneHtml()}</div>
       </div>`;
   });
+  if (draft !== undefined && $('wb-editor-text')) $('wb-editor-text').value = draft;
   updateBadges();
 }
 function diffHeadHtml(path, stats, actions) {
@@ -904,7 +912,8 @@ function diffPaneHtml() {
   if (!state.selectedFile) return emptyHtml(state.files.length ? 'Select a file to compare old and new.' : 'Nothing to compare.');
   if (state.diffText == null) return emptyHtml('Loading diff…');
   const head = diffHeadHtml(state.selectedFile, diffStats(state.diffText),
-    '<button type="button" class="wb-btn wb-btn-sm" data-wb-act="send-file" title="Paste this diff into the chat composer">Send to agent</button><button type="button" class="wb-btn wb-btn-sm" data-wb-act="popout" title="Open in a separate window">Pop out</button>');
+    `${!state.repoCtx.taskId ? '<button type="button" class="wb-btn wb-btn-sm" data-wb-act="edit-file" title="Edit this file in the selected checkout">Edit file</button>' : ''}<button type="button" class="wb-btn wb-btn-sm" data-wb-act="send-file" title="Paste this diff into the chat composer">Send to agent</button><button type="button" class="wb-btn wb-btn-sm" data-wb-act="popout" title="Open in a separate window">Pop out</button>`);
+  if (state.editor?.path === state.selectedFile) return head + `<div class="wb-editor"><div class="wb-hint">Editing the working copy on ${esc(state.repoCtx.path)}. Save updates the file, not a commit. Review the diff after saving.</div><textarea id="wb-editor-text" class="wb-editor-text" aria-label="Edit ${esc(state.selectedFile)}" spellcheck="false"></textarea><div class="wb-editor-actions"><span id="wb-editor-status" role="status">${state.editor.dirty ? 'Unsaved changes' : 'No unsaved changes'}</span><button type="button" class="wb-btn" data-wb-act="cancel-edit">Cancel</button><button type="button" class="wb-btn wb-btn-primary" data-wb-act="save-file">Save file</button></div></div>`;
   if (!state.diffText.trim()) return head + emptyHtml('No textual diff (binary or unchanged).');
   return head + `<div class="wb-diff-body">${renderDiffText(state.diffText, { mode: state.prefs.mode, path: state.selectedFile })}</div>`
     + '<div class="wb-hint">Click a line number to quote that line in the composer.</div>';
@@ -1059,7 +1068,11 @@ function prPaneHtml() {
 async function loadRoots() {
   try {
     const r = await api('/api/workbench/repo/roots');
-    state.repos = r.repositories || [];
+    const recent = Array.isArray(state.prefs.recentRepos) ? state.prefs.recentRepos : [];
+    state.repos = (r.repositories || []).sort((a, b) => {
+      const rank = (x) => recent.indexOf(x.path) < 0 ? 999 : recent.indexOf(x.path);
+      return rank(a) - rank(b) || Number(!!b.branch) - Number(!!a.branch) || a.path.localeCompare(b.path);
+    });
     state.reposError = '';
     const repos = state.repos;
     const want = state.repoCtx.path || state.prefs.repo || (r.workspace && repos.some((x) => x.path === r.workspace) ? r.workspace : '') || (repos[0] && repos[0].path) || '';
@@ -1073,8 +1086,12 @@ async function loadRoots() {
   if (state.prefs.tab === 'commits') renderCommits();
 }
 function setRepo(path) {
+  if (!confirmDiscardEditor()) return;
   state.repoCtx = { path, base: '', taskId: null, label: '' };
-  state.prefs.repo = path; savePrefs();
+  state.browse = null;
+  state.prefs.repo = path;
+  state.prefs.recentRepos = [path, ...(state.prefs.recentRepos || []).filter((x) => x !== path)].slice(0, 12);
+  savePrefs();
   state.files = []; state.commits = []; state.selectedFile = null; state.selectedCommit = null; state.diffText = '';
   refreshChanges(); refreshCommits();
 }
@@ -1130,7 +1147,9 @@ async function refreshCommits() {
   renderCommits();
 }
 async function selectFile(path) {
+  if (!confirmDiscardEditor()) return;
   state.selectedFile = path; state.diffText = null;
+  if (state.browse) { state.diffText = ''; renderChanges(); editSelectedFile(); return; }
   renderChanges();
   const c = state.repoCtx;
   try {
@@ -1145,6 +1164,61 @@ async function selectFile(path) {
     const pane = $('wb-diffpane');
     if (pane) { pane.innerHTML = diffPaneHtml(); pane.scrollTop = 0; }
   }
+}
+function confirmDiscardEditor() {
+  // The editor draft stays in the textarea after a failed save.
+  if (state.editor?.dirty && !window.confirm('Discard unsaved file edits?')) return false;
+  state.editor = null;
+  return true;
+}
+async function browseFiles() {
+  if (!state.repoCtx.path || state.repoCtx.taskId || !confirmDiscardEditor()) return;
+  if (state.browse) { state.browse = null; state.selectedFile = null; renderChanges(); autoSelectFirstFile(); return; }
+  await searchFiles();
+}
+async function searchFiles() {
+  const query = $('wb-file-search')?.value || '';
+  const path = state.repoCtx.path;
+  try {
+    const found = await api(`/api/workbench/repo/files?path=${encodeURIComponent(path)}&query=${encodeURIComponent(query)}`);
+    if (path !== state.repoCtx.path) return;
+    state.browse = found;
+    state.selectedFile = null; state.diffText = '';
+    renderChanges();
+  } catch (error) { showToast(`Could not browse files: ${error.message}`, 'error'); }
+}
+async function editSelectedFile() {
+  if (!state.selectedFile || state.repoCtx.taskId || !state.repoCtx.path) return;
+  try {
+    const path = state.selectedFile;
+    const result = await api(`/api/workbench/repo/file?path=${encodeURIComponent(state.repoCtx.path)}&file=${encodeURIComponent(path)}&ref=worktree`);
+    if (result.missing || result.truncated || !result.version) throw new Error('Only existing UTF-8 text files under 400 KB can be edited');
+    if (path !== state.selectedFile) return;
+    state.editor = { path, version: result.version, content: result.content, dirty: false };
+    $('wb-diffpane').innerHTML = diffPaneHtml();
+    $('wb-editor-text').value = result.content;
+    $('wb-editor-text').focus();
+  } catch (error) { showToast(`Could not open editor: ${error.message}`, 'error'); }
+}
+async function saveSelectedFile() {
+  const editor = state.editor;
+  if (!editor || !state.repoCtx.path) return;
+  const input = $('wb-editor-text');
+  if (!input) return;
+  const content = input.value;
+  const button = document.querySelector('#wb-diffpane [data-wb-act="save-file"]');
+  if (button) button.disabled = true;
+  try {
+    const result = await api('/api/workbench/repo/file', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: state.repoCtx.path, file: editor.path, content, version: editor.version }) });
+    editor.version = result.version;
+    editor.content = content;
+    editor.dirty = false;
+    state.editor = null;
+    showToast('File saved in working tree; no commit created', 'success');
+    await refreshChanges();
+  } catch (error) {
+    $('wb-editor-status').textContent = `Save failed: ${error.message} — your draft is still here`;
+  } finally { if (button?.isConnected) button.disabled = false; }
 }
 async function selectCommit(sha) {
   const k = state.commits.find((x) => x.sha === sha) || { sha };
@@ -1380,6 +1454,7 @@ function hideRail() {
   for (const id of ['rail-workbench', 'tool-workbench-btn']) { const b = $(id); if (b) b.style.display = 'none'; }
 }
 function setTab(tab) {
+  if (tab !== state.prefs.tab && !confirmDiscardEditor()) return;
   state.prefs.tab = tab; savePrefs();
   document.querySelectorAll('#workbench-modal [data-wb-tab]').forEach((b) => {
     const on = b.dataset.wbTab === tab;
@@ -1426,9 +1501,10 @@ export function open() {
   }
   connect();
   loadRoots();
-  setTab(state.prefs.tab || 'activity');
+  setTab(state.prefs.tab || 'changes');
 }
 export function close() {
+  if (!confirmDiscardEditor()) return;
   // The manager's close also releases a right-dock push and drops the chip;
   // hiding the element alone left the chat squeezed.
   if (Modals.isRegistered(MODAL_ID)) Modals.close(MODAL_ID);
@@ -1483,7 +1559,14 @@ function wireWindow() {
     const el = e.target.closest('[data-wb-change]');
     if (el && el.dataset.wbChange === 'repo' && el.value) setRepo(el.value);
   });
+  modal.addEventListener('input', (e) => {
+    if (e.target.id === 'wb-editor-text' && state.editor) {
+      state.editor.dirty = e.target.value !== state.editor.content;
+      $('wb-editor-status').textContent = state.editor.dirty ? 'Unsaved changes' : 'No unsaved changes';
+    }
+  });
   modal.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && e.target.id === 'wb-file-search') { e.preventDefault(); searchFiles(); return; }
     if (e.key === 'Enter' && e.target.id === 'wb-base') { e.preventDefault(); state.selectedFile = null; refreshChanges(); refreshCommits(); return; }
     if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('.wb-row[role="button"], .wb-run[role="button"]')) { e.preventDefault(); e.target.click(); }
   });
@@ -1512,6 +1595,10 @@ function wireWindow() {
 
 function onAction(b) {
   switch (b.dataset.wbAct) {
+    case 'browse-files': browseFiles(); break;
+    case 'edit-file': editSelectedFile(); break;
+    case 'save-file': saveSelectedFile(); break;
+    case 'cancel-edit': if (confirmDiscardEditor()) $('wb-diffpane').innerHTML = diffPaneHtml(); break;
     case 'mode': state.prefs.mode = b.dataset.mode; savePrefs(); renderChanges(); renderCommits(); renderPRs(); break;
     case 'refresh-changes': refreshChanges(); break;
     case 'refresh-commits': refreshCommits(); break;
