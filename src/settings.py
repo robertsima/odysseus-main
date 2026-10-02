@@ -211,6 +211,11 @@ DEFAULT_SETTINGS = {
     # Send prompt_cache_key (the Odysseus session id) on ChatGPT-subscription
     # Responses requests so consecutive rounds hit the same prompt cache.
     "chatgpt_prompt_cache_key": True,
+    # 2026-10-02: extended prompt-cache retention. The default in-memory cache
+    # lasts minutes, so the first request after a pause of ten minutes or more
+    # re-read the whole prompt (54k tokens after a 26 minute gap, about 150k in
+    # an hour). "24h" asks for extended retention; empty sends nothing.
+    "chatgpt_prompt_cache_retention": "24h",
     # 2026-10-02: derive that key from model + instructions + tools instead of
     # the session id, so new chats and workers with an identical prefix share
     # cached tokens. False restores the per-session key.

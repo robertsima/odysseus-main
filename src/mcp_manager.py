@@ -545,6 +545,50 @@ class _ServerLock:
         return False
 
 
+_ssl_context = None
+_ssl_context_lock: Optional[asyncio.Lock] = None
+
+
+async def _shared_ssl_context():
+    """One verifying SSL context for every MCP HTTP connection.
+
+    2026-10-02: each connection built its own via httpx, and
+    ssl.create_default_context (it loads the CA bundle) blocked the event loop
+    1.12 s at startup (mcp_manager.setup). Same settings as httpx's default
+    (certifi bundle, verification on, trust_env); built once, off the loop.
+    """
+    global _ssl_context, _ssl_context_lock
+    if _ssl_context is not None:
+        return _ssl_context
+    if _ssl_context_lock is None:
+        _ssl_context_lock = asyncio.Lock()
+    async with _ssl_context_lock:
+        if _ssl_context is None:
+            import httpx
+            _ssl_context = await asyncio.to_thread(httpx.create_ssl_context)
+    return _ssl_context
+
+
+async def _mcp_httpx_factory():
+    """An httpx_client_factory for the MCP transports that reuses the shared context."""
+    import httpx
+    from mcp.shared._httpx_utils import MCP_DEFAULT_SSE_READ_TIMEOUT, MCP_DEFAULT_TIMEOUT
+
+    ctx = await _shared_ssl_context()
+
+    def factory(headers=None, timeout=None, auth=None):
+        # Mirrors mcp's create_mcp_http_client, with the shared verify context.
+        return httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=timeout or httpx.Timeout(MCP_DEFAULT_TIMEOUT, read=MCP_DEFAULT_SSE_READ_TIMEOUT),
+            headers=headers,
+            auth=auth,
+            verify=ctx,
+        )
+
+    return factory
+
+
 class _OwnedStack:
     """An AsyncExitStack that one dedicated task both enters and exits.
 
@@ -866,7 +910,9 @@ class McpManager:
             from mcp.client.sse import sse_client
 
             async def setup(stack):
-                read_stream, write_stream = await stack.enter_async_context(sse_client(url))
+                factory = await _mcp_httpx_factory()
+                read_stream, write_stream = await stack.enter_async_context(
+                    sse_client(url, httpx_client_factory=factory))
                 session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
                 init_result = await session.initialize()
                 return session, await session.list_tools(), init_result
@@ -963,7 +1009,9 @@ class McpManager:
             provider = build_provider(server_id, url, on_redirect=_on_redirect)
 
             async def setup(stack):
-                transport = await stack.enter_async_context(streamablehttp_client(url, auth=provider))
+                factory = await _mcp_httpx_factory()
+                transport = await stack.enter_async_context(
+                    streamablehttp_client(url, auth=provider, httpx_client_factory=factory))
                 read_stream, write_stream, _get_session_id = transport
                 session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
                 init_result = await session.initialize()

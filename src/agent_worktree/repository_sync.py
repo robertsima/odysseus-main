@@ -7,10 +7,15 @@ never runs Git, hooks, credential helpers, filters, merges, or submodules.
 from __future__ import annotations
 
 import asyncio
+import collections
+import concurrent.futures
+import contextvars
 import json
 import os
 import re
 import stat
+import threading
+import time
 import unicodedata
 import uuid
 from pathlib import Path
@@ -768,7 +773,56 @@ def _status(repo: Repo):
     }
 
 
+# 2026-10-02: manage_git {"action": "repositories"} took 58 s, twice in an hour.
+# Every checkout re-walked the whole HEAD tree in pure Python on a NAS, and the
+# server holds many linked worktrees of one large repository that share
+# commits. A commit's tree is immutable, so a validated commit stays validated:
+# the verdict (including a refusal) is cached by (object store, commit id).
+_TREE_VERDICTS: "collections.OrderedDict[tuple, Any]" = collections.OrderedDict()
+_TREE_VERDICTS_MAX = 512
+_TREE_LOCK = threading.Lock()
+_TREE_KEY_LOCKS: dict = {}
+
+
+def _object_store_key(repo: Repo) -> str:
+    store = repo.object_store
+    return os.path.normcase(
+        os.path.realpath(getattr(store, "path", None) or repo.commondir())
+    )
+
+
 def _validate_tree(repo: Repo, commit_id: bytes) -> None:
+    key = (_object_store_key(repo), bytes(commit_id))
+    with _TREE_LOCK:
+        if key in _TREE_VERDICTS:
+            _TREE_VERDICTS.move_to_end(key)
+            verdict = _TREE_VERDICTS[key]
+            key_lock = None
+        else:
+            verdict = False
+            key_lock = _TREE_KEY_LOCKS.setdefault(key, threading.Lock())
+    if key_lock is not None:
+        # One walker per commit; concurrent worktrees at the same commit wait
+        # for it instead of repeating it.
+        with key_lock:
+            with _TREE_LOCK:
+                verdict = _TREE_VERDICTS.get(key, False)
+            if verdict is False:
+                try:
+                    _validate_tree_uncached(repo, commit_id)
+                    verdict = None
+                except RepositorySyncError as exc:
+                    verdict = (exc.code, str(exc))
+                with _TREE_LOCK:
+                    _TREE_VERDICTS[key] = verdict
+                    while len(_TREE_VERDICTS) > _TREE_VERDICTS_MAX:
+                        _TREE_VERDICTS.popitem(last=False)
+                    _TREE_KEY_LOCKS.pop(key, None)
+    if verdict is not None:
+        _fail(*verdict)
+
+
+def _validate_tree_uncached(repo: Repo, commit_id: bytes) -> None:
     seen = set()
     for entry in iter_commit_contents(repo.object_store, commit_id):
         parts = entry.path.replace(b"\\", b"/").split(b"/")
@@ -800,7 +854,10 @@ def _validate_tree(repo: Repo, commit_id: bytes) -> None:
                 )
 
 
-def _status_sync(path, *, allow_linked: bool = False):
+LISTING_BUDGET_S = 10.0
+LISTING_WORKERS = 6
+def _status_sync(path, *, allow_linked: bool = False, listing: bool = False,
+                 deadline: float | None = None):
     path = _validate_path(path, allow_linked=allow_linked)
     linked_main = linked_worktree_main(path) if (path / ".git").is_file() else None
     with Repo(str(path)) as repo:
@@ -823,9 +880,20 @@ def _status_sync(path, *, allow_linked: bool = False):
             "remote_url": None,
             "upstream": None,
             "head": head.decode() if head else None,
-            "dirty": _status(repo),
+            "dirty": None,
             "unborn": head is None,
         }
+        if listing:
+            # dulwich, not the git binary: `git status` on an agent-written
+            # checkout can run a clean filter that the repository's own
+            # .git/config defines, on the host and outside the sandbox. This
+            # module never runs git for that reason (2026-10-02). The listing's
+            # speed comes from the per-commit tree cache and the thread pool.
+            status = _status(repo)
+            result["dirty"] = not status["clean"]
+            result["inspected"] = True
+        else:
+            result["dirty"] = _status(repo)
         if linked_main is not None:
             # Which repository this checkout's branches, objects and remotes
             # actually live in: write actions have to be run there.
@@ -871,26 +939,52 @@ async def list_repositories():
                     for leaf in sorted(group.iterdir())[:50]
                     if leaf.is_dir()
                 ])
+        picked = []
         for candidates in scans:
-            for candidate in candidates[: 100 - len(out)]:
-                marker = candidate / ".git"
-                if not marker.exists() or candidate in seen:
+            for candidate in candidates[: 100 - len(picked)]:
+                if not (candidate / ".git").exists() or candidate in seen:
                     continue
                 seen.add(candidate)
-                try:
-                    out.append(_status_sync(candidate, allow_linked=True))
-                except RepositorySyncError as exc:
-                    out.append({"repository": str(candidate), **exc.as_dict()})
-                except Exception:
-                    out.append(
-                        {
-                            "repository": str(candidate),
-                            "ok": False,
-                            "code": "invalid_repository",
-                            "error": "repository could not be inspected safely",
-                        }
-                    )
-        return out[:100]
+                picked.append(candidate)
+        picked = picked[:100]
+
+        deadline = time.monotonic() + LISTING_BUDGET_S
+
+        def inspect(candidate):
+            try:
+                return _status_sync(
+                    candidate, allow_linked=True, listing=True, deadline=deadline
+                )
+            except RepositorySyncError as exc:
+                return {"repository": str(candidate), **exc.as_dict()}
+            except Exception:
+                return {
+                    "repository": str(candidate),
+                    "ok": False,
+                    "code": "invalid_repository",
+                    "error": "repository could not be inspected safely",
+                }
+
+        # The workspace is a per-call contextvar that _validate_path reads.
+        pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=LISTING_WORKERS, thread_name_prefix="repo-list"
+        )
+        futures = [
+            pool.submit(contextvars.copy_context().run, inspect, c) for c in picked
+        ]
+        concurrent.futures.wait(futures, timeout=LISTING_BUDGET_S)
+        pool.shutdown(wait=False, cancel_futures=True)
+        out = []
+        for candidate, future in zip(picked, futures):
+            if future.done() and not future.cancelled():
+                out.append(future.result())
+            else:
+                out.append({
+                    "repository": str(candidate), "ok": True, "inspected": False,
+                    "note": "not inspected within the listing time budget; "
+                            "use status on this path",
+                })
+        return out
 
     return await asyncio.to_thread(scan)
 

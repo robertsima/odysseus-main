@@ -1627,6 +1627,69 @@ def _mentions_encrypted_reasoning(body: str) -> bool:
     )
 
 
+# Hosts that rejected `prompt_cache_retention`. Whether the ChatGPT/Codex
+# backend accepts it was unknown on 2026-10-02 (the public Responses API does),
+# so the first 400 that names it turns the field off for that host; the request
+# is replayed without it and the user never sees the error.
+_RESPONSES_NO_CACHE_RETENTION: set = set()
+
+
+def _mentions_cache_retention(body: str) -> bool:
+    """True when a 400 body names `prompt_cache_retention` itself. A rate limit,
+    a bad model or a context overflow never does, so none of them can switch
+    the field off."""
+    return "prompt_cache_retention" in (body or "").lower()
+
+
+# Hosts that answered 200 to a request carrying the field, and hosts where a
+# 400 that did not name it switched it off on suspicion. The backend may reject
+# an unknown field with a generic 400, so an unconfirmed host retries once
+# without the field; if that retry fails too, the field was not the cause and
+# it is switched back on (2026-10-02).
+_RESPONSES_CACHE_RETENTION_OK: set = set()
+_RESPONSES_CACHE_RETENTION_SUSPECT: set = set()
+
+
+def _disable_cache_retention(url: str, *, suspect: bool = False) -> None:
+    host = _host_key(url or "")
+    if suspect:
+        _RESPONSES_CACHE_RETENTION_SUSPECT.add(host)
+    if host not in _RESPONSES_NO_CACHE_RETENTION:
+        _RESPONSES_NO_CACHE_RETENTION.add(host)
+        logger.warning(
+            "%s rejected prompt_cache_retention%s; sending requests without it "
+            "from now on (a pause of ten minutes or more will miss the cache)",
+            host, " (unconfirmed: generic 400)" if suspect else "",
+        )
+
+
+def _note_cache_retention_outcome(url: str, payload: Dict, ok: bool) -> None:
+    """Record whether a request with or without the field succeeded."""
+    host = _host_key(url or "")
+    if "prompt_cache_retention" in payload:
+        if ok:
+            _RESPONSES_CACHE_RETENTION_OK.add(host)
+        return
+    if host in _RESPONSES_CACHE_RETENTION_SUSPECT:
+        _RESPONSES_CACHE_RETENTION_SUSPECT.discard(host)
+        if not ok:
+            # The retry without the field failed as well: not its fault.
+            _RESPONSES_NO_CACHE_RETENTION.discard(host)
+            logger.info("%s: prompt_cache_retention was not the cause of the 400; keeping it on", host)
+
+
+def _responses_cache_retention(url: str) -> str:
+    """The `prompt_cache_retention` value to send, or "" for none."""
+    if _host_key(url or "") in _RESPONSES_NO_CACHE_RETENTION:
+        return ""
+    try:
+        from src.settings import get_setting
+
+        return str(get_setting("chatgpt_prompt_cache_retention", "24h") or "").strip()
+    except Exception:
+        return ""
+
+
 def _responses_encrypted_reasoning_ok(url: str) -> bool:
     return _host_key(url or "") not in _RESPONSES_NO_ENCRYPTED_REASONING
 
@@ -1793,6 +1856,10 @@ def _build_chatgpt_responses_payload(
     effort = _chatgpt_reasoning_effort(cache_key)
     if effort:
         payload["reasoning"] = {"effort": effort}
+    # Extended cache retention; only meaningful alongside a cache key.
+    retention = _responses_cache_retention(target_url_hint)
+    if retention:
+        payload["prompt_cache_retention"] = retention
     # ChatGPT Subscription Codex API does not support max_output_tokens —
     # passing it returns HTTP 400 "Unsupported parameter: max_output_tokens".
     # Do not include it in the payload.
@@ -4114,6 +4181,8 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             client = _get_http_client()
             async with _open_stream(client, 'POST', target_url, json=payload, headers=h, timeout=stream_timeout, headers_timeout=headers_timeout) as r:
                 _clear_host_dead(target_url)
+                if r.status_code == 200:
+                    _note_cache_retention_outcome(target_url, payload, ok=True)
                 if r.status_code != 200:
                     raw = (await r.aread()).decode(errors="replace")
                     if (
@@ -4130,6 +4199,24 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                             "retryable": True,
                             "status": 400,
                             "text": "Retrying without reasoning replay",
+                        }) + '\n\n')
+                        return
+                    _note_cache_retention_outcome(target_url, payload, ok=False)
+                    if (
+                        r.status_code == 400
+                        and "prompt_cache_retention" in payload
+                        and (
+                            _mentions_cache_retention(raw)
+                            or _host_key(target_url) not in _RESPONSES_CACHE_RETENTION_OK
+                        )
+                    ):
+                        _disable_cache_retention(
+                            target_url, suspect=not _mentions_cache_retention(raw)
+                        )
+                        yield ('event: error\ndata: ' + json.dumps({
+                            "retryable": True,
+                            "status": 400,
+                            "text": "Retrying without prompt cache retention",
                         }) + '\n\n')
                         return
                     if (

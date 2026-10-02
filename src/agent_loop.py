@@ -726,6 +726,7 @@ _DELEGATION_RULES = """\
 - Write done-when as what the person would check; for UI work, the rendered result next to their reference.
 - While a worker runs, wait (`manage_agent_loadout` status with `wait_seconds`) or do separate work; the worker owns its files and worktree.
 - When it hands back partial or blocked, resume that worker (`send_to_session`, mode agent) with what it needs before starting another.
+- One request, one branch, one publish request. Later parts and fixes of the same request go to the worker that owns its worktree branch (`send_to_session`), not to a new worker on a new branch. Tell a worker doing one part of a larger delivery to commit and report "ready to publish" without requesting a publish; the part that completes the request requests it once, after the checks pass. A new request after the person merged the last pull request starts a new branch.
 - A worker's report is a claim; read the evidence it names (diff, test output, pull request) before telling the user.
 - Run tests and builds yourself; a reviewer reads and judges. Ask for one independent review per iteration, after the work is done."""
 
@@ -1426,10 +1427,41 @@ def _latest_user_message(messages: List[Dict]) -> Optional[Dict]:
 # None of them is the person's request.
 HARNESS_USER_SOURCES = frozenset({"worker", "publish_decision", "tool_images"})
 
+# Fixed opening of every note the harness writes as a user turn on its own
+# behalf (_PUBLISH_FOLLOWUP_NOTE, _ALREADY_ANSWERED_NOTE in agent_control). The
+# metadata source is the primary signal; the prefix catches the notes that carry
+# none (_ALREADY_ANSWERED_NOTE) and history rebuilt without metadata.
+HARNESS_NOTE_PREFIX = "[Harness note"
+
+
+def _is_harness_note(msg: Optional[Dict]) -> bool:
+    """A user-role message the harness wrote, not a person or a peer chat."""
+    if not msg or msg.get("role") != "user":
+        return False
+    if (msg.get("metadata") or {}).get("source") in HARNESS_USER_SOURCES:
+        return True
+    return _user_text(msg).lstrip().startswith(HARNESS_NOTE_PREFIX)
+
 
 def _latest_user_is_harness_note(messages: List[Dict]) -> bool:
-    msg = _latest_user_message(messages)
-    return bool(msg) and (msg.get("metadata") or {}).get("source") in HARNESS_USER_SOURCES
+    return _is_harness_note(_latest_user_message(messages))
+
+
+def _routing_user_message(messages: List[Dict]) -> Optional[Dict]:
+    """The message intent, tool selection and loadout routing read: the latest
+    request a person wrote, skipping context envelopes AND harness notes.
+
+    2026-10-02: after a publish approval the loop routed on "[Harness note, not
+    from the user] The publish request above was approved...". Its words
+    ("publish", "request", "task") picked cookbook/notes/ui domains and
+    suggested two loadouts for the note itself, while the task it continues was
+    never consulted. Falls back to the latest user message when the chat holds
+    nothing else.
+    """
+    for msg in reversed(messages or []):
+        if msg.get("role") == "user" and not _is_context_envelope(msg) and not _is_harness_note(msg):
+            return msg
+    return _latest_user_message(messages)
 
 
 def _person_request_text(messages: List[Dict]) -> str:
@@ -1441,8 +1473,7 @@ def _person_request_text(messages: List[Dict]) -> str:
     never send the worker back; the request behind the chain is what asked.
     """
     for msg in reversed(messages or []):
-        if (msg.get("role") == "user" and not _is_context_envelope(msg)
-                and (msg.get("metadata") or {}).get("source") not in HARNESS_USER_SOURCES):
+        if msg.get("role") == "user" and not _is_context_envelope(msg) and not _is_harness_note(msg):
             return _user_text(msg)
     return ""
 
@@ -1744,7 +1775,7 @@ def _delegation_gated_tools(policy: object, text: str) -> Set[str]:
 
 def _extract_last_user_message(messages: List[Dict]) -> str:
     """Return the most recent human-written user message as plain text."""
-    msg = _latest_user_message(messages)
+    msg = _routing_user_message(messages)
     return _user_text(msg) if msg is not None else ""
 
 
@@ -2076,6 +2107,9 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
     which domain rule packs get appended to the system prompt.
     """
     text = str(last_user or "").strip()
+    # A harness note (publish follow-up, worker hand-back) continues the task
+    # `last_user` names; it is not a new request and never low-signal.
+    note_turn = _latest_user_is_harness_note(messages)
     # "i like that idea" / "go ahead" / "can u do that" refer to the
     # assistant's last message, not to older human turns: retrieval (and the
     # domains read from it) follows that message.
@@ -2083,15 +2117,16 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
     retry_continuation = _is_contextual_retry_continuation(messages, text)
     continuation = (
         bool(proposal_anchor) or _is_explicit_continuation(text)
-        or _assistant_requested_followup(messages) or retry_continuation
+        or _assistant_requested_followup(messages) or retry_continuation or note_turn
     )
     if proposal_anchor:
         retrieval_query = anchored_retrieval_query(messages, proposal_anchor)
     else:
-        retrieval_query = _recent_context_for_retrieval(messages) if continuation else text
+        retrieval_query = text if note_turn else (
+            _recent_context_for_retrieval(messages) if continuation else text)
     q = retrieval_query.lower()
 
-    if not text or bool(_LOW_SIGNAL_RE.match(text)) or _is_casual_low_signal(text):
+    if not note_turn and (not text or bool(_LOW_SIGNAL_RE.match(text)) or _is_casual_low_signal(text)):
         return {
             "low_signal": True,
             "continuation": False,
@@ -3233,7 +3268,8 @@ _PARENT_CHAT_NOTE = (
     "what remains. That chat sees only this answer, not your tool calls, so end with a short "
     "report in this shape (leave out lines that do not apply):\n"
     "Outcome: done, partly done or blocked, and why.\n"
-    "Changed: files, commits, branch or worktree, and any publish request.\n"
+    "Changed: files, commits, branch or worktree, and any publish request. If your brief says this "
+    "is one part of a larger delivery, commit without requesting a publish and say \"ready to publish\".\n"
     "Checked: the tests, builds or reads you ran and what they showed, and what you could not run.\n"
     "Open: what is left, and decisions you made that the requester should know about.\n"
     "If you stop short on something someone else must give, "
@@ -6065,7 +6101,7 @@ async def stream_agent_loop(
     # means never. Other harness notes (a publish decision) are judged by the
     # person's own latest request.
     _latest_user_source = ((_latest_user_message(messages) or {}).get("metadata") or {}).get("source")
-    _delegation_text = (_person_request_text(messages) if _latest_user_source in HARNESS_USER_SOURCES
+    _delegation_text = (_person_request_text(messages) if _latest_user_is_harness_note(messages)
                         else _last_user)
     if _latest_user_source == "worker" and _delegation_policy != "never":
         _gated_delegation: Set[str] = set()
@@ -6918,7 +6954,7 @@ async def stream_agent_loop(
     # exist and answered "I lack the tools" (src/loadout_routing.py).
     _routing_protected: Set[str] = set()
     if (not guide_only and not plan_mode and not _launcher_policy_blocked
-            and not _casual_low_signal_turn):
+            and not _casual_low_signal_turn and not _latest_user_is_harness_note(messages)):
         try:
             from src.loadout_routing import routing_note, suggest_loadouts
 
@@ -7396,10 +7432,94 @@ async def stream_agent_loop(
         """Whether this route sends the chat's declared tools (src/stable_tools.py)."""
         return bool(session_id) and route_tools is not None and stable_tools.route_supported(url, mdl)
 
+    def _filter_route_tool_schemas(schemas):
+        # Keep candidate actions visible after taint so the model can propose
+        # the exact call that the server will seal for user approval.  Schema
+        # visibility is not authority: both the loop and dispatcher still gate
+        # execution, and only a one-use server record can cross that boundary.
+        # MCP tools that read files are the exception: without the private
+        # grant they are refused outright, so they are not offered. bash and
+        # python are offered when the Shell setting gives this chat a shell.
+        from src.private_access import tool_requires_private_grant
+
+        def _keep(name: str) -> bool:
+            if name in ("bash", "python"):
+                return _shell_offered
+            return allow_private is True or not tool_requires_private_grant(name)
+
+        return [
+            schema for schema in schemas
+            if _keep(schema.get("function", {}).get("name") or schema.get("name") or "")
+        ]
+
+    _bounded_memo: List[Optional[List[Dict]]] = []
+
+    def _bounded_declared_schemas() -> Optional[List[Dict]]:
+        """The whole allowed tool set of a chat whose policy is an explicit
+        allow-list (a worker loadout), when it is small enough to declare on
+        the first request (`stable_tools.bounded_fits`); None otherwise.
+
+        2026-10-02: `discover_tools` attached `render_preview` to a UI-critic
+        worker, 17 -> 18 declared tools, and the next request was 0% cached on
+        52k tokens (eight smaller cases that hour, ~100k tokens). The tools
+        precede the conversation in the provider's prefix, so with the set
+        declared up front a discovery only changes `allowed_tools`. A chat
+        with every tool allowed (the admin) has no bound and keeps growing as
+        needed. Computed once per turn: it is the policy's set, not the
+        round's selection.
+        """
+        if _bounded_memo:
+            return _bounded_memo[0]
+        result: Optional[List[Dict]] = None
+        try:
+            if (
+                session_id and not guide_only and _turn_discovery is not None
+                and str(_tool_access).strip().lower() == "selected"
+                and stable_tools.enabled()
+            ):
+                names = _turn_discovery.permitted_names(
+                    _rearm_policy_settings(session_id, disabled_tools, allow_private)
+                ) - set(disabled_tools)
+                if "discover_tools" not in disabled_tools:
+                    names.add("discover_tools")
+                schemas = _filter_route_tool_schemas(_tool_schemas_for_round(
+                    force_answer=False,
+                    is_api_model=True,
+                    relevant_tools=names,
+                    needs_admin=True,
+                    admin_tools=set(),
+                    mcp_schemas=(mcp_mgr.get_all_openai_schemas(_mcp_disabled_map or {}) if mcp_mgr else []),
+                    disabled_tools=disabled_tools,
+                    ody_qwen_finetune_model=False,
+                    last_user=_last_user,
+                    mcp_gated_names=set(),
+                    context_length=context_length,
+                ))
+                if stable_tools.bounded_fits(schemas):
+                    result = schemas
+                    logger.info(
+                        "[stable-tools] session=%s bounded loadout: declaring all %d allowed tools "
+                        "(~%d schema tokens) up front",
+                        session_id, len(schemas), stable_tools.schema_tokens(schemas),
+                    )
+                else:
+                    logger.info(
+                        "[stable-tools] session=%s allow-list has %d tools (~%d schema tokens), over the "
+                        "bounded cap (%d tools / %d tokens); declaring as needed",
+                        session_id, len(schemas), stable_tools.schema_tokens(schemas),
+                        stable_tools.BOUNDED_MAX_TOOLS, stable_tools.BOUNDED_MAX_TOKENS,
+                    )
+        except Exception:
+            logger.debug("[stable-tools] bounded declaration skipped", exc_info=True)
+            result = None
+        _bounded_memo.append(result)
+        return result
+
     def _tool_request_kwargs(url, mdl, schemas, route_state) -> Dict[str, Any]:
         """``tools``/``allowed_tools`` for one request on one route."""
         if route_state.get("is_api_model") and _stable_tools_route(url, mdl, route_state.get("relevant_tools")):
-            declared, callable_names = stable_tools.declare(session_id, schemas or [])
+            declared, callable_names = stable_tools.declare(
+                session_id, schemas or [], full=_bounded_declared_schemas())
             return {"tools": declared or None, "allowed_tools": callable_names}
         return {"tools": schemas or None, "allowed_tools": None}
 
@@ -7452,7 +7572,12 @@ async def stream_agent_loop(
             # the schema list does not carry -- and drop them again next turn,
             # rewriting the system prompt both times.
             needs_admin=_needs_admin and (route_tools is None or not _compact_prompt),
-            relevant_tools=(stable_tools.preview(session_id, route_tools)
+            relevant_tools=(stable_tools.preview(
+                                session_id,
+                                set(route_tools or ()) | {
+                                    (schema.get("function") or {}).get("name")
+                                    for schema in (_bounded_declared_schemas() or ())
+                                })
                             if _stable else route_tools),
             mcp_disabled_map=_mcp_disabled_map,
             compact=_compact_prompt,
@@ -7703,26 +7828,6 @@ async def stream_agent_loop(
 
     _doc_stream_create_completed = False
     _ody_doc_tool_completed = False
-
-    def _filter_route_tool_schemas(schemas):
-        # Keep candidate actions visible after taint so the model can propose
-        # the exact call that the server will seal for user approval.  Schema
-        # visibility is not authority: both the loop and dispatcher still gate
-        # execution, and only a one-use server record can cross that boundary.
-        # MCP tools that read files are the exception: without the private
-        # grant they are refused outright, so they are not offered. bash and
-        # python are offered when the Shell setting gives this chat a shell.
-        from src.private_access import tool_requires_private_grant
-
-        def _keep(name: str) -> bool:
-            if name in ("bash", "python"):
-                return _shell_offered
-            return allow_private is True or not tool_requires_private_grant(name)
-
-        return [
-            schema for schema in schemas
-            if _keep(schema.get("function", {}).get("name") or schema.get("name") or "")
-        ]
 
     def _tool_schemas_for_route(route_state, *, admin_tools=None):
         """This route's schema list: the shared builder, then the host filter.

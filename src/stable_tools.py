@@ -26,6 +26,16 @@ grows when a turn needs a tool it never had -- that costs one miss, as before
 -- but a round that narrows, a tool-free wrap-up round, or a follow-up turn
 that withholds launchers no longer throws the cache away.
 
+A session whose allowed tools are bounded (a worker loadout or chat policy
+with an explicit allow-list, see `bounded_fits`) declares that whole set on its
+first request instead (`declare(..., full=...)`). On 2026-10-02 a UI-critic
+worker that called `discover_tools` for `render_preview` went from 17 to 18
+declared tools and the next request was 0% cached on 52k tokens; eight other
+rounds that hour had the same shape, ~100k uncached tokens in all. Declaring
+the unused definitions costs about 10% of their tokens per round while cached;
+one mid-session addition costs a whole uncached prompt, so discovery inside an
+allowed set never touches the tools array again.
+
 Only for the ChatGPT/Codex Responses route on GPT-5.6 and later (where the
 behaviour was measured); a backend that rejects `tool_choice` is remembered by
 llm_core, which then sends only the callable tools, as before.
@@ -48,6 +58,12 @@ SETTING = "chatgpt_stable_tools"
 # schemas the model reads on every request still cost context, cached or not.
 MAX_DECLARED = 160
 _MAX_SESSIONS = 256
+# A bounded loadout is declared whole when it is at most this many tools AND its
+# definitions are at most this many tokens (chars/4 over the compact schemas).
+# Past either, the schemas read on every request cost more than the growth
+# misses they prevent, and the session keeps the grow-as-needed behaviour.
+BOUNDED_MAX_TOOLS = 64
+BOUNDED_MAX_TOKENS = 20000
 _MODEL_RE = re.compile(r"^gpt-(?:5\.(?:[6-9]|[1-9]\d)|(?:[6-9]|[1-9]\d)(?:\.\d+)?)(?:[-.]|$)", re.I)
 
 _lock = threading.Lock()
@@ -174,7 +190,25 @@ def preview(session_id: Optional[str], names: Iterable[str]) -> set:
     return declared | wanted
 
 
-def declare(session_id: Optional[str], schemas: List[dict]) -> Tuple[List[dict], List[str]]:
+def schema_tokens(schemas: Iterable[dict]) -> int:
+    """Rough token cost of tool definitions: JSON characters / 4."""
+    total = 0
+    for schema in schemas or ():
+        try:
+            total += len(json.dumps(schema, ensure_ascii=False, default=str))
+        except (TypeError, ValueError):
+            total += len(repr(schema))
+    return total // 4
+
+
+def bounded_fits(schemas: List[dict]) -> bool:
+    """Whether an allow-listed tool set is small enough to declare whole."""
+    named = [s for s in schemas or [] if _name(s)]
+    return bool(named) and len(named) <= BOUNDED_MAX_TOOLS and schema_tokens(named) <= BOUNDED_MAX_TOKENS
+
+
+def declare(session_id: Optional[str], schemas: List[dict],
+            full: Optional[List[dict]] = None) -> Tuple[List[dict], List[str]]:
     """``(tools to send, names callable this round)`` for one request.
 
     The tools to send are the chat's declared list with this round's schemas
@@ -187,15 +221,21 @@ def declare(session_id: Optional[str], schemas: List[dict]) -> Tuple[List[dict],
     the API refuses to call it and so does the executor. Dropping it would
     rewrite the tools array -- on 2026-09-29 a worker follow-up that withheld
     six launchers re-billed a ~100k-token chat from the start.
+
+    ``full`` is a bounded session's whole allowed set (`bounded_fits`): it is
+    declared before this round's schemas, so a later round that offers any tool
+    of it only changes what is callable. The same applies to the cap below,
+    which starts over from ``full`` plus the round, never from the round alone.
     """
     active = [s for s in schemas or [] if _name(s)]
     allowed = [_name(s) for s in active]
     if not session_id:
         return list(active), allowed
+    base = [s for s in full or [] if _name(s)]
     with _lock:
         entry = _load(session_id)
         before = list(entry.items())
-        for schema in active:
+        for schema in base + active:
             name = _name(schema)
             current = entry.get(name)
             if current is None or _callable_shape(current) != _callable_shape(schema):
@@ -204,7 +244,7 @@ def declare(session_id: Optional[str], schemas: List[dict]) -> Tuple[List[dict],
             logger.info("[stable-tools] session=%s declared %d tools (cap %d); starting over from this round's %d",
                         session_id, len(entry), MAX_DECLARED, len(active))
             entry.clear()
-            for schema in active:
+            for schema in base + active:
                 entry[_name(schema)] = schema
         changed = list(entry.items()) != before
         if changed:

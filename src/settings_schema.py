@@ -386,6 +386,13 @@ def _norm_reasoning_effort(value: Any) -> str:
     return text
 
 
+def _norm_cache_retention(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text not in ("", "24h", "in_memory"):
+        raise ValueError("must be 24h or in_memory (or empty)")
+    return text
+
+
 def _norm_claude_code_backend(value: Any) -> str:
     text = str(value or "local").strip().lower()
     if text not in ("local", "cloud"):
@@ -482,6 +489,7 @@ NORMALIZERS: Dict[str, Callable[[Any], Any]] = {
     "claude_code_odysseus_url": _norm_http_url,
     "claude_code_model": _norm_claude_code_model,
     "chatgpt_reasoning_effort": _norm_reasoning_effort,
+    "chatgpt_prompt_cache_retention": _norm_cache_retention,
     "claude_code_backend": _norm_claude_code_backend,
     "claude_cloud_repositories": _norm_cloud_repositories,
     "claude_cloud_hub_repository": _norm_cloud_hub,
@@ -1035,6 +1043,14 @@ register_all([
         key="chatgpt_prompt_cache_key", type="bool", label="Reuse ChatGPT prompt cache",
         help="Keep consecutive ChatGPT subscription rounds on the same prompt cache for lower latency and repeated-input cost.",
         group="Models", advanced=True,
+    ),
+    SettingSpec(
+        key="chatgpt_prompt_cache_retention", type="choice", label="ChatGPT prompt cache retention",
+        help=("How long the provider keeps a cached prompt. 24 hours keeps a chat warm across a pause; the "
+              "default in-memory cache lasts minutes. Empty sends nothing. A backend that rejects the "
+              "field is detected and skipped automatically."),
+        group="Models", advanced=True, choices=("24h", "in_memory", ""),
+        choice_labels=("24 hours", "In memory (minutes)", "Provider default"),
     ),
     SettingSpec(
         key="chatgpt_shared_prompt_cache_key", type="bool", label="Share ChatGPT prompt cache across chats",

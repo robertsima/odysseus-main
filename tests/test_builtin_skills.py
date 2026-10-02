@@ -281,3 +281,63 @@ def test_every_shipped_skill_current_body_is_in_history():
             "run scripts/update_bundled_skill_history.py and commit the result "
             "(otherwise existing installs never upgrade to it)"
         )
+
+
+def _integration_skill(root: Path, name: str, body: str) -> Path:
+    d = root / "integrations" / "todoist" / "skills" / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: Plan.\ncategory: general\n---\n\n{body}",
+        encoding="utf-8",
+    )
+    return d
+
+
+def test_seeding_is_idempotent_and_survives_preexisting_integration_dir(monkeypatch, tmp_path):
+    """2026-10-02: EEXIST on skills/general/todoist-planning aborted all seeding."""
+    app_root = tmp_path / "app"
+    _make_bundle(app_root)
+    src = _integration_skill(app_root, "todoist-planning", "Plan with Todoist.")
+    manager = SkillsManager(str(tmp_path / "data"))
+    monkeypatch.setattr(builtin_skills, "get_app_root", lambda: str(app_root))
+    monkeypatch.setitem(builtin_skills._integration_skill_dirs, "todoist", [str(src.parent)])
+
+    # Older layout: the directory exists but carries a stamp the finder ignores.
+    old = Path(manager.skills_root) / "general" / "todoist-planning"
+    old.mkdir(parents=True)
+    (old / "SKILL.md").write_text(
+        "---\nname: todoist-planning\ndescription: Plan.\ncategory: general\n"
+        "source: user\n---\n\nPlan with Todoist.",
+        encoding="utf-8",
+    )
+
+    first = builtin_skills.seed_bundled_skills(manager)
+    second = builtin_skills.seed_bundled_skills(manager)
+
+    assert "core-sample" in first and "core-sample" in second
+    assert "todoist-planning" in first
+    adopted = Skill.from_markdown((old / "SKILL.md").read_text(encoding="utf-8"))
+    assert adopted.source == "integration"
+    assert adopted.requires_integration == "todoist"
+
+
+def test_one_failing_skill_does_not_stop_the_rest(monkeypatch, tmp_path, caplog):
+    app_root = tmp_path / "app"
+    _make_bundle(app_root)
+    src = _integration_skill(app_root, "todoist-planning", "Plan with Todoist.")
+    manager = SkillsManager(str(tmp_path / "data"))
+    monkeypatch.setattr(builtin_skills, "get_app_root", lambda: str(app_root))
+    monkeypatch.setitem(builtin_skills._integration_skill_dirs, "todoist", [str(src.parent)])
+    real = builtin_skills._reconcile_one
+
+    def flaky(sm, **kw):
+        if kw["name"] == "core-sample":
+            raise OSError(17, "File exists")
+        return real(sm, **kw)
+
+    monkeypatch.setattr(builtin_skills, "_reconcile_one", flaky)
+    with caplog.at_level("WARNING"):
+        installed = builtin_skills.seed_bundled_skills(manager)
+
+    assert installed == ["todoist-planning"]
+    assert "core-sample" in caplog.text

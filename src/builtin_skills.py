@@ -350,8 +350,15 @@ def _reconcile_one(skills_manager, *, name: str, source_dir: str, destination: O
             return False
         if destination is None:
             destination = os.path.join(skills_manager.skills_root, fields.get("category") or "general", name)
-        os.makedirs(os.path.dirname(destination), exist_ok=True)
-        shutil.copytree(source_dir, destination)
+        # 2026-10-02: an install whose stamp is not `source_label` (an older
+        # layout, a failed re-stamp) is invisible to _find_installed, so the
+        # default path may already exist. copytree then raised EEXIST on
+        # /app/data/skills/general/todoist-planning and aborted the whole
+        # seeding run. Adopt the existing directory instead; the digest rules
+        # below decide whether it is upgraded or kept as an edit.
+        if not os.path.exists(destination):
+            os.makedirs(os.path.dirname(destination), exist_ok=True)
+            shutil.copytree(source_dir, destination)
     skill_path = os.path.join(destination, "SKILL.md")
     try:
         with open(skill_path, encoding="utf-8") as handle:
@@ -425,16 +432,20 @@ def seed_bundled_skills(skills_manager) -> list[str]:
             "category": category, "tags": entry["tags"], "platforms": entry["platforms"],
             "requires_toolsets": entry["requires_toolsets"],
         }
-        ok = _reconcile_one(
-            skills_manager, name=name,
-            source_dir=_bundled_source(app_root, category, name),
-            # Core keeps the canonical path (and adopts a legacy copy there);
-            # curated is located by its curated stamp so an operator's own
-            # skill of the same name is never touched.
-            destination=os.path.join(skills_manager.skills_root, category, name) if core else None,
-            history=history, source_label="bundled" if core else "curated",
-            install=core, fields=fields,
-        )
+        try:
+            ok = _reconcile_one(
+                skills_manager, name=name,
+                source_dir=_bundled_source(app_root, category, name),
+                # Core keeps the canonical path (and adopts a legacy copy there);
+                # curated is located by its curated stamp so an operator's own
+                # skill of the same name is never touched.
+                destination=os.path.join(skills_manager.skills_root, category, name) if core else None,
+                history=history, source_label="bundled" if core else "curated",
+                install=core, fields=fields,
+            )
+        except Exception as exc:  # 2026-10-02: one skill must not stop the rest upgrading
+            logger.warning("Skill %s could not be installed or upgraded: %s", name, exc)
+            continue
         if ok:
             installed.append(name)
             logger.info("Installed/reconciled %s skill: %s", entry["tier"], name)
@@ -443,10 +454,15 @@ def seed_bundled_skills(skills_manager) -> list[str]:
             "category": spec["category"], "tags": spec["tags"], "platforms": spec["platforms"],
             "requires_toolsets": spec["requires_toolsets"], "requires_integration": spec["integration"],
         }
-        if _reconcile_one(
-            skills_manager, name=spec["name"], source_dir=spec["source_dir"], destination=None,
-            history=history, source_label="integration", install=spec["install"], fields=fields,
-        ):
+        try:
+            ok = _reconcile_one(
+                skills_manager, name=spec["name"], source_dir=spec["source_dir"], destination=None,
+                history=history, source_label="integration", install=spec["install"], fields=fields,
+            )
+        except Exception as exc:  # 2026-10-02: see above; log the skill and go on
+            logger.warning("Integration skill %s could not be installed or upgraded: %s", spec["name"], exc)
+            continue
+        if ok:
             installed.append(spec["name"])
     return installed
 
