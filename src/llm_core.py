@@ -1631,7 +1631,11 @@ def _mentions_encrypted_reasoning(body: str) -> bool:
 # backend accepts it was unknown on 2026-10-02 (the public Responses API does),
 # so the first 400 that names it turns the field off for that host; the request
 # is replayed without it and the user never sees the error.
-_RESPONSES_NO_CACHE_RETENTION: set = set()
+# Verified 2026-10-02 (production logs, two process starts): the ChatGPT/Codex
+# backend answers 400 to the field, so it is never sent there; each start used
+# to pay one failed request before the fallback switched it off.
+_KNOWN_NO_CACHE_RETENTION = frozenset({"https://chatgpt.com"})
+_RESPONSES_NO_CACHE_RETENTION: set = set(_KNOWN_NO_CACHE_RETENTION)
 
 
 def _mentions_cache_retention(body: str) -> bool:

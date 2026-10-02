@@ -253,6 +253,7 @@ def _retention(monkeypatch):
     for _s in (llm_core._RESPONSES_NO_CACHE_RETENTION, llm_core._RESPONSES_CACHE_RETENTION_OK,
                llm_core._RESPONSES_CACHE_RETENTION_SUSPECT):
         _s.clear()
+    llm_core._RESPONSES_NO_CACHE_RETENTION.update(llm_core._KNOWN_NO_CACHE_RETENTION)
     llm_core._REJECTED_REQUEST_PARAMS.clear()
 
 
@@ -371,3 +372,9 @@ def test_a_generic_400_on_a_confirmed_host_keeps_the_field(monkeypatch, _retenti
     _fake_backend(monkeypatch, lambda p: "Bad Request")
     assert "event: error" in "".join(asyncio.run(_stream_once()))
     assert _build()["prompt_cache_retention"] == "24h"
+
+
+def test_the_chatgpt_backend_is_known_not_to_take_the_field():
+    """It answered 400 on both process starts in the 2026-10-02 logs."""
+    assert "https://chatgpt.com" in llm_core._RESPONSES_NO_CACHE_RETENTION
+    assert "prompt_cache_retention" not in _build()

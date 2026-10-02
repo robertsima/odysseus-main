@@ -125,3 +125,7 @@ _scratch/
 
 # Test artifact: a mocked skills_root stringified into a real path.
 MagicMock/
+
+# Agent render/review screenshots (Lead Engineer and UI critic). Kept out of
+# the repository: website/ is the GitHub Pages source (2026-10-02).
+.visual-check/

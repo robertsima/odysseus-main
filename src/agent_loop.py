@@ -724,9 +724,10 @@ _DELEGATION_RULES = """\
 - Carry the person's whole request into the brief unchanged. If you think a limit is needed, tell the person why before adding it.
 - Give one worker the whole user-visible outcome, a feature end to end. Split only along independent parts, with one writer per repository or worktree.
 - Write done-when as what the person would check; for UI work, the rendered result next to their reference.
+- For a review of rendered UI, give the reviewer fresh screenshots of the commit under review (in the worktree's untracked `.visual-check/`) and name that commit; checked-in evidence images go stale.
 - While a worker runs, wait (`manage_agent_loadout` status with `wait_seconds`) or do separate work; the worker owns its files and worktree.
 - When it hands back partial or blocked, resume that worker (`send_to_session`, mode agent) with what it needs before starting another.
-- One request, one branch, one publish request. Later parts and fixes of the same request go to the worker that owns its worktree branch (`send_to_session`), not to a new worker on a new branch. Tell a worker doing one part of a larger delivery to commit and report "ready to publish" without requesting a publish; the part that completes the request requests it once, after the checks pass. A new request after the person merged the last pull request starts a new branch.
+- One request, one branch, one publish request. Later parts and fixes of the same request go to the worker that owns its worktree branch (`send_to_session`), not to a new worker on a new branch. Tell a worker doing one part of a larger delivery to commit and report "ready to publish" without requesting a publish; the part that completes the request requests it once, after the checks and the review pass. When you will review a worker's result yourself, tell it to report "ready to publish", then resume it to request the publish once your review passes. A new request after the person merged the last pull request starts a new branch.
 - A worker's report is a claim; read the evidence it names (diff, test output, pull request) before telling the user.
 - Run tests and builds yourself; a reviewer reads and judges. Ask for one independent review per iteration, after the work is done."""
 

@@ -1744,11 +1744,14 @@ async def _continue_parent(manager, parent_id: str, parent, worker, owner: Optio
 _PUBLISH_FOLLOWUP_NOTE = (
     "[Harness note, not from the user] The publish request above was approved and has gone out; "
     "that request is spent. Carry on with the request this chat is working on: check the pull "
-    "request's CI run and fix a failure on the same branch, along with anything else left after "
-    "publication. Commits made from here on are unpublished: they need a new request_publish and a "
-    "new approval. State what is published or waiting only from manage_agent_worktree status (its "
-    "publish block for the branch). When CI is green and nothing else in the request is open, state "
-    "the outcome in one or two sentences with the pull request link.{budget}"
+    "request's CI run and fix a failure your change caused, on the same branch, along with anything "
+    "else left after publication. A check that also fails on the base branch, or fails on files "
+    "your change did not touch, is not yours to fix: name it and its cause in your report, and leave "
+    "it for the person. Commits made from here on are unpublished: they need a new request_publish "
+    "and a new approval. State what is published or waiting only from manage_agent_worktree status "
+    "(its publish block for the branch). When the checks your change affects are green and nothing "
+    "else in the request is open, state the outcome in one or two sentences with the pull request "
+    "link.{budget}"
 )
 
 

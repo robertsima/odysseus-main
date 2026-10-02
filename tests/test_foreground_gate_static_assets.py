@@ -80,3 +80,16 @@ def test_calendar_background_refetches_are_marked_as_polls():
 def test_the_poll_header_makes_calendar_refetches_passive():
     headers = {"x-odysseus-poll": "1"}
     assert should_track_interactive_request("/api/calendar/events", "GET", headers) is False
+
+
+def test_an_asset_path_outside_static_does_not_count_as_a_person(monkeypatch):
+    """2026-10-02: a stale tab fetched /branding/agamemnon-agent-marks.svg (the
+    app serves /static/branding/), and that 404 stopped a scheduled task."""
+    import src.interactive_gate as gate
+
+    monkeypatch.setattr(gate, "_enabled", lambda: True)
+    assert gate.should_track_interactive_request("/branding/agamemnon-agent-marks.svg", "GET") is False
+    assert gate.should_track_interactive_request("/fonts/x.woff2", "GET") is False
+    # An API call, or a write, is still a person asking for something.
+    assert gate.should_track_interactive_request("/api/files/logo.svg", "GET") is True
+    assert gate.should_track_interactive_request("/branding/x.svg", "POST") is True

@@ -40,7 +40,33 @@ jobs:
         with:
           persist-credentials: false
 
+      # A fork starts with Dependency graph off, and then every PR failed this
+      # job with "Dependency review is not supported on this repository"
+      # (2026-10-02: agents spent rounds investigating it on each PR). Probe
+      # the same API the action uses; skip with a notice only for that
+      # condition, and let the action run (and report) everything else.
+      - name: Check that the dependency graph is enabled
+        id: graph
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -uo pipefail
+          if out=$(gh api "repos/${REPO}/dependency-graph/compare/${BASE_SHA}...${HEAD_SHA}" 2>&1 >/dev/null); then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          elif grep -qiE "HTTP 403|dependency graph is enabled" <<<"$out"; then
+            # The API answers a bare 403 "Forbidden" while the graph is off;
+            # the action turns that same 403 into its "not supported" error.
+            echo "::notice title=Dependency review skipped::Dependency graph is off for ${REPO}. Turn it on under Settings > Code security to enable this gate."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Review dependency changes
+        if: steps.graph.outputs.enabled == 'true'
         uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294  # v5.0.0
         with:
           # Fail the PR on any newly introduced moderate-or-worse advisory.

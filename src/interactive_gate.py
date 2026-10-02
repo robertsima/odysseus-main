@@ -145,6 +145,22 @@ _PASSIVE_ROOT_ASSETS = {
 }
 _PASSIVE_ROOT_ASSET_PREFIXES = ("/apple-touch-icon", "/icons/", "/favicon")
 
+# A GET outside /api/ for a file-type path is the browser fetching an asset,
+# usually one a cached older page still names. 2026-10-02: a stale tab asked
+# for /branding/agamemnon-agent-marks.svg (the app serves /static/branding/),
+# and that 404 stopped a running scheduled task.
+_PASSIVE_ASSET_SUFFIXES = (
+    ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".ico", ".bmp",
+    ".css", ".js", ".mjs", ".map", ".woff", ".woff2", ".ttf", ".otf", ".eot",
+    ".webmanifest", ".mp3", ".mp4", ".webm", ".wav", ".ogg",
+)
+
+
+def _is_asset_path(path: str) -> bool:
+    if path.startswith("/api/"):
+        return False
+    return path.lower().rsplit("?", 1)[0].endswith(_PASSIVE_ASSET_SUFFIXES)
+
 # Clients put this on requests fired by a timer rather than by a person, so a
 # poll that reuses a genuinely interactive endpoint (the inbox unread-count
 # ticker hitting /api/email/list, say) does not read as user intent. Only GET /
@@ -184,6 +200,7 @@ def should_track_interactive_request(path: str, method: str = "GET", headers=Non
     if verb in {"GET", "HEAD"} and (
         path in _PASSIVE_ROOT_ASSETS
         or any(path.startswith(prefix) for prefix in _PASSIVE_ROOT_ASSET_PREFIXES)
+        or _is_asset_path(path)
     ):
         return False
     if headers is not None and verb in {"GET", "HEAD"}:
