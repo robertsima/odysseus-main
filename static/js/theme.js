@@ -271,7 +271,18 @@ function generateHarmonyColors(accentHex, harmonyType, mode) {
 // colors doesn't accidentally pick up Agamemnon's navigation layout, and a
 // recolored Agamemnon still gets its own layout.
 export function applyThemeIdentity(name) {
-  document.documentElement.setAttribute('data-theme', name || DEFAULT_THEME);
+  const identity = name || DEFAULT_THEME;
+  document.documentElement.setAttribute('data-theme', identity);
+  const message = document.getElementById('message');
+  if (message) message.placeholder = identity === 'dark' ? 'Message Scribe…' : 'Message Odysseus...';
+  // A theme switch may leave Customize selected. Return to the available tab
+  // without removing the functional controls from the regular theme.
+  if (identity === 'dark') {
+    const customize = document.getElementById('theme-tab-customize');
+    if (customize?.style.display !== 'none') {
+      document.querySelector('#theme-tabs [data-tab="theme-tab-browse"]')?.click();
+    }
+  }
 }
 
 export function applyColors(colors) {

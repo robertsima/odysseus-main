@@ -149,8 +149,8 @@
         var agApple = document.querySelector("link[rel='apple-touch-icon']");
         if (!agApple) { agApple = document.createElement('link'); agApple.rel = 'apple-touch-icon'; document.head.appendChild(agApple); }
         agApple.href = '/static/branding/agamemnon-trojan-helmet.svg';
-        var agNames = {'/calendar':'Calendar','/notes':'Notes','/cookbook':'Cookbook','/email':'Email','/memory':'Memory','/gallery':'Gallery','/tasks':'Tasks','/library':'Library'};
-        document.title = (agNames[path] ? agNames[path] + ' — ' : '') + 'Agamemnon';
+        var agNames = {'/':'Scribe','/agents':'Phalanx','/workbench':'Workbench','/calendar':'Calendar','/notes':'Notes','/cookbook':'Cookbook','/email':'Email','/memory':'Memory','/gallery':'Gallery','/tasks':'Tasks','/library':'Library'};
+        document.title = (agNames[path] || 'Scribe') + ' — Agamemnon';
         try {
           if (typeof Blob !== 'undefined') {
             var agPwa = {name:'Agamemnon',short_name:'Agamemnon',start_url:path,scope:'/',display:'standalone',background_color:'#111417',theme_color:brandGold,icons:[{src:'/static/branding/agamemnon-trojan-helmet.svg',sizes:'any',type:'image/svg+xml',purpose:'any'}]};
@@ -371,24 +371,24 @@
   <div id="workbench-modal" class="modal hidden">
     <div class="modal-content workbench-modal-content" role="dialog" aria-label="Workbench" style="background:var(--bg)">
       <div class="modal-header">
-        <h4><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4M6 8l3 3-3 3M11 14h5"/></svg><span class="ag-workbench-title">WORKBENCH / RUN CONTROL</span><span class="ody-workbench-title">Workbench</span></h4>
+        <h4><span class="ag-workbench-title">Workbench</span><span class="ody-workbench-title">Workbench</span></h4>
         <button type="button" class="wb-icon-btn" id="wb-dock-right" title="Dock to the right edge" aria-label="Dock to the right edge"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg></button>
         <button class="close-btn" id="close-workbench-modal" aria-label="Close workbench">✖</button>
       </div>
       <div class="modal-body workbench-modal-body">
-        <div class="ag-run-control" aria-label="Run control summary">
-          <section class="ag-run-summary"><h3 id="ag-run-title">RUN SUMMARY</h3><p id="ag-run-summary-meta">No run selected · activity ready</p></section>
-          <section class="ag-run-timeline"><h3>RUN TIMELINE</h3><ol id="ag-run-timeline-list"><li>Run events will appear here as they are recorded.</li></ol></section>
-          <section class="ag-run-console"><h3>OUTPUT / ARTIFACTS</h3><div class="ag-run-console-output" id="ag-run-console-output">Actual run output and source links appear here when available.</div></section>
+        <div class="memory-tabs wb-tabs" role="tablist" aria-label="Workbench views">
+          <button id="wb-tab-activity" class="memory-tab active" data-wb-tab="activity" role="tab" aria-controls="wb-panel-activity" aria-selected="true" tabindex="0">Activity<span class="wb-tab-badge" data-wb-badge="activity" hidden></span></button>
+          <button id="wb-tab-changes" class="memory-tab" data-wb-tab="changes" role="tab" aria-controls="wb-changes" aria-selected="false" tabindex="-1">Changes<span class="wb-tab-badge" data-wb-badge="changes" hidden></span></button>
+          <button id="wb-tab-commits" class="memory-tab" data-wb-tab="commits" role="tab" aria-controls="wb-commits" aria-selected="false" tabindex="-1">Commits<span class="wb-tab-badge" data-wb-badge="commits" hidden></span></button>
+          <button id="wb-tab-prs" class="memory-tab" data-wb-tab="prs" role="tab" aria-controls="wb-prs" aria-selected="false" tabindex="-1">Pull Requests</button>
         </div>
-        <aside class="ag-run-detail" aria-label="Run details"><section><h3>RUN DETAILS</h3><dl><div><dt>Agent</dt><dd id="ag-run-agent">—</dd></div><div><dt>Started</dt><dd id="ag-run-started">—</dd></div><div><dt>Status</dt><dd id="ag-run-status">Ready</dd></div></dl></section><section><h3>ACTIVITY</h3><p id="ag-run-activity-note">Inspect the recorded per-run event history below.</p></section><section><h3>CUSTOMIZE</h3><p>Use the secondary views below for changes, commits, pull requests, evidence density, and filters.</p></section></aside>
-        <div class="memory-tabs wb-tabs" role="tablist">
-          <button class="memory-tab active" data-wb-tab="activity" role="tab">Activity<span class="wb-tab-badge" data-wb-badge="activity" hidden></span></button>
-          <button class="memory-tab" data-wb-tab="changes" role="tab">Changes<span class="wb-tab-badge" data-wb-badge="changes" hidden></span></button>
-          <button class="memory-tab" data-wb-tab="commits" role="tab">Commits<span class="wb-tab-badge" data-wb-badge="commits" hidden></span></button>
-          <button class="memory-tab" data-wb-tab="prs" role="tab">Pull Requests</button>
-        </div>
-        <div class="wb-panel" data-wb-panel="activity">
+        <div id="wb-panel-activity" class="wb-panel" data-wb-panel="activity" role="tabpanel" aria-labelledby="wb-tab-activity">
+          <div class="ag-run-control" aria-label="Run control summary">
+            <section class="ag-run-summary"><h3 id="ag-run-title">RUN SUMMARY</h3><p id="ag-run-summary-meta">No run selected · activity ready</p></section>
+            <section class="ag-run-timeline"><h3>RUN TIMELINE</h3><ol id="ag-run-timeline-list"><li>Run events will appear here as they are recorded.</li></ol></section>
+            <section class="ag-run-console"><h3>OUTPUT / ARTIFACTS</h3><div class="ag-run-console-output" id="ag-run-console-output">Actual run output and source links appear here when available.</div></section>
+          </div>
+          <aside class="ag-run-detail" aria-label="Run details"><section><h3>RUN DETAILS</h3><dl><div><dt>Agent</dt><dd id="ag-run-agent">—</dd></div><div><dt>Started</dt><dd id="ag-run-started">—</dd></div><div><dt>Status</dt><dd id="ag-run-status">Ready</dd></div></dl></section><section><h3>ACTIVITY</h3><p id="ag-run-activity-note">Inspect the recorded per-run event history below.</p></section></aside>
           <div class="wb-toolbar">
             <select id="wb-scope" class="wb-select" title="Which sessions to follow" aria-label="Scope"><option value="session">This chat</option><option value="all">All sessions</option></select>
             <select id="wb-filter" class="wb-select" title="Filter by source" aria-label="Source"><option value="">All sources</option><option value="odysseus">Odysseus</option><option value="claude_code">Claude Code</option><option value="session">Sub-agents</option><option value="pipeline">Pipelines</option><option value="bg_job">Background jobs</option><option value="worktree">Worktree</option><option value="system">System</option></select>
@@ -399,9 +399,9 @@
           </div>
           <div class="wb-activity" id="wb-activity"></div>
         </div>
-        <div class="wb-panel hidden" data-wb-panel="changes" id="wb-changes"></div>
-        <div class="wb-panel hidden" data-wb-panel="commits" id="wb-commits"></div>
-        <div class="wb-panel hidden" data-wb-panel="prs" id="wb-prs"></div>
+        <div class="wb-panel hidden" data-wb-panel="changes" id="wb-changes" role="tabpanel" aria-labelledby="wb-tab-changes"></div>
+        <div class="wb-panel hidden" data-wb-panel="commits" id="wb-commits" role="tabpanel" aria-labelledby="wb-tab-commits"></div>
+        <div class="wb-panel hidden" data-wb-panel="prs" id="wb-prs" role="tabpanel" aria-labelledby="wb-tab-prs"></div>
       </div>
     </div>
   </div>
@@ -413,8 +413,8 @@
           <span class="ag-window-antenna"></span><i></i><i></i>
         </div>
         <div class="ag-window-title">
-          <h3 id="ag-window-title"><span class="ag-phalanx-title">AGENT SPACE / PHALANX</span><span class="ody-agents-title">Agent Control Room</span></h3>
-          <span id="ag-window-summary"><span class="ag-phalanx-summary">Activity and health states · durable command units</span><span class="ody-agents-summary">Fleet telemetry and live controls</span></span>
+          <h3 id="ag-window-title"><span class="ag-phalanx-title">Phalanx</span><span class="ody-agents-title">Agent Control Room</span></h3>
+          <span id="ag-window-summary"><span class="ag-phalanx-summary">Command center</span><span class="ody-agents-summary">Fleet telemetry and live controls</span></span>
         </div>
         <div class="ag-window-actions">
           <button type="button" class="doc-action-icon-btn" id="ag-dock-left" title="Dock left" aria-label="Dock Agent Control Room left">&#9703;</button>
@@ -879,7 +879,7 @@
     <button class="icon-rail-btn" id="rail-gallery" title="Gallery"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg></button>
     <button class="icon-rail-btn" id="rail-archive" title="Library"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><path d="M9 7h6M9 11h4"/></svg></button>
     <button class="icon-rail-btn" id="rail-memory" title="Brain"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/></svg></button>
-    <button class="icon-rail-btn" id="rail-agents" title="Agents — every running chat and worker (Ctrl+Shift+A)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M17.5 14v7M14 17.5h7"/></svg><span class="rail-agents-badge" id="rail-agents-badge" hidden></span></button>
+    <button class="icon-rail-btn" id="rail-agents" title="Phalanx — every running chat and worker (Ctrl+Shift+A)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M17.5 14v7M14 17.5h7"/></svg><span class="rail-agents-badge" id="rail-agents-badge" hidden></span></button>
     <button class="icon-rail-btn" id="rail-workbench" title="Workbench — agent activity, changes, PRs"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4M6 8l3 3-3 3M11 14h5"/></svg></button>
     <button class="icon-rail-btn" id="rail-notes" title="Notes"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h10l4 4v14H5z"/><path d="M15 3v5h5"/><path d="M8 17.5 15.5 10l2.5 2.5L10.5 20H8z"/></svg></button>
     <button class="icon-rail-btn" id="rail-tasks" title="Tasks"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M9 16l2 2 4-4"/></svg></button>
@@ -908,6 +908,12 @@
       <div class="list-item" id="sidebar-search-btn" title="Search conversations (Ctrl+K)">
         <svg class="sidebar-action-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="10" cy="10" r="7"/><path d="M21 21l-4.35-4.35"/></svg>
         <span class="grow" style="position:relative;left:-1px;">Search</span>
+      </div>
+      <div class="list-item ag-command-link" id="sidebar-agents-shortcut" role="button" tabindex="0" title="Open agents">
+        <span class="ag-command-icon" aria-hidden="true">◈</span><span class="grow">Phalanx</span>
+      </div>
+      <div class="list-item ag-command-link" id="sidebar-workbench-shortcut" role="button" tabindex="0" title="Open workbench">
+        <span class="ag-command-icon" aria-hidden="true">▤</span><span class="grow">Workbench</span>
       </div>
       <!-- Assistant sidebar entry removed — its log + settings live inside
            the Tasks modal (Activity + Settings tabs). The backend
@@ -1114,7 +1120,7 @@
             style="flex-shrink:0;opacity:0.5;">
             <rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M17.5 14v7M14 17.5h7"/>
           </svg>
-          <span class="grow">Agents</span>
+          <span class="grow"><span class="ag-nav-label">Phalanx</span><span class="ody-nav-label">Agents</span></span>
           <span id="tool-agents-dot" class="sidebar-notif-dot" style="display:none"></span>
         </div>
         <div class="list-item" id="tool-workbench-btn" title="Agent activity, changes and pull requests">
@@ -1143,21 +1149,27 @@
 
   <main class="chat-container welcome-active" id="chat-container" aria-label="Chat area" aria-busy="false">
     <header class="ag-page-heading">
-      <h1>CHAT / STRATEGY ROOM</h1>
+      <h1>Scribe</h1>
       <p><span id="ag-session-number">NEW CHAT</span> <b>·</b> <span id="ag-session-label">New operation</span> <b>·</b> <strong id="ag-chat-status" aria-live="polite">Ready to send</strong></p>
     </header>
     <aside class="ag-context-rail" aria-label="Session context">
       <section><h3>SESSION CONTEXT</h3><dl><div><dt>Agent</dt><dd>Agamemnon</dd></div><div><dt>Model</dt><dd id="ag-chat-model">Default</dd></div><div><dt>Status</dt><dd id="ag-context-status">Ready to send</dd></div></dl></section>
       <section><h3>RUN CONTROLS</h3><button type="button" id="ag-open-agents">Open phalanx</button><button type="button" id="ag-open-workbench">Inspect activity</button></section>
       <section><h3>EVIDENCE</h3><p>Sources and artifacts attach to answers when available.</p></section>
-      <section><h3>CUSTOMIZE</h3><p>Palette · density · command layout</p><button type="button" id="ag-open-theme">Appearance</button></section>
+
     </aside>
     <script nonce="{{CSP_NONCE}}">
     (() => {
       const relay = (source, target) => document.getElementById(source)?.addEventListener('click', () => document.getElementById(target)?.click());
       relay('ag-open-agents', 'rail-agents');
       relay('ag-open-workbench', 'rail-workbench');
-      relay('ag-open-theme', 'rail-theme');
+      relay('sidebar-agents-shortcut', 'rail-agents');
+      relay('sidebar-workbench-shortcut', 'rail-workbench');
+      for (const id of ['sidebar-agents-shortcut', 'sidebar-workbench-shortcut']) {
+        document.getElementById(id)?.addEventListener('keydown', e => {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.currentTarget.click(); }
+        });
+      }
     })();
     </script>
     <!-- Persistent page heading for assistive tech. Visually hidden so it

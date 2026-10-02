@@ -26,10 +26,11 @@ def test_exact_penpot_geometry_palette_and_typography_are_present():
 
 
 def test_three_mockup_surface_titles_and_context_composition_exist():
-    for label in ('CHAT / STRATEGY ROOM', 'AGENT SPACE / PHALANX', 'WORKBENCH / RUN CONTROL'):
+    for label in ('Scribe', 'Phalanx', 'Command center', 'Workbench'):
         assert label in HTML
-    for id_ in ('ag-open-agents', 'ag-open-workbench', 'ag-open-theme'):
+    for id_ in ('ag-open-agents', 'ag-open-workbench', 'sidebar-agents-shortcut', 'sidebar-workbench-shortcut'):
         assert id_ in HTML
+    assert 'id="ag-open-theme"' not in HTML
     assert 'SESSION CONTEXT' in HTML and 'RUN CONTROLS' in HTML and 'EVIDENCE' in HTML
 
 
@@ -74,7 +75,7 @@ def test_layout_lives_in_one_agamemnon_file():
     assert 'max-width:1400px' not in fixes
     # Nothing in the Agamemnon layer may force a Workbench panel visible.
     assert 'wb-panel{display' not in CSS and 'wb-panel{display' not in fixes
-    assert '.wb-panel.hidden{' not in CSS + fixes
+    assert '#workbench-modal .wb-panel.hidden{display:none!important}' in CSS
 
 
 def test_full_page_tool_windows_yield_to_docking():

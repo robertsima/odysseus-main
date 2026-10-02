@@ -2474,7 +2474,12 @@ function initializeEventListeners() {
 	        textarea.setAttribute('placeholder', 'Swipe to toggle plan');
 	        return;
 	      }
-	      textarea.setAttribute('placeholder', width < PLACEHOLDER_COMPACT_WIDTH ? 'Message...' : 'Message Odysseus...');
+	      // Docking and responsive picker changes re-run this setter. Keep its
+	      // identity in sync with the active theme instead of restoring the
+	      // ordinary chat name after the theme module has applied Scribe.
+	      const scribe = document.documentElement.dataset.theme === 'dark';
+	      textarea.setAttribute('placeholder', scribe ? 'Message Scribe…' :
+	        (width < PLACEHOLDER_COMPACT_WIDTH ? 'Message...' : 'Message Odysseus...'));
 	    }
 
 	    if (_isMobile && textarea && !textarea._odysseusPlanPlaceholderHint) {

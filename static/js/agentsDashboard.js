@@ -354,7 +354,12 @@ function updateBadges() {
   if (dot) dot.style.display = attention ? 'inline-block' : 'none';
   $('rail-agents')?.classList.toggle('rail-notify', attention > 0);
   const summary = $('ag-window-summary');
-  if (summary) summary.textContent = `${running} active · ${attention} waiting · ${state.totals.finished_24h || 0} completed today`;
+  if (summary) {
+    const counts = `${running} active · ${attention} waiting · ${state.totals.finished_24h || 0} completed today`;
+    // Keep both identities mounted so switching themes restores the original
+    // Control Room summary without reloading the window.
+    summary.innerHTML = `<span class="ag-phalanx-summary">Command center · ${counts}</span><span class="ody-agents-summary">${counts}</span>`;
+  }
 }
 async function loadCatalog() {
   if (state.catalog) return state.catalog;
