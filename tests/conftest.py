@@ -152,3 +152,24 @@ def _reset_search_resilience_state():
         late = sys.modules.get("services.search.resilience")
         if late is not None:
             late.reset_state()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_integration_skill_registrations():
+    """Restore src.builtin_skills' registered integration skill dirs after each test.
+
+    App start-up (src/app_initializer.py) registers every integration package's
+    skills in a module-level dict. Since 2026-10-02 several tests run start-up,
+    and in CI's serial order the next seeding test then installed Todoist and
+    Claude Code skills it never registered.
+    """
+    mod = sys.modules.get("src.builtin_skills")
+    saved = dict(mod._integration_skill_dirs) if mod is not None else None
+    try:
+        yield
+    finally:
+        late = sys.modules.get("src.builtin_skills")
+        if late is not None:
+            late._integration_skill_dirs.clear()
+            if saved is not None and late is mod:
+                late._integration_skill_dirs.update(saved)
