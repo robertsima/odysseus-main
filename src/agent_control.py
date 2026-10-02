@@ -469,7 +469,7 @@ def is_wait_only_call(tool: str, content: str) -> bool:
     """
     name = str(tool or "")
     if name not in ("manage_agent_loadout", "orchestrate_agents", "delegate_to_agent",
-                    "delegate_to_claude_code"):
+                    "delegate_to_claude_code", "manage_agent_worktree"):
         return False
     text = str(content or "").strip()
     if not text.startswith("{"):
@@ -488,6 +488,8 @@ def is_wait_only_call(tool: str, content: str) -> bool:
         return action == "wait" or (not isinstance(wait, bool) and bool(wait))
     if name == "orchestrate_agents":
         return action == "wait"
+    if name == "manage_agent_worktree":
+        return action == "checks" and bool(args.get("wait_seconds"))
     return action == "poll" and bool(args.get("wait_seconds"))
 
 
@@ -1743,11 +1745,13 @@ async def _continue_parent(manager, parent_id: str, parent, worker, owner: Optio
 
 _PUBLISH_FOLLOWUP_NOTE = (
     "[Harness note, not from the user] The publish request above was approved and has gone out; "
-    "that request is spent. Carry on with the request this chat is working on: check the pull "
-    "request's CI run and fix a failure your change caused, on the same branch, along with anything "
-    "else left after publication. A check that also fails on the base branch, or fails on files "
-    "your change did not touch, is not yours to fix: name it and its cause in your report, and leave "
-    "it for the person. Commits made from here on are unpublished: they need a new request_publish "
+    "that request is spent. Carry on with the request this chat is working on: read the pull "
+    "request's CI with manage_agent_worktree checks (branch = this branch, wait_seconds = 600), which "
+    "waits inside the harness until the checks finish; call it again if it returns with complete "
+    "false. Fix a failure your change caused, on the same branch, along with anything else left "
+    "after publication. A check marked also_fails_on_base, or one that fails on files your change "
+    "did not touch, is not yours to fix: name it and its cause in your report, and leave it for the "
+    "person. Commits made from here on are unpublished: they need a new request_publish "
     "and a new approval. State what is published or waiting only from manage_agent_worktree status "
     "(its publish block for the branch). When the checks your change affects are green and nothing "
     "else in the request is open, state the outcome in one or two sentences with the pull request "

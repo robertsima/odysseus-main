@@ -422,6 +422,21 @@ async def pull_request_checks(cfg: WorktreeConfig, token: str, head_sha: str) ->
     } for r in (runs or []) if isinstance(r, dict)]
 
 
+async def branch_head_sha(cfg: WorktreeConfig, token: str, branch: str) -> str:
+    """Head commit of a branch on the remote ('' when it is unknown).
+
+    Lets a caller compare a PR's checks with the same checks on its base.
+    """
+    from urllib.parse import quote
+
+    name = normalize_branch(branch)
+    if not name:
+        return ""
+    data = await _api(cfg, token, "GET", f"/repos/{cfg.repo_slug}/branches/{quote(name, safe='/')}")
+    sha = str(((data or {}).get("commit") or {}).get("sha") or "") if isinstance(data, dict) else ""
+    return sha if sha and all(ch in "0123456789abcdefABCDEF" for ch in sha) else ""
+
+
 async def pull_request_diff(cfg: WorktreeConfig, token: str, number: int) -> Dict:
     text = await _api(cfg, token, "GET", f"/repos/{cfg.repo_slug}/pulls/{int(number)}",
                       accept="application/vnd.github.diff")

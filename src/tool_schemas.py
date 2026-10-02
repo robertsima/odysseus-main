@@ -429,7 +429,7 @@ FUNCTION_TOOL_SCHEMAS = [
             "name": "manage_agent_worktree",
             "strict": False,
             "description": (
-                "Isolated, human-gated publishing worktree for a repository; send only the fields the chosen action uses. start (name = task name, base = origin/main, a branch or a SHA) makes branch agent/<repo>/<name>; status, diff and commit work in it; request_publish freezes the change; a person approves it in the Odysseus UI (pushes nothing); show_request and list_requests follow it; cleanup removes a clean worktree. Pass `repository` (absolute path from manage_git repositories) for any project, and the same value on later calls; omit it only for the Odysseus source checkout. publish needs a request_id and an approval_code a person gives you; you cannot approve your own change. repo_list, repo_status and repo_pull are legacy: use manage_git."
+                "Isolated, human-gated publishing worktree for a repository; send only the fields the chosen action uses. start (name = task name, base = origin/main, a branch or a SHA) makes branch agent/<repo>/<name>; status, diff and commit work in it; request_publish freezes the change; a person approves it in the Odysseus UI (pushes nothing); show_request and list_requests follow it; checks reads the open PR's CI (wait_seconds waits for it to finish in one call), marking failures that also fail on the base; cleanup removes a clean worktree. Pass `repository` (absolute path from manage_git repositories) for any project, and the same value on later calls; omit it only for the Odysseus source checkout. publish needs a request_id and an approval_code a person gives you; you cannot approve your own change. repo_list, repo_status and repo_pull are legacy: use manage_git."
             ),
             "parameters": {
                 "type": "object",
@@ -437,13 +437,14 @@ FUNCTION_TOOL_SCHEMAS = [
                     "action": {
                         "type": "string",
                         "enum": ["status", "start", "commit", "diff", "request_publish",
-                                 "publish", "list_requests", "show_request", "cleanup",
+                                 "publish", "list_requests", "show_request", "checks", "cleanup",
                                  "repo_list", "repo_status", "repo_pull"],
                         "description": "Default status. repo_list, repo_status and repo_pull are legacy; use manage_git for repository listing and sync."
                     },
                     "repository": {"type": "string", "description": "Absolute checkout path from manage_git repositories, not a URL. Omit only for the Odysseus source checkout."},
                     "name": {"type": "string", "description": "start only: task name; the branch becomes agent/<repo>/<name> (agent/odysseus/<name> without repository)"},
-                    "branch": {"type": "string", "description": "Full agent branch, when it already exists. Not a base such as origin/main"},
+                    "branch": {"type": "string", "description": "Full agent branch, when it already exists (checks, diff, commit...). Not a base such as origin/main"},
+                    "wait_seconds": {"type": "integer", "description": "checks only: wait up to this many seconds (0-900, default 0) for running checks to finish; ends early when the user writes"},
                     "base": {"type": "string", "description": "start only: existing ref or commit the new branch starts from (origin/main, a branch, or a SHA). Default: the configured base (Odysseus) or origin/HEAD"},
                     "expected_base": {"type": "string", "description": "start only: full commit SHA base must resolve to; start refuses on mismatch"},
                     "message": {"type": "string", "description": "Commit message (action=commit)"},

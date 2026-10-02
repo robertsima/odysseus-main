@@ -5341,7 +5341,7 @@ def _bare_tool_name(tool_type: str) -> str:
 # the same failure the name-shape check was added to fix for MCP tools.
 _DEDUPE_POLLING_ACTIONS = frozenset({
     "poll", "status", "check", "wait", "progress", "tail", "watch", "list",
-    "list_requests", "show_request", "peek", "state",
+    "list_requests", "show_request", "peek", "state", "checks",
 })
 
 

@@ -20,7 +20,7 @@ from src.tool_utils import _parse_tool_args
 logger = logging.getLogger(__name__)
 
 _ACTIONS = ("status", "start", "commit", "diff", "request_publish",
-            "publish", "list_requests", "show_request", "cleanup",
+            "publish", "list_requests", "show_request", "checks", "cleanup",
             "repo_list", "repo_status", "repo_pull")
 
 # Refused by policy rather than merely unknown: `remove` runs
@@ -98,7 +98,7 @@ def _similar_request_hint(request_id: str, cfg, ctx: Dict[str, Any] | None = Non
 
 
 # Actions that work on one named worktree, in the order an agent needs them.
-_BRANCH_ACTIONS = ("commit", "diff", "request_publish", "cleanup")
+_BRANCH_ACTIONS = ("commit", "diff", "request_publish", "checks", "cleanup")
 
 
 def _next_step(code: str, action: str, branch: str, repository: str = "") -> Dict[str, Any]:
@@ -326,6 +326,9 @@ class AgentWorktreeTool:
                 return {"exit_code": 0, "diff": await service.diff_summary(
                     branch, cfg=cfg, repository=repository or None)}
 
+            if action == "checks":
+                return await self._checks(args, ctx, cfg, branch, repository)
+
             if action == "cleanup":
                 return {"exit_code": 0, "cleanup": await service.cleanup(
                     branch, cfg=cfg, repository=repository or None)}
@@ -392,6 +395,36 @@ class AgentWorktreeTool:
                         **(_next_step(code, action, branch, repository) if code else {}))
 
         return _err("manage_agent_worktree: unreachable action")
+
+    async def _checks(self, args: dict, ctx: dict, cfg, branch: str, repository: str) -> Dict[str, Any]:
+        """CI checks of the branch's open pull request (src/agent_worktree/checks.py).
+
+        Read-only. The wait lives here, not in the worker's shell: on
+        2026-10-02 workers polled CI with `sleep 60` between model rounds.
+        """
+        from src.agent_worktree import checks as checks_mod
+        from src.agent_worktree import service
+        from src.agent_worktree.github import pr_access_blockers
+
+        rcfg, resolved, _path = await service._locate(cfg, branch, repository or None)
+        blockers = pr_access_blockers(rcfg)
+        if blockers:
+            return _err("manage_agent_worktree checks: GitHub is not readable from here: "
+                        + "; ".join(blockers) + ". Tell the person; CI cannot be checked until it is set up.",
+                        code="GITHUB_UNAVAILABLE")
+        try:
+            return await checks_mod.branch_checks(
+                rcfg, resolved, wait_seconds=args.get("wait_seconds") or 0,
+                session_id=str(ctx.get("session_id") or "") or None)
+        except checks_mod.NoOpenPullRequest:
+            where = {"repository": repository} if repository else {}
+            return _err(
+                f"manage_agent_worktree checks: {resolved} has no open pull request, so there are no "
+                "checks to read. Call status and read the branch's publish block: with no request, "
+                "commit and call request_publish; with a request waiting, the person has not approved "
+                "it yet; with a request published, the PR may be merged or closed.",
+                code="NO_OPEN_PULL_REQUEST", next_action={"action": "status", "name": resolved, **where})
+
 
     async def _repo_execute(self, args: dict, ctx: dict) -> dict:
         """Separate scoped checkout sync from the app's publishing worktree."""
