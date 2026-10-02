@@ -73,7 +73,7 @@ judgment.
   tools; publish only through `manage_agent_worktree`.
 - **Cloud runner.** When nobody should sign in inside the container, Claude
   Code runs in GitHub Actions instead (`src/claude_cloud.py`). Odysseus
-  dispatches `integrations/claude/github/odysseus-claude.yml` in an
+  dispatches `clients/claude/github/odysseus-claude.yml` in an
   allowlisted repository (`claude_cloud_repositories`). Anthropic's official
   action runs Claude with the operator's credential from the repository's
   secrets, on a `claude/odysseus-<id>` branch. The workflow itself commits,

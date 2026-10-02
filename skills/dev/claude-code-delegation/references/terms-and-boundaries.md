@@ -20,7 +20,7 @@ authority and change over time.
 ## The cloud runner (GitHub Actions)
 
 `src/claude_cloud.py` can instead dispatch
-`integrations/claude/github/odysseus-claude.yml` in an allowlisted repository,
+`clients/claude/github/odysseus-claude.yml` in an allowlisted repository,
 where Anthropic's official `anthropics/claude-code-action` runs the unmodified
 Claude Code with the operator's own credential from that repository's secrets
 (`CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`, or `ANTHROPIC_API_KEY`;

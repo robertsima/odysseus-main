@@ -194,7 +194,7 @@ The project would not exist without them — credit where credit is due:
 
 ## Agent skills
 
-These skills are bundled under `skills/` and seeded into the skill library (`src/builtin_skills.py`). The text is taken from the upstream projects below and lightly adapted for Odysseus tools; each `SKILL.md` ends with a Provenance block giving the exact source file and commit.
+These skills ship under `skills/` and are listed in `skills/catalog.json`; they are installed on request from the Recommended skills catalog (`src/builtin_skills.py`). The text is taken from the upstream projects below and lightly adapted for Odysseus tools; each `SKILL.md` ends with a Provenance block giving the exact source file and commit.
 
 | Skill | Source | Author | License |
 |---|---|---|---|

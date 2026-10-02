@@ -28,7 +28,7 @@ import tempfile
 import time
 from typing import Dict, Iterable, List, Optional
 
-from .skill_format import Skill, slugify
+from .skill_format import Skill, slugify, is_app_shipped_source
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +115,19 @@ def _to_float(x, default: float = 0.0) -> float:
         return default
 
 
+def _hidden_by_integration(skill: Dict, available_integrations: Optional[set]) -> bool:
+    """True when `skill` needs an integration that is not available.
+
+    `available_integrations=None` means the caller does not know (API
+    listings, UI) and nothing is hidden; only an explicit set filters, the same
+    rule `active_toolsets` follows.
+    """
+    if available_integrations is None:
+        return False
+    need = skill.get("requires_integration")
+    return bool(need) and need not in available_integrations
+
+
 # ---------------------------------------------------------------------------
 # SkillsManager
 # ---------------------------------------------------------------------------
@@ -172,6 +185,30 @@ class SkillsManager:
         # Keep the usage sidecar keyed the same way the skill file is scoped.
         return f"{owner}::{name}" if owner else name
 
+    def _usage_owner(self, name: str, owner: Optional[str]) -> Optional[str]:
+        """The owner component of the usage key for `name` as seen by `owner`.
+
+        2026-10-01: an app-shipped skill is ownerless, so load_all() reads its
+        usage and audit record under the bare `name`, while set_audit,
+        set_necessity and record_use were called with the acting user and wrote
+        `user::name`. The audit therefore never saw its own verdicts on bundled
+        skills and re-picked them every run. Writes now resolve to the same key
+        the read uses: a skill the user owns keeps `owner::name`; an app-shipped
+        one with no such user-owned copy is shared and uses the bare name.
+        """
+        if not owner:
+            return None
+        shipped_seen = False
+        for path in self._iter_skill_files():
+            sk = self._read_skill(path)
+            if not sk or sk.name != name:
+                continue
+            if (sk.owner or "") == owner:
+                return owner
+            if is_app_shipped_source(sk.source):
+                shipped_seen = True
+        return None if shipped_seen else owner
+
     def _usage_entry(self, usage: Dict[str, Dict], name: str, owner: Optional[str] = None) -> Dict:
         key = self._usage_key(name, owner)
         entry = usage.get(key)
@@ -187,7 +224,7 @@ class SkillsManager:
         'verified' check + teacher mark on the card."""
         import time as _t
         usage = self._load_usage()
-        key = self._usage_key(name, owner)
+        key = self._usage_key(name, self._usage_owner(name, owner))
         e = usage.setdefault(key, {"uses": 0, "last_used": None})
         e["audit_verdict"] = verdict
         e["audit_by_teacher"] = bool(by_teacher)
@@ -204,7 +241,7 @@ class SkillsManager:
         """Record the advisory 'is this skill necessary?' judgment in the usage
         sidecar. Surfaced on the card as a flag; never acts on the skill."""
         usage = self._load_usage()
-        key = self._usage_key(name, owner)
+        key = self._usage_key(name, self._usage_owner(name, owner))
         e = usage.setdefault(key, {"uses": 0, "last_used": None})
         e["necessity"] = {
             "necessary": bool(necessary),
@@ -263,7 +300,7 @@ class SkillsManager:
             # Bundled procedures are application resources, not abandoned
             # user data. They intentionally stay ownerless so every signed-in
             # user can read the same installed copy.
-            if sk.source == "bundled":
+            if is_app_shipped_source(sk.source):
                 continue
             owner = (sk.owner or "").strip()
             if owner == primary_owner:
@@ -343,8 +380,11 @@ class SkillsManager:
                 pass
         return out
 
-    def load(self, owner: Optional[str] = None) -> List[Dict]:
+    def load(self, owner: Optional[str] = None, *,
+             available_integrations: Optional[set] = None) -> List[Dict]:
         entries = self.load_all()
+        if available_integrations is not None:
+            entries = [s for s in entries if not _hidden_by_integration(s, available_integrations)]
         if owner is None:
             return entries
         # SECURITY: strict ownership filter. The previous predicate also
@@ -354,7 +394,7 @@ class SkillsManager:
         # skills should be visible to a specific user.
         return [
             s for s in entries
-            if s.get("owner") == owner or s.get("source") == "bundled"
+            if s.get("owner") == owner or is_app_shipped_source(s.get("source"))
         ]
 
     # ----------------------------------------------------------------------
@@ -570,7 +610,7 @@ class SkillsManager:
             # Bundled skills are shared read-only application resources. They
             # are updated only by the startup reconciler, never through
             # tenant-scoped CRUD (including an owner=None internal caller).
-            if sk.source == "bundled":
+            if is_app_shipped_source(sk.source):
                 continue
             if (sk.owner or "") != (owner or ""):
                 continue
@@ -585,7 +625,7 @@ class SkillsManager:
             scalar_keys = (
                 "description", "version", "category", "status", "confidence",
                 "source", "teacher_model", "when_to_use",
-                "body_extra",
+                "body_extra", "requires_integration",
             )
             for k in scalar_keys:
                 if k in updates:
@@ -653,7 +693,7 @@ class SkillsManager:
             sk = self._read_skill(path)
             if not sk or sk.name != skill_id:
                 continue
-            if sk.source == "bundled":
+            if is_app_shipped_source(sk.source):
                 continue
             if (sk.owner or "") != (owner or ""):
                 continue
@@ -679,7 +719,7 @@ class SkillsManager:
 
     def record_use(self, skill_id: str, owner: Optional[str] = None) -> None:
         usage = self._load_usage()
-        key = self._usage_key(skill_id, owner)
+        key = self._usage_key(skill_id, self._usage_owner(skill_id, owner))
         entry = usage.setdefault(key, {"uses": 0, "last_used": None})
         entry["uses"] = int(entry.get("uses", 0)) + 1
         entry["last_used"] = int(time.time())
@@ -694,7 +734,7 @@ class SkillsManager:
             sk = self._read_skill(path)
             if not sk or sk.name != name:
                 continue
-            if sk.source != "bundled" and (sk.owner or "") != (owner or ""):
+            if not is_app_shipped_source(sk.source) and (sk.owner or "") != (owner or ""):
                 continue
             try:
                 with open(path, encoding="utf-8") as f:
@@ -710,7 +750,7 @@ class SkillsManager:
             sk = self._read_skill(path)
             if not sk or sk.name != name:
                 continue
-            if sk.source != "bundled" and (sk.owner or "") != (owner or ""):
+            if not is_app_shipped_source(sk.source) and (sk.owner or "") != (owner or ""):
                 continue
             base = os.path.realpath(os.path.dirname(path))
             target = os.path.realpath(os.path.join(base, ref_path))
@@ -735,6 +775,7 @@ class SkillsManager:
         *,
         active_toolsets: Optional[List[str]] = None,
         platform: Optional[str] = None,
+        available_integrations: Optional[set] = None,
     ) -> List[Dict]:
         """Return the `[{name, description, category, status}]` list the
         agent sees in its system prompt.
@@ -747,12 +788,18 @@ class SkillsManager:
             procedure on the very next turn — waiting for a manual
             publish click defeats the loop.
 
+        `available_integrations`: ids of the integrations that are enabled and
+        healthy right now. When not None, a skill whose `requires_integration`
+        is not in the set is hidden. None disables the check.
+
         Excludes user-created drafts (status=draft, source != teacher-
         escalation) — those are work-in-progress and pollute the
         prompt with half-finished procedures.
         """
         out = []
         for s in self.load(owner=owner):
+            if _hidden_by_integration(s, available_integrations):
+                continue
             status = s.get("status")
             # Published + None (pre-status legacy) always included.
             # Drafts only if the teacher wrote them.
@@ -797,9 +844,12 @@ class SkillsManager:
         threshold: float = 0.3,
         max_items: int = 5,
         min_confidence: float = 0.0,
+        available_integrations: Optional[set] = None,
     ) -> List[Dict]:
         if skills is None:
             skills = self.load_all()
+        if available_integrations is not None:
+            skills = [s for s in skills if not _hidden_by_integration(s, available_integrations)]
         if not skills or not query.strip():
             return []
         # Consider published AND draft skills for relevance retrieval.

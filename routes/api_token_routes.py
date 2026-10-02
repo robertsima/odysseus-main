@@ -48,7 +48,7 @@ TOKEN_PROFILES = {
     "codex_documents": ["documents:read", "documents:write"],
     "codex_email_drafts": ["email:read", "email:draft", "documents:read", "documents:write"],
     # A Claude Code session calling BACK into Odysseus through /api/codex/*
-    # (see integrations/claude/). Bundles the scopes a coding-assistant agent
+    # (see clients/claude/). Bundles the scopes a coding-assistant agent
     # typically needs: its own todos, its own documents, and memory.
     "claude_agent": [
         "todos:read", "todos:write",

@@ -1,0 +1,54 @@
+{
+  "id": "penpot",
+  "name": "Penpot Studio",
+  "description": "Builds nested Penpot designs with real vector icons, reads designs back with a layout check, and renders boards to an image. Uses the Penpot MCP server's URL and access token.",
+  "kind": "mcp-python",
+  "servers": [
+    {
+      "id": "penpot_studio",
+      "name": "Built-in: Penpot Studio",
+      "script": "mcp_servers/penpot_studio_server.py",
+      "env_profile": "python_path"
+    }
+  ],
+  "requirements": [
+    {
+      "name": "Penpot URL and access token",
+      "check": {
+        "type": "any_of",
+        "checks": [
+          {
+            "type": "env_all",
+            "vars": [
+              "PENPOT_API_URL",
+              "PENPOT_ACCESS_TOKEN"
+            ]
+          },
+          {
+            "type": "env_all",
+            "vars": [
+              "PENPOT_BASE_URL",
+              "PENPOT_ACCESS_TOKEN"
+            ]
+          },
+          {
+            "type": "callable",
+            "ref": "src.penpot_studio:load_config"
+          }
+        ]
+      },
+      "hint": "Set PENPOT_API_URL and PENPOT_ACCESS_TOKEN in the container environment, or add the Penpot MCP server with both under Settings > MCP."
+    }
+  ],
+  "settings": [],
+  "tools": "from_server",
+  "function_calling": true,
+  "prompt": "",
+  "skills": [],
+  "loadouts": [],
+  "health": {
+    "type": "mcp_connected"
+  },
+  "docs": "",
+  "order": 8
+}

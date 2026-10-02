@@ -18,6 +18,10 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from services.memory.skills import SkillsManager
+from services.memory.skill_format import is_app_shipped_source
+from src.builtin_skills import (
+    SkillCatalogError, curated_catalog, install_curated_skill, uninstall_curated_skill,
+)
 from src.auth_helpers import get_current_user
 from src.prompt_security import untrusted_context_message
 from core.middleware import require_admin
@@ -1248,7 +1252,7 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
     def _verify_owner(skill: dict, user: Optional[str], *, allow_bundled: bool = False):
         if user is None:
             return
-        if allow_bundled and skill.get("source") == "bundled":
+        if allow_bundled and is_app_shipped_source(skill.get("source")):
             return
         # SECURITY: strict check — previously `sk_owner and sk_owner != user`
         # let any user mutate/read a skill that happened to have no owner
@@ -1407,6 +1411,44 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
             settings["builtin_tool_overrides"] = ov
             save_settings(settings)
         return {"ok": True, "name": name, "is_overridden": False}
+
+    # --- Recommended (curated) skills catalog -------------------------------
+    # Core skills install themselves; these are the optional ones the release
+    # ships (owner decision 2026-10-01). Declared before `/{skill_id}` so the
+    # literal path wins.
+
+    def _catalog_error(exc: SkillCatalogError) -> HTTPException:
+        return HTTPException(exc.status, {"error": str(exc), "code": exc.code})
+
+    @router.get("/catalog")
+    async def list_skill_catalog(request: Request):
+        """Curated skills with their install state."""
+        _owner(request)
+        skills = await _off_loop(curated_catalog, skills_manager)
+        return {"skills": skills, "count": len(skills)}
+
+    @router.post("/catalog/{name}/install")
+    async def install_catalog_skill(request: Request, name: str):
+        require_admin(request)
+        try:
+            result = await _off_loop(install_curated_skill, skills_manager, name)
+        except SkillCatalogError as exc:
+            raise _catalog_error(exc)
+        _fire_skill_added(_owner(request))
+        return {"ok": True, **result}
+
+    @router.delete("/catalog/{name}")
+    async def uninstall_catalog_skill(request: Request, name: str, keep: bool = False):
+        """Remove an installed curated skill. An edited copy is refused with
+        code "edited" unless `keep=true`, which keeps it as the caller's own
+        skill instead of deleting it."""
+        require_admin(request)
+        try:
+            result = await _off_loop(
+                lambda: uninstall_curated_skill(skills_manager, name, keep_for=_owner(request), keep=keep))
+        except SkillCatalogError as exc:
+            raise _catalog_error(exc)
+        return {"ok": True, **result}
 
     @router.post("/imports/inspect")
     async def inspect_skill_import(request: Request, body: SkillImportUrlRequest):

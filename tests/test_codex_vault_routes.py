@@ -72,14 +72,14 @@ def test_capabilities_advertises_the_vault():
 
 
 def test_the_bundled_skill_and_helper_teach_the_vault():
-    skill = open("integrations/claude/skills/odysseus/SKILL.md", encoding="utf-8").read()
+    skill = open("clients/claude/skills/odysseus/SKILL.md", encoding="utf-8").read()
     assert "/api/codex/vault/search" in skill
     assert "vault:read_private" in skill
     # The editor library and the vault must not be confused for each other.
     assert "separate from the vault above" in skill
 
     helper = open(
-        "integrations/claude/skills/odysseus/scripts/odysseus_api.py", encoding="utf-8"
+        "clients/claude/skills/odysseus/scripts/odysseus_api.py", encoding="utf-8"
     ).read()
     assert "vault search QUERY" in helper
     assert "/api/codex/vault/search?q=" in helper

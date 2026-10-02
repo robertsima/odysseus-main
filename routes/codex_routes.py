@@ -238,7 +238,7 @@ def setup_codex_routes(
     @router.get("/plugin.zip")
     def plugin_zip(request: Request):
         require_authenticated_request(request)
-        root = Path(__file__).resolve().parent.parent / "integrations" / "codex"
+        root = Path(__file__).resolve().parent.parent / "clients" / "codex"
         if not root.exists():
             raise HTTPException(404, "Codex plugin bundle not found")
         buf = BytesIO()
@@ -1022,7 +1022,7 @@ def setup_claude_routes() -> APIRouter:
         require_authenticated_request(request)
         # Only ship the skills/ subtree so extracting at ~/.claude/ doesn't dump
         # README.md or other bundle metadata into the user's claude config dir.
-        skills_root = Path(__file__).resolve().parent.parent / "integrations" / "claude" / "skills"
+        skills_root = Path(__file__).resolve().parent.parent / "clients" / "claude" / "skills"
         if not skills_root.exists():
             raise HTTPException(404, "Claude skill bundle not found")
         bundle_root = skills_root.parent

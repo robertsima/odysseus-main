@@ -714,14 +714,14 @@ def collect_skills(bundle: "_Bundle", loadout_skills: Dict[str, Any], requested:
         sk = manager._read_skill(path)
         if not sk:
             continue
-        bundled = sk.source == "bundled"
+        bundled = sk.source in ("bundled", "curated", "integration")  # app-shipped tiers
         if not bundled and (sk.owner or "") != (owner or ""):
             continue  # owner scoping: never another user's skill
         key = sk.name.casefold()
         if not bundled:
             owned.append((sk, path))
         # An owner's own copy wins over a bundled one of the same name.
-        if key not in found or (found[key][0].source == "bundled" and not bundled):
+        if key not in found or (found[key][0].source in ("bundled", "curated", "integration") and not bundled):
             found[key] = (sk, path)
 
     selected: Dict[str, Tuple[Any, str]] = {}
@@ -733,7 +733,7 @@ def collect_skills(bundle: "_Bundle", loadout_skills: Dict[str, Any], requested:
     if all_requested:
         for sk, path in owned:
             key = sk.name.casefold()
-            if key not in selected or selected[key][0].source == "bundled":
+            if key not in selected or selected[key][0].source in ("bundled", "curated", "integration"):
                 selected[key] = (sk, path)
             reasons.setdefault(key, []).append("requested:all")
     missing = sorted(spelling[key] for key in wanted if key not in found)

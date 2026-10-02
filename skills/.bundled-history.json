@@ -30,6 +30,10 @@
   "improve-codebase-architecture": [
     "42e936af25d156f009f9409673ec7a7a12d96d65ac60a65d66b1c72640b4381d"
   ],
+  "learning-coach": [
+    "6b67e78bfbf2e9e7e04eeaa3c54bd0302cd11c9389b45cc172b1e53fa02ae526",
+    "9b379c5015f774944e62a14b73e86cd576d61c626dd1b5516979fe37e68424c9"
+  ],
   "local-pi-delegation": [
     "818fe029bd122f2552dc91fcc142b0ddf7aecf3e3aa4258cd4147ff4a63939ae",
     "f9ff6e900cc079a0a6cf8f57be948aadd50d4fb337117f4afcd6431858515358",
@@ -42,6 +46,14 @@
   ],
   "resolving-merge-conflicts": [
     "e05f905c901b9d5fbcc2635e8e91611da6d82bf81794b2130b7a43b928d1a220"
+  ],
+  "todoist-planning": [
+    "24ad1eca669d77c6cf5a599a01098b35ae4522797bec2ba1a628b9ce59723284",
+    "ed54047bf19bb312d14294a45b2715271aafa74f6d7f421904dddb7c49b36eca"
+  ],
+  "todoist-retrospective": [
+    "fa8679905dbcdbede0bfa21390dc2eb35edcbccdfd9b8fad8fdcb8b281574bdc",
+    "72a0859a5784b107bc7d22010dc61249e9428ea6381f8e34fc4610d09e72125e"
   ],
   "triage": [
     "31dd4e7741859d7f77d456f7053e41a67b2a3a740a4ecfd26837dcddbd170ded"

@@ -13,6 +13,10 @@ import { topPortalZ } from './toolWindowZOrder.js';
 const API = window.location.origin;
 let skills = [];
 let builtinSkills = [];   // read-only agent tool capabilities (TOOL_SECTIONS)
+// Optional curated skills the release ships (/api/skills/catalog). Core skills
+// install themselves; these are installed and removed from the
+// "Recommended skills" section.
+let catalogSkills = [];
 let loaded = false;
 let _loadPromise = null;
 
@@ -64,7 +68,7 @@ const _collapsedSections = (() => {
     const raw = localStorage.getItem('skillsSectionsCollapsed');
     if (raw) return new Set(JSON.parse(raw));
   } catch (_) {}
-  return new Set(['builtin']);
+  return new Set(['builtin', 'recommended']);
 })();
 function _saveCollapsedSections() {
   try { localStorage.setItem('skillsSectionsCollapsed', JSON.stringify([..._collapsedSections])); } catch (_) {}
@@ -104,6 +108,7 @@ export async function loadSkills(cascade = false) {
       return true;
     });
     _loadSkillApprovalThreshold();
+    await _loadCatalog();
     // Built-in capabilities are no longer surfaced in the Skills menu.
     loaded = true;
     renderSkillsList();
@@ -125,6 +130,124 @@ export async function loadSkills(cascade = false) {
   }
   })();
   return _loadPromise;
+}
+
+function _makeSectionHeader(container, sectionId, title, count) {
+  const collapsed = _collapsedSections.has(sectionId);
+  const hdr = document.createElement('div');
+  hdr.className = 'skills-section-label skills-section-header' + (collapsed ? ' collapsed' : '');
+  hdr.dataset.section = sectionId;
+  hdr.innerHTML =
+    `<svg class="skills-section-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>` +
+    `<span>${esc(title)}</span>` +
+    `<span class="skills-section-count">${count}</span>`;
+  hdr.addEventListener('click', () => {
+    if (_collapsedSections.has(sectionId)) _collapsedSections.delete(sectionId);
+    else _collapsedSections.add(sectionId);
+    _saveCollapsedSections();
+    _applySectionCollapse(container);
+  });
+  return hdr;
+}
+
+function _appendRecommendedSection(container) {
+  if (!catalogSkills.length) return;
+  const cards = _buildRecommendedCards();
+  const installed = catalogSkills.filter(c => c.installed).length;
+  container.appendChild(_makeSectionHeader(container, 'recommended', 'Recommended skills', `${installed}/${catalogSkills.length}`));
+  cards.forEach(c => { c.dataset.skillSection = 'recommended'; container.appendChild(c); });
+  _applySectionCollapse(container);
+}
+
+async function _loadCatalog() {
+  try {
+    const res = await fetch(`${API}/api/skills/catalog`, { credentials: 'same-origin' });
+    catalogSkills = res.ok ? ((await res.json()).skills || []) : [];
+  } catch (_) {
+    catalogSkills = [];
+  }
+}
+
+// One compact row per curated skill: what it is, where it came from, and an
+// Install / Remove button. Install and remove are admin-only on the server; a
+// 403 is reported as a toast rather than hidden in the UI.
+function _buildRecommendedCards() {
+  return catalogSkills.map(c => {
+    const card = document.createElement('div');
+    card.className = 'doclib-card skill-card skill-recommended-card';
+    card.dataset.recommendedName = c.name;
+    const edited = c.state === 'edited';
+    const meta = [c.license, c.source].filter(Boolean).join(' · ');
+    const header = document.createElement('div');
+    header.className = 'doclib-card-header skill-card-header';
+    header.innerHTML = `
+      <div style="flex:1;min-width:0;overflow:hidden;">
+        <div class="doclib-card-title" style="display:flex;align-items:center;gap:6px;min-width:0;">
+          <code style="font-weight:600;font-size:0.9em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex-shrink:1;min-width:0;">${esc(c.name)}</code>
+          ${c.installed ? '<span class="memory-cat-badge">installed</span>' : ''}
+          ${edited ? '<span class="memory-cat-badge" title="You edited this copy">edited</span>' : ''}
+          ${c.state === 'conflict' ? '<span class="memory-cat-badge" title="A skill with this name already exists, so it was not installed from the catalog">name in use</span>' : ''}
+        </div>
+        ${c.summary ? `<div class="doclib-card-session" style="font-size:11px;opacity:0.7;margin-top:2px;">${esc(c.summary)}</div>` : ''}
+        ${meta ? `<div class="doclib-card-session" title="${esc(meta)}" style="font-size:10px;opacity:0.45;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(meta)}</div>` : ''}
+      </div>`;
+    const btn = document.createElement('button');
+    btn.className = 'doclib-card-text-btn doclib-card-action-btn' + (c.installed ? ' doclib-card-text-btn-danger' : '');
+    btn.textContent = c.installed ? 'Remove' : 'Install';
+    btn.disabled = c.state === 'conflict';
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (c.installed) _uninstallCatalogSkill(c, btn); else _installCatalogSkill(c, btn);
+    });
+    header.appendChild(btn);
+    card.appendChild(header);
+    return card;
+  });
+}
+
+async function _catalogRequest(url, options, btn, okMessage) {
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch(url, Object.assign({ credentials: 'same-origin' }, options));
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const detail = data.detail;
+      const msg = res.status === 403 ? 'Only an admin can install or remove skills'
+        : (detail && detail.error) || (typeof detail === 'string' ? detail : `HTTP ${res.status}`);
+      return { ok: false, status: res.status, code: detail && detail.code, message: msg };
+    }
+    if (okMessage) uiModule.showToast(okMessage);
+    return { ok: true, data };
+  } catch (e) {
+    return { ok: false, message: String(e) };
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function _installCatalogSkill(c, btn) {
+  const r = await _catalogRequest(`${API}/api/skills/catalog/${encodeURIComponent(c.name)}/install`,
+    { method: 'POST' }, btn, `Installed ${c.name}`);
+  if (!r.ok) uiModule.showToast(r.message);
+  await loadSkills();
+}
+
+async function _uninstallCatalogSkill(c, btn) {
+  const name = encodeURIComponent(c.name);
+  let r = await _catalogRequest(`${API}/api/skills/catalog/${name}`, { method: 'DELETE' }, btn, `Removed ${c.name}`);
+  if (!r.ok && r.code === 'edited') {
+    // Deleting would lose the edits. Offer to keep the copy as the user's own.
+    const keep = await uiModule.styledConfirm(
+      `You edited "${c.name}". Keep it as your own skill instead of removing it? It stays installed and is no longer updated with the app.`,
+      { confirmText: 'Keep as my skill' });
+    if (keep) {
+      r = await _catalogRequest(`${API}/api/skills/catalog/${name}?keep=true`, { method: 'DELETE' }, btn, `Kept ${c.name} as your skill`);
+    } else {
+      r = { ok: true };  // declined; nothing changed
+    }
+  }
+  if (!r.ok) uiModule.showToast(r.message);
+  await loadSkills();
 }
 
 function _focusSkillRow(name) {
@@ -640,6 +763,10 @@ function renderSkillsList() {
     if (selectBtn) selectBtn.disabled = true;
     if (_selectMode) _exitSelectMode();
     container.innerHTML = `<div style="text-align:center;opacity:0.4;padding:24px 0;font-size:11px;">${loaded ? 'No skills yet, use agent for it to auto extract them.' : 'Loading…'}</div>`;
+    if (catalogSkills.length) {
+      container.classList.add('doclib-grid');
+      _appendRecommendedSection(container);
+    }
     return;
   }
 
@@ -849,23 +976,7 @@ function renderSkillsList() {
   // data-skill-section) so the global expand rule — which hides sibling
   // .doclib-card elements by direct-child selector — keeps working.
   // Collapse just toggles display on the tagged cards.
-  const _mkSectionHeader = (sectionId, title, count) => {
-    const collapsed = _collapsedSections.has(sectionId);
-    const hdr = document.createElement('div');
-    hdr.className = 'skills-section-label skills-section-header' + (collapsed ? ' collapsed' : '');
-    hdr.dataset.section = sectionId;
-    hdr.innerHTML =
-      `<svg class="skills-section-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>` +
-      `<span>${esc(title)}</span>` +
-      `<span class="skills-section-count">${count}</span>`;
-    hdr.addEventListener('click', () => {
-      if (_collapsedSections.has(sectionId)) _collapsedSections.delete(sectionId);
-      else _collapsedSections.add(sectionId);
-      _saveCollapsedSections();
-      _applySectionCollapse(container);
-    });
-    return hdr;
-  };
+  const _mkSectionHeader = (sectionId, title, count) => _makeSectionHeader(container, sectionId, title, count);
 
   // "Your skills" section — show the header only when there's also a
   // built-in section to distinguish from (otherwise it's just the list).
@@ -880,6 +991,8 @@ function renderSkillsList() {
     container.appendChild(_mkSectionHeader('builtin', 'Built-in capabilities', builtinCards.length));
     builtinCards.forEach(c => { c.dataset.skillSection = 'builtin'; container.appendChild(c); });
   }
+
+  _appendRecommendedSection(container);
 
   _applySectionCollapse(container);
 

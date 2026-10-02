@@ -1,0 +1,35 @@
+{
+  "id": "browser",
+  "name": "Browser",
+  "description": "Headless Chromium the agent drives to read and use web pages.",
+  "kind": "mcp-npx",
+  "servers": [
+    {
+      "id": "builtin_browser",
+      "name": "Built-in: Browser",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@playwright/mcp@latest",
+        "--headless",
+        "--caps",
+        "vision"
+      ],
+      "env_profile": "browser_cache"
+    }
+  ],
+  "requirements": [],
+  "settings": [
+    "browser_isolated"
+  ],
+  "tools": "from_server",
+  "function_calling": true,
+  "prompt": "",
+  "skills": [],
+  "loadouts": [],
+  "health": {
+    "type": "mcp_connected"
+  },
+  "docs": "",
+  "order": 9
+}

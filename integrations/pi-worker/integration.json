@@ -1,0 +1,36 @@
+{
+  "id": "pi-worker",
+  "name": "Windows Pi worker",
+  "description": "Runs coding tasks on your Windows machine over SSH.",
+  "kind": "mcp-python",
+  "servers": [
+    {
+      "id": "pi_worker",
+      "name": "Built-in: Windows Pi Worker",
+      "script": "mcp_servers/pi_worker_server.py",
+      "env_profile": "python_path"
+    }
+  ],
+  "requirements": [
+    {
+      "name": "ODYSSEUS_PI_WORKER_HOST",
+      "check": {
+        "type": "env",
+        "var": "ODYSSEUS_PI_WORKER_HOST"
+      },
+      "hint": "Set ODYSSEUS_PI_WORKER_HOST and ODYSSEUS_PI_WORKER_IDENTITY_FILE in the container environment, then restart.",
+      "gates_start": true
+    }
+  ],
+  "settings": [],
+  "tools": "from_server",
+  "function_calling": true,
+  "prompt": "",
+  "skills": [],
+  "loadouts": [],
+  "health": {
+    "type": "mcp_connected"
+  },
+  "docs": "",
+  "order": 7
+}

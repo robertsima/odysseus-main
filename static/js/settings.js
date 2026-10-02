@@ -1484,18 +1484,17 @@ function initBuiltinIntegrations() {
         list.innerHTML = '<div class="builtin-empty">Built-in tool servers are switched off (ODYSSEUS_DISABLE_MCP is set).</div>';
       } else {
         list.innerHTML = (data.integrations || []).map(function (it) {
+          // Unmet requirements come first: Todoist and Penpot Studio connect
+          // without credentials, so "Running" used to be shown for them
+          // (2026-10-01). `missing` lists what to set; `enable` joins the hints.
+          if (it.status === 'not_configured') {
+            var missing = (it.missing || []).map(function (m) { return m.requirement; });
+            var hint = it.enable || (missing.length ? 'Needs ' + missing.join(', ') + '.' : '');
+            if (missing.length && it.enable) hint = 'Missing: ' + missing.join(', ') + '. ' + it.enable;
+            return row(it.name, it.description, 'Not set up', 'off', hint);
+          }
           if (it.status === 'connected') {
             return row(it.name, it.description, 'Running · ' + it.tool_count + (it.tool_count === 1 ? ' tool' : ' tools'), 'ok', '');
-          }
-          if (it.needs) {
-            // Its setting is present, yet it never started: the reason is in
-            // the startup log (e.g. a GITHUB_PERSONAL_ACCESS_TOKEN that is
-            // not a GitHub PAT, or a missing binary).
-            return row(it.name, it.description, 'Not started', 'bad',
-              it.error || (it.needs + ' is set, but it did not start. System › Logs says why.'));
-          }
-          if (it.status === 'not_configured') {
-            return row(it.name, it.description, 'Not set up', 'off', it.enable || ('Needs ' + it.needs + ' in the container environment.'));
           }
           if (it.status === 'error') {
             return row(it.name, it.description, 'Error', 'bad', it.error || 'Failed to start; see System › Logs.');

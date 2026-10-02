@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Set, Tuple
 from src.database import McpServer, SessionLocal
 
+from src import integration_registry
 from src.runtime_paths import get_app_root
 
 logger = logging.getLogger(__name__)
@@ -21,15 +22,9 @@ logger = logging.getLogger(__name__)
 # Lotus is filtered per request in agent_loop according to the owner's
 # local/LAN/API access policy. Approved endpoints may use it; denied endpoints
 # have every Lotus tool hidden and runtime-blocked.
-_BUILTIN_FUNCTION_CALLING_SERVERS = {
-    "builtin_browser",
-    "todoist",
-    "lotus",
-    "pi_worker",
-    "github_read",
-    "github_write",
-    "penpot_studio",
-}
+# Derived from integrations/*/integration.json ("function_calling": true) as of
+# 2026-10-01; this name stays because tests and callers import it.
+_BUILTIN_FUNCTION_CALLING_SERVERS = set(integration_registry.function_calling_server_ids())
 
 
 # ── How much MCP may stay bound on every turn ──
@@ -1840,18 +1835,7 @@ class McpManager:
 
     def is_builtin(self, server_id: str) -> bool:
         """Check if a server is a built-in (auto-registered) server."""
-        return server_id.startswith("builtin_") or server_id in {
-            "image_gen",
-            "memory",
-            "rag",
-            "email",
-            "todoist",
-            "lotus",
-            "pi_worker",
-            "github_read",
-            "github_write",
-            "penpot_studio",
-        }
+        return server_id.startswith("builtin_") or integration_registry.is_builtin(server_id)
 
     def get_tool_input_schema(self, qualified_name: str) -> Optional[Dict]:
         """The input schema a connected server advertised for a tool, or None."""

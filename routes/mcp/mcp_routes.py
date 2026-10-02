@@ -169,7 +169,10 @@ def setup_mcp_routes(mcp_manager: McpManager):
         for entry in builtin_catalog():
             status = mcp_manager.get_server_status(entry["id"]) or {}
             state = status.get("status", "disconnected")
-            if state != "connected" and not entry["configured"]:
+            # Unmet requirements win even when the process connected: Todoist and
+            # Penpot Studio start without credentials and every call then fails,
+            # yet this tab said "Running" (2026-10-01).
+            if not entry["configured"]:
                 state = "not_configured"
             rows.append({
                 **entry,

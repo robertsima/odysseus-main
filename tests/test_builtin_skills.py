@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from services.memory.skills import SkillsManager
@@ -5,11 +6,23 @@ from services.memory.skill_format import Skill
 from src import builtin_skills
 
 
+def _write_catalog(root: Path, *extra: dict) -> None:
+    rows = [{
+        "name": "core-sample", "category": "dev", "tier": "core",
+        "tags": ["delegation"], "platforms": ["linux", "windows"],
+        "requires_toolsets": ["mcp__pi_worker__run_pi_task"],
+    }, *extra]
+    (root / "skills").mkdir(parents=True, exist_ok=True)
+    (root / "skills" / "catalog.json").write_text(
+        json.dumps({"version": 1, "skills": rows}), encoding="utf-8")
+
+
 def _make_bundle(root: Path, body: str = "Bundled instructions.") -> None:
-    skill_dir = root / "skills" / "local-pi-delegation"
+    _write_catalog(root)
+    skill_dir = root / "skills" / "core-sample"
     (skill_dir / "references").mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
-        "---\nname: local-pi-delegation\n"
+        "---\nname: core-sample\n"
         "description: Delegate focused work.\n---\n\n" + body,
         encoding="utf-8",
     )
@@ -24,8 +37,8 @@ def test_seed_bundled_skill_copies_bundle(monkeypatch, tmp_path):
 
     installed = builtin_skills.seed_bundled_skills(manager)
 
-    destination = Path(manager.skills_root) / "dev" / "local-pi-delegation"
-    assert installed == ["local-pi-delegation"]
+    destination = Path(manager.skills_root) / "dev" / "core-sample"
+    assert installed == ["core-sample"]
     installed_skill = Skill.from_markdown(
         (destination / "SKILL.md").read_text(encoding="utf-8")
     )
@@ -37,7 +50,7 @@ def test_seed_bundled_skill_copies_bundle(monkeypatch, tmp_path):
     assert "Bundled instructions." in installed_skill.body_extra
     assert [item["name"] for item in manager.index_for(
         active_toolsets=["mcp__pi_worker__run_pi_task"]
-    )] == ["local-pi-delegation"]
+    )] == ["core-sample"]
     assert manager.index_for(active_toolsets=[]) == []
     assert (destination / "references" / "profile.md").is_file()
 
@@ -46,7 +59,7 @@ def test_seed_bundled_skill_preserves_existing_copy(monkeypatch, tmp_path):
     app_root = tmp_path / "app"
     _make_bundle(app_root, "New bundled content.")
     manager = SkillsManager(str(tmp_path / "data"))
-    destination = Path(manager.skills_root) / "dev" / "local-pi-delegation"
+    destination = Path(manager.skills_root) / "dev" / "core-sample"
     destination.mkdir(parents=True)
     (destination / "SKILL.md").write_text("operator edit", encoding="utf-8")
     monkeypatch.setattr(builtin_skills, "get_app_root", lambda: str(app_root))
@@ -64,7 +77,7 @@ def test_seed_reconciles_legacy_owner_metadata_without_replacing_body(monkeypatc
     monkeypatch.setattr(builtin_skills, "get_app_root", lambda: str(app_root))
     builtin_skills.seed_bundled_skills(manager)
 
-    skill_path = Path(manager.skills_root) / "dev" / "local-pi-delegation" / "SKILL.md"
+    skill_path = Path(manager.skills_root) / "dev" / "core-sample" / "SKILL.md"
     legacy = Skill.from_markdown(skill_path.read_text(encoding="utf-8"))
     legacy.source = "user"
     legacy.owner = "first-account"
@@ -74,14 +87,15 @@ def test_seed_reconciles_legacy_owner_metadata_without_replacing_body(monkeypatc
     reconciled = builtin_skills.seed_bundled_skills(manager)
     result = Skill.from_markdown(skill_path.read_text(encoding="utf-8"))
 
-    assert reconciled == ["local-pi-delegation"]
+    assert reconciled == ["core-sample"]
     assert result.source == "bundled"
     assert result.owner is None
     assert "Operator-customized delegation instructions." in result.body_extra
     assert "New bundled content." not in result.body_extra
 
 
-_COMMUNITY_SKILLS = {
+_CORE_SKILLS = {"harness-context-and-tool-routing", "visual-asset-sourcing"}
+_CURATED_SKILLS = {
     "grilling": "general",
     "writing-for-agents": "general",
     "unslop": "general",
@@ -91,28 +105,40 @@ _COMMUNITY_SKILLS = {
     "improve-codebase-architecture": "dev",
     "triage": "dev",
     "resolving-merge-conflicts": "dev",
+    "learning-coach": "general",
 }
+# Community skills carry provenance in their SKILL.md; learning-coach is ours.
+_COMMUNITY_SKILLS = {k: v for k, v in _CURATED_SKILLS.items() if k != "learning-coach"}
 
 
-def test_every_bundled_skill_has_a_source_directory():
+def test_catalog_tiers_match_the_owner_decision():
     app_root = Path(__file__).resolve().parents[1]
-    for category, name, *_rest in builtin_skills._BUNDLED_SKILLS:
-        source = builtin_skills._bundled_source(str(app_root), category, name)
-        assert (Path(source) / "SKILL.md").is_file(), f"{category}/{name} has no SKILL.md"
+    catalog = {e["name"]: e for e in builtin_skills.load_catalog(str(app_root))}
+    assert {n for n, e in catalog.items() if e["tier"] == "core"} == _CORE_SKILLS
+    assert {n for n, e in catalog.items() if e["tier"] == "curated"} == set(_CURATED_SKILLS)
+    for name in _CURATED_SKILLS:
+        assert catalog[name]["summary"], f"{name} needs a one-line summary for the catalog"
 
 
-def test_community_skills_parse_and_are_registered():
+def test_every_catalog_skill_has_a_source_directory():
     app_root = Path(__file__).resolve().parents[1]
-    registered = {(c, n) for c, n, *_ in builtin_skills._BUNDLED_SKILLS}
+    for entry in builtin_skills.load_catalog(str(app_root)):
+        source = builtin_skills._bundled_source(str(app_root), entry["category"], entry["name"])
+        assert (Path(source) / "SKILL.md").is_file(), f"{entry['name']} has no SKILL.md"
+
+
+def test_community_skills_parse_and_are_in_the_curated_catalog():
+    app_root = Path(__file__).resolve().parents[1]
+    catalog = {e["name"]: e for e in builtin_skills.load_catalog(str(app_root))}
     for name, category in _COMMUNITY_SKILLS.items():
-        assert (category, name) in registered
+        assert catalog[name]["tier"] == "curated" and catalog[name]["category"] == category
+        assert catalog[name]["license"] == "MIT" and catalog[name]["source"]
         path = app_root / "skills" / category / name / "SKILL.md"
         text = path.read_text(encoding="utf-8")
         skill = Skill.from_markdown(text, path=str(path))
         assert skill.name == name
         assert skill.category == category
         assert skill.status == "published"
-        assert skill.source == "bundled"
         assert skill.description
         # Verified skills must say where their text came from.
         assert "## Provenance" in text and "- License: MIT" in text
@@ -128,8 +154,6 @@ def test_community_skills_are_listed_in_acknowledgments():
 
 # --- Upgrade of unedited installs (2026-10-01) -------------------------------
 
-import json  # noqa: E402
-
 
 def _history(app_root: Path, name: str, *bodies: str) -> None:
     digests = [builtin_skills.skill_digest(_skill_text(b)) for b in bodies]
@@ -140,7 +164,7 @@ def _history(app_root: Path, name: str, *bodies: str) -> None:
 
 def _skill_text(body: str) -> str:
     return (
-        "---\nname: local-pi-delegation\n"
+        "---\nname: core-sample\n"
         "description: Delegate focused work.\n---\n\n" + body
     )
 
@@ -152,15 +176,15 @@ def _setup(monkeypatch, tmp_path, old: str, new: str):
     manager = SkillsManager(str(tmp_path / "data"))
     monkeypatch.setattr(builtin_skills, "get_app_root", lambda: str(app_root))
     monkeypatch.setattr(builtin_skills, "_customised_logged", set())
-    _history(app_root, "local-pi-delegation", old, new)
+    _history(app_root, "core-sample", old, new)
     builtin_skills.seed_bundled_skills(manager)
     _make_bundle_files(app_root, new)
-    dest = Path(manager.skills_root) / "dev" / "local-pi-delegation"
+    dest = Path(manager.skills_root) / "dev" / "core-sample"
     return app_root, manager, dest
 
 
 def _make_bundle_files(app_root: Path, body: str) -> None:
-    skill_dir = app_root / "skills" / "local-pi-delegation"
+    skill_dir = app_root / "skills" / "core-sample"
     (skill_dir / "SKILL.md").write_text(_skill_text(body), encoding="utf-8")
     (skill_dir / "references" / "profile.md").write_text("profile v2", encoding="utf-8")
     (skill_dir / "references" / "extra.md").write_text("new file", encoding="utf-8")
@@ -182,9 +206,9 @@ def test_unedited_old_version_is_upgraded_with_supporting_files(monkeypatch, tmp
     assert (dest / "references" / "profile.md").read_text(encoding="utf-8") == "profile v2"
     assert (dest / "references" / "extra.md").is_file()
     assert not (dest / "references" / "stale.md").exists()
-    assert "upgraded bundled skill local-pi-delegation" in caplog.text
+    assert "upgraded bundled skill core-sample" in caplog.text
     # Upgraded installs count as shipped again, so the tool-gate exemption returns.
-    entry = next(s for s in manager.load_all() if s["name"] == "local-pi-delegation")
+    entry = next(s for s in manager.load_all() if s["name"] == "core-sample")
     assert builtin_skills.is_shipped_skill(entry)
 
 
@@ -207,11 +231,11 @@ def test_current_install_is_untouched(monkeypatch, tmp_path, caplog):
     caplog.set_level("INFO")
     app_root = tmp_path / "app"
     _make_bundle(app_root, "Same.")
-    _history(app_root, "local-pi-delegation", "Same.")
+    _history(app_root, "core-sample", "Same.")
     manager = SkillsManager(str(tmp_path / "data"))
     monkeypatch.setattr(builtin_skills, "get_app_root", lambda: str(app_root))
     builtin_skills.seed_bundled_skills(manager)
-    dest = Path(manager.skills_root) / "dev" / "local-pi-delegation"
+    dest = Path(manager.skills_root) / "dev" / "core-sample"
     (dest / "references" / "marker.md").write_text("keep", encoding="utf-8")
 
     builtin_skills.seed_bundled_skills(manager)
@@ -225,15 +249,15 @@ def test_crlf_and_reserialised_installs_are_not_false_edits(monkeypatch, tmp_pat
     # seeder), must still match the LF digest in history.
     app_root = tmp_path / "app"
     _make_bundle(app_root, "Old body.\n\nSecond paragraph.")
-    skill_file = app_root / "skills" / "local-pi-delegation" / "SKILL.md"
+    skill_file = app_root / "skills" / "core-sample" / "SKILL.md"
     raw = skill_file.read_bytes().replace(b"\r\n", b"\n")  # write_text is platform dependent
     skill_file.write_bytes(raw.replace(b"\n", b"\r\n"))
     manager = SkillsManager(str(tmp_path / "data"))
     monkeypatch.setattr(builtin_skills, "get_app_root", lambda: str(app_root))
     monkeypatch.setattr(builtin_skills, "_customised_logged", set())
-    _history(app_root, "local-pi-delegation", "Old body.\n\nSecond paragraph.", "New body.")
+    _history(app_root, "core-sample", "Old body.\n\nSecond paragraph.", "New body.")
     builtin_skills.seed_bundled_skills(manager)
-    dest = Path(manager.skills_root) / "dev" / "local-pi-delegation"
+    dest = Path(manager.skills_root) / "dev" / "core-sample"
 
     _make_bundle_files(app_root, "New body.")
     builtin_skills.seed_bundled_skills(manager)
@@ -241,11 +265,16 @@ def test_crlf_and_reserialised_installs_are_not_false_edits(monkeypatch, tmp_pat
     assert "New body." in _body(dest)
 
 
-def test_every_bundled_skill_current_body_is_in_history():
+def test_every_shipped_skill_current_body_is_in_history():
     app_root = Path(__file__).resolve().parents[1]
     history = builtin_skills.load_bundled_history(str(app_root))
-    for category, name, *_rest in builtin_skills._BUNDLED_SKILLS:
-        source = Path(builtin_skills._bundled_source(str(app_root), category, name)) / "SKILL.md"
+    shipped = [(e["name"], builtin_skills.shipped_source_dir(e["name"], str(app_root)))
+               for e in builtin_skills.load_catalog(str(app_root))]
+    # Integration-owned skills still in the repository (until their package carries them).
+    shipped += [(s["name"], s["source_dir"]) for s in builtin_skills._integration_specs(str(app_root))]
+    assert len(shipped) >= len(_CORE_SKILLS) + len(_CURATED_SKILLS)
+    for name, source_dir in shipped:
+        source = Path(source_dir) / "SKILL.md"
         digest = builtin_skills.skill_file_digest(str(source))
         assert digest in history.get(name, []), (
             f"{name}: current SKILL.md is not in skills/.bundled-history.json; "
