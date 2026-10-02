@@ -113,14 +113,13 @@ def open_agents(page) -> None:
 # ── Chat ────────────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("width", list(VIEWPORTS))
-def test_chat_transcript_composer_and_context_share_the_screen(open_app, width):
+def test_chat_transcript_and_composer_fill_the_available_screen(open_app, width):
     page = open_app(width)
     shot(page, "chat")
     history = assert_usable(page, "#chat-history")
     bar = assert_usable(page, ".chat-input-bar")
     message = assert_usable(page, "#message")
     heading = page.probe(".ag-page-heading")
-    rail = page.probe(".ag-context-rail")
 
     # The composer sits under the transcript, wholly on screen, as wide as it.
     assert bar["top"] >= history["bottom"] - 1
@@ -131,18 +130,9 @@ def test_chat_transcript_composer_and_context_share_the_screen(open_app, width):
     assert history["height"] >= (220 if width <= 390 else 330)
     assert history["overflowY"] == "auto" and history["scrollHeight"] > history["clientHeight"]
     assert heading["visible"] and heading["bottom"] <= history["top"]
-    assert rail["visible"]
-    if width >= 1280:
-        # The context column stands beside the transcript, not on it.
-        assert rail["left"] >= history["right"] + 20
-        assert rail["right"] <= width
-        assert abs(rail["top"] - history["top"]) <= 2
-    else:
-        # A strip between heading and transcript, never wider than the screen.
-        assert heading["bottom"] <= rail["top"] and rail["bottom"] <= history["top"]
-        assert rail["right"] <= width
+    assert page.probe('.ag-context-rail') is None
+    assert history["width"] >= (page.width - history["left"]) * 0.88
     assert_no_sideways_scroll(page)
-    assert_no_sideways_scroll(page, ".ag-context-rail")
 
 
 @pytest.mark.parametrize("width", [1440, 390])
@@ -157,14 +147,52 @@ def test_chat_composer_accepts_typing_and_transcript_scrolls(open_app, width):
     assert before == 0 and after > 200
 
 
-def test_chat_context_uses_the_selected_session_and_response_state(open_app):
+@pytest.mark.parametrize('width', [1440, 1024, 390, 320])
+def test_expanded_checklist_and_agents_share_a_bounded_shelf(open_app, width):
+    page = open_app(width)
+    page.wait_for("!document.getElementById('task-checklist').hidden && !document.getElementById('agent-strip').hidden")
+    assert page.eval("document.querySelector('.tc-toggle').getAttribute('aria-expanded')") == 'true'
+    assert page.eval("document.querySelector('.agent-strip-toggle').getAttribute('aria-expanded')") == 'true'
+    shot(page, 'progress-expanded')
+    shelf = page.probe('.chat-progress-shelf')
+    history, bar = page.probe('#chat-history'), page.probe('.chat-input-bar')
+    assert shelf['height'] <= (250 if width <= 1024 else 205), shelf
+    assert history['height'] >= (180 if width <= 390 else 260), history
+    assert_usable(page, '#message')
+    assert bar['top'] >= shelf['bottom'] - 1 and bar['bottom'] <= page.height + 1
+    checklist, agents = page.probe('#task-checklist'), page.probe('#agent-strip')
+    assert (abs(checklist['top'] - agents['top']) < 2) == (width >= 1440)
+    for sel in ('.tc-list', '.agent-strip-rows'):
+        box = page.probe(sel)
+        assert box['height'] <= (89 if width <= 1024 else 77) and box['overflowY'] == 'auto', box
+    assert_no_sideways_scroll(page)
+    page.click('.tc-toggle')
+    assert page.eval("document.querySelector('.tc-toggle').getAttribute('aria-expanded')") == 'false'
+    page.click('.agent-strip-toggle')
+    assert page.eval("document.querySelector('.agent-strip-toggle').getAttribute('aria-expanded')") == 'false'
+
+
+def test_expanded_progress_with_workbench_docked_retains_chat(open_app):
+    page = open_app(1440)
+    page.wait_for("!document.getElementById('agent-strip').hidden")
+    open_workbench(page)
+    page.click('#wb-dock-right')
+    page.wait_for("document.getElementById('workbench-modal').classList.contains('modal-right-docked')")
+    shot(page, 'progress-workbench-docked')
+    assert page.probe('.chat-progress-shelf')['height'] <= 205
+    assert page.probe('#chat-history')['height'] >= 260
+    assert_usable(page, '#message')
+    assert page.probe('.chat-input-bar')['right'] <= page.probe('.workbench-modal-content')['left'] + 1
+    assert_no_sideways_scroll(page)
+
+
+def test_chat_heading_uses_the_selected_session_and_response_state(open_app):
     page = open_app(1440)
     page.wait_for("document.getElementById('ag-session-label').textContent === 'Orders migration'")
-    assert page.eval("document.getElementById('ag-chat-model').textContent") == 'claude-sonnet-5'
+    assert page.eval("document.getElementById('model-picker-label').textContent.trim()") == 'claude-sonnet-5'
     assert page.eval("document.getElementById('ag-chat-status').textContent") == 'Ready to send'
     page.eval("window.dispatchEvent(new CustomEvent('odysseus:chat-busy-change', { detail: { active: true } }))")
     assert page.eval("document.getElementById('ag-chat-status').textContent") == 'Responding'
-    assert page.eval("document.getElementById('ag-context-status').textContent") == 'Responding'
     page.eval("window.dispatchEvent(new CustomEvent('odysseus:chat-busy-change', { detail: { active: false } }))")
     assert page.eval("document.getElementById('ag-chat-status').textContent") == 'Ready to send'
 
@@ -183,15 +211,23 @@ def test_chat_send_button_reaches_the_existing_submit_flow(open_app, server):
 
 
 @pytest.mark.parametrize("width", [1440, 1024, 390])
-def test_context_actions_open_the_phalanx_and_the_workbench(open_app, width):
+def test_navigation_opens_the_phalanx_and_the_workbench(open_app, width):
     page = open_app(width)
-    assert_usable(page, "#ag-open-agents")
-    page.click("#ag-open-agents")
+    if width <= 390:
+        page.eval("window._odyOpenSidebar('left')")
+        page.wait_for("document.getElementById('sidebar-agents-shortcut').getBoundingClientRect().left >= 0")
+    assert_usable(page, "#sidebar-agents-shortcut")
+    page.click("#sidebar-agents-shortcut")
     page.wait_for("!document.getElementById('agents-dashboard').hidden")
     assert page.probe("#agents-dashboard .ag-card")["visible"]
     page.click("#close-agents-dashboard")
     page.wait_for("document.getElementById('agents-dashboard').hidden")
-    page.click("#ag-open-workbench")
+    if width <= 390:
+        page.eval("window._odyOpenSidebar('left')")
+        page.wait_for("document.getElementById('sidebar-workbench-shortcut').getBoundingClientRect().left >= 0")
+        time.sleep(0.35)  # sidebar slide completes before coordinate click
+    assert_usable(page, '#sidebar-workbench-shortcut')
+    page.click("#sidebar-workbench-shortcut")
     page.wait_for("!document.getElementById('workbench-modal').classList.contains('hidden')")
     assert page.probe(".ag-run-summary")["visible"]
 
@@ -392,7 +428,7 @@ def test_workbench_docks_beside_the_chat_and_keeps_working_tabs(open_app):
         assert box['visible'] and box['right'] <= 1440, (selector, box)
     assert page.probe('.ag-run-detail')['top'] >= page.probe('.ag-run-console')['bottom']
     # The chat makes room and stays usable beside it.
-    for selector in ("#chat-history", ".chat-input-bar", ".ag-context-rail"):
+    for selector in ("#chat-history", ".chat-input-bar"):
         assert page.probe(selector)["right"] <= content["left"] + 1, selector
     assert_usable(page, "#message")
     page.click('#workbench-modal [data-wb-tab="commits"]')
@@ -489,7 +525,7 @@ def test_agents_dock_and_close_keep_working(open_app):
     content = page.probe(".agents-modal-content")
     assert page.eval("document.getElementById('message').placeholder") == 'Message Scribe…'
     assert content["left"] > 500 and content["right"] <= 1441
-    for selector in ("#chat-history", ".chat-input-bar", ".ag-context-rail"):
+    for selector in ("#chat-history", ".chat-input-bar"):
         assert page.probe(selector)["right"] <= content["left"] + 1, selector
     assert_usable(page, "#message")
     assert_usable(page, "#close-agents-dashboard")
@@ -501,7 +537,7 @@ def test_agents_dock_and_close_keep_working(open_app):
 
 def test_agamemnon_text_is_legible(open_app):
     page = open_app(1440)
-    checks = [".ag-page-heading p", ".ag-context-rail dd", ".ag-context-rail section>p", "#current-meta", "#message"]
+    checks = [".ag-page-heading p", ".ag-page-heading strong", "#message"]
     for selector in checks:
         assert page.contrast(selector) >= 4.5, selector
         assert page.probe(selector)["fontSize"] >= 12, selector
@@ -522,7 +558,7 @@ def test_odysseus_theme_keeps_its_own_layout(open_app, width):
     assert page.eval("document.documentElement.dataset.theme") == "odysseus"
     shot(page, "odysseus-chat")
     for selector in (".ag-page-heading", ".ag-context-rail"):
-        assert not page.probe(selector)["visible"], selector
+        assert not (page.probe(selector) or {}).get("visible"), selector
     bar = assert_usable(page, ".chat-input-bar")
     assert_usable(page, "#message")
     assert bar["width"] <= 802  # the base composer keeps its 800px measure

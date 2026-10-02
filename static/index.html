@@ -1152,17 +1152,9 @@
       <h1>Scribe</h1>
       <p><span id="ag-session-number">NEW CHAT</span> <b>·</b> <span id="ag-session-label">New operation</span> <b>·</b> <strong id="ag-chat-status" aria-live="polite">Ready to send</strong></p>
     </header>
-    <aside class="ag-context-rail" aria-label="Session context">
-      <section><h3>SESSION CONTEXT</h3><dl><div><dt>Agent</dt><dd>Agamemnon</dd></div><div><dt>Model</dt><dd id="ag-chat-model">Default</dd></div><div><dt>Status</dt><dd id="ag-context-status">Ready to send</dd></div></dl></section>
-      <section><h3>RUN CONTROLS</h3><button type="button" id="ag-open-agents">Open phalanx</button><button type="button" id="ag-open-workbench">Inspect activity</button></section>
-      <section><h3>EVIDENCE</h3><p>Sources and artifacts attach to answers when available.</p></section>
-
-    </aside>
     <script nonce="{{CSP_NONCE}}">
     (() => {
       const relay = (source, target) => document.getElementById(source)?.addEventListener('click', () => document.getElementById(target)?.click());
-      relay('ag-open-agents', 'rail-agents');
-      relay('ag-open-workbench', 'rail-workbench');
       relay('sidebar-agents-shortcut', 'rail-agents');
       relay('sidebar-workbench-shortcut', 'rail-workbench');
       for (const id of ['sidebar-agents-shortcut', 'sidebar-workbench-shortcut']) {
@@ -1224,6 +1216,8 @@
     </script>
     <div id="chat-history" class="chat-history" role="log" aria-live="polite"></div>
 
+    <!-- Compact live-progress shelf: each disclosure scrolls independently, leaving chat usable. -->
+    <div class="chat-progress-shelf">
     <!-- Changes an agent in this chat asked to publish, waiting for a person (publishApprovals.js) -->
     <div id="publish-approvals" class="publish-approvals" aria-live="polite" hidden></div>
 
@@ -1232,6 +1226,7 @@
 
     <!-- Live sub-agents / Claude Code jobs / background jobs of this chat (workbench.js) -->
     <div id="agent-strip" class="agent-strip" aria-live="polite" hidden></div>
+    </div>
 
     <!-- Attachments strip -->
     <div id="attach-strip" class="attach-strip"></div>

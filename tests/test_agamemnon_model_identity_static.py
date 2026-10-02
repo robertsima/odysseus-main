@@ -25,7 +25,8 @@ def test_model_color_is_applied_only_to_agents_control_room_soldiers():
     assert 'ag-run-agent-mark' not in index
     assert "applyAgamemnonModelIdentity" not in workbench
     assert "applyAgamemnonModelIdentity" not in chat_identity
-    assert "window.sessionModule?.getCurrentModel?.()" in chat_identity
+    assert "window.sessionModule?.getCurrentSessionId?.()" in chat_identity
+    assert "ag-session-label" in chat_identity
 
 
 def test_brand_helmet_and_control_room_soldier_are_distinct_vector_artworks():

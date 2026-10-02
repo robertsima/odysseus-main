@@ -1,4 +1,4 @@
-/* Agamemnon composition — Penpot geometry and tokens, isolated by theme identity.
+/* Agamemnon composition — theme-isolated layout and tokens.
  *
  * This file owns every Agamemnon LAYOUT rule (Chat, Agents, Workbench).
  * agamemnon-critic-fixes.css only skins content inside these layouts and must
@@ -6,10 +6,7 @@
  * over the same boxes is what drew every Workbench tab at once and collapsed
  * the composer to a sliver.
  *
- * Board (1440×920): 240px command rail, 40px gutter, 790px primary column,
- * 28px gap, 306px context column, 36px right gutter. Below that width the
- * context column folds into a strip under the page heading, so the transcript
- * and the composer always stay on screen together.
+ * Scribe uses the whole available workspace, including when a tool is docked.
  *
  * Agents and Workbench fill the workspace as pages only while they are not
  * docked. A docked window keeps the shared tool-window geometry (dock
@@ -64,62 +61,64 @@ html[data-theme="dark"] .sidebar #tools-section .section-title{font-size:0}
 html[data-theme="dark"] .sidebar #tools-section .section-title::after{content:'SYSTEM /';font-size:11px}
 html[data-theme="dark"] .sidebar #tool-agents-btn,html[data-theme="dark"] .sidebar #tool-workbench-btn{display:none!important}
 
-/* ── Chat / Strategy Room ─────────────────────────────────────────────────
- * The base flex column stays: heading, context, meta bar, transcript (the
- * only part that grows, and it scrolls), then the composer. Nothing here is
- * absolutely positioned except the context column on wide boards. */
+/* ── Scribe chat ──────────────────────────────────────────────────────────
+ * One compact identity row, one scrolling transcript and the composer. The
+ * model picker, Phalanx and Workbench already have permanent entry points. */
 /* Only the top margin: the side margins are how a docked panel makes room. */
-html[data-theme="dark"] .chat-container{background:var(--ag-bg);margin-top:0;margin-bottom:0;padding:26px 40px 24px;gap:0}
-html[data-theme="dark"] .ag-page-heading{display:block;flex:0 0 auto;box-sizing:border-box;margin:0 0 10px;min-width:0}
-html[data-theme="dark"] .ag-page-heading h1{margin:0;font:700 30px/1.2 'Space Grotesk';letter-spacing:.025em}
-html[data-theme="dark"] .ag-page-heading p{margin:6px 0 0;color:var(--ag-muted);font-size:15px;letter-spacing:.03em;overflow-wrap:anywhere}
+html[data-theme="dark"] .chat-container{background:var(--ag-bg);margin-top:0;margin-bottom:0;padding:18px clamp(14px,2.5vw,36px) 18px;gap:0}
+html[data-theme="dark"] .ag-page-heading{display:flex;align-items:baseline;flex-wrap:wrap;column-gap:18px;flex:0 0 auto;box-sizing:border-box;margin:0 0 10px;min-width:0}
+html[data-theme="dark"] .ag-page-heading h1{margin:0;font:700 26px/1.2 'Space Grotesk';letter-spacing:.025em}
+html[data-theme="dark"] .ag-page-heading p{margin:0;color:var(--ag-muted);font-size:13px;letter-spacing:.03em;overflow-wrap:anywhere}
 html[data-theme="dark"] .ag-page-heading b{padding:0 8px;color:var(--ag-border-strong)}
 html[data-theme="dark"] .ag-page-heading strong{color:var(--ag-gold);font-weight:700}
-html[data-theme="dark"] .chat-top-bar{flex:0 0 auto;min-height:28px;margin:0;padding:0;border:0;background:transparent;justify-content:flex-start}
+html[data-theme="dark"] .chat-top-bar{flex:0 0 auto;min-height:30px;margin:0;padding:0;border:0;background:transparent;justify-content:flex-start}
 html[data-theme="dark"] .chat-top-bar .chat-meta-overlay{left:0;right:0;max-width:100%;justify-content:flex-start;transform:translateY(-50%);font-size:12px}
+html[data-theme="dark"] .chat-top-bar #current-meta{display:none}
 html[data-theme="dark"] .chat-top-bar:has(.incognito-indicator:not([style*="none"])) .chat-meta-overlay{left:40px}
-html[data-theme="dark"] #chat-history{flex:1 1 auto;min-height:0;width:100%;max-width:none;box-sizing:border-box;margin:0;background:var(--ag-panel);border:2px solid var(--ag-gold);padding:26px 30px}
+html[data-theme="dark"] #chat-history{flex:1 1 auto;min-height:0;width:100%;max-width:none;box-sizing:border-box;margin:0;background:var(--ag-panel);border:1px solid var(--ag-border);border-top:2px solid var(--ag-gold);padding:22px clamp(14px,2.5vw,36px)}
 html[data-theme="dark"] #chat-history .msg-ai pre,html[data-theme="dark"] #chat-history .msg-ai .tool-result{max-width:100%;overflow:auto}
 html[data-theme="dark"] .chat-container .chat-input-bar,
-html[data-theme="dark"] .chat-container.welcome-active .chat-input-bar{position:relative;inset:auto;flex:0 0 auto;box-sizing:border-box;width:100%;max-width:none;min-height:104px;height:auto;margin:14px 0 0;border:2px solid var(--ag-gold);border-radius:0;background:var(--ag-raised);box-shadow:none}
+html[data-theme="dark"] .chat-container.welcome-active .chat-input-bar{position:relative;inset:auto;flex:0 0 auto;box-sizing:border-box;width:100%;max-width:none;min-height:104px;height:auto;margin:10px 0 0;border:1px solid var(--ag-border-strong);border-radius:0;background:var(--ag-raised);box-shadow:none}
 html[data-theme="dark"] #welcome-screen{top:50%;left:50%}
 html[data-theme="dark"] .welcome-name{font-family:'Space Grotesk';font-weight:700;letter-spacing:.08em;text-transform:uppercase}
 
-/* Context: a compact strip under the heading by default (narrow boards,
-   docked panels, document split); the 306px column on a wide free board. */
-html[data-theme="dark"] .ag-context-rail{display:flex;flex:0 0 auto;flex-wrap:wrap;align-items:stretch;gap:10px 0;box-sizing:border-box;min-width:0;margin:0 0 10px;padding:10px 12px 10px 0;overflow:visible;background:var(--ag-rail);border:2px solid var(--ag-border)}
-html[data-theme="dark"] .ag-context-rail section{flex:0 0 auto;display:flex;flex-direction:column;justify-content:center;gap:6px;margin:0;padding:0 14px;border-left:1px solid var(--ag-border)}
-html[data-theme="dark"] .ag-context-rail section:first-child{border-left-color:transparent}
-html[data-theme="dark"] .ag-context-rail section:has(>button){display:grid;grid-template-columns:repeat(2,auto);align-content:center;gap:6px 8px}
-html[data-theme="dark"] .ag-context-rail section:has(>button) h3{grid-column:1/-1}
-html[data-theme="dark"] .ag-context-rail section:not(:has(button,dl)),html[data-theme="dark"] .ag-context-rail section>p{display:none}
-html[data-theme="dark"] .ag-context-rail h3,html[data-theme="dark"] .ag-run-detail h3{margin:0;color:var(--ag-gold);font:700 11px/1 'Space Grotesk';letter-spacing:.16em}
-html[data-theme="dark"] .ag-context-rail dl{display:flex;gap:16px;margin:0;color:var(--ag-muted);font-size:13px;line-height:1.4}
-html[data-theme="dark"] .ag-context-rail dl div{display:flex;gap:6px;margin:0;white-space:nowrap}
-/* The strip leaves out the agent name; the page heading already carries it. */
-html[data-theme="dark"] .ag-context-rail dl div:first-child{display:none}
-html[data-theme="dark"] .ag-context-rail dd{margin:0;color:var(--ag-text)}
-html[data-theme="dark"] .ag-context-rail i{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--ag-gold);margin-right:6px}
-html[data-theme="dark"] .ag-context-rail button{display:block;width:auto;height:auto;min-height:44px;margin:0;padding:6px 11px;text-align:left;white-space:nowrap;color:var(--ag-text);background:var(--ag-raised);border:1px solid var(--ag-border-strong);border-radius:0;font:500 13px 'Space Grotesk';cursor:pointer}
-html[data-theme="dark"] .ag-context-rail button:hover{border-color:var(--ag-gold);color:var(--ag-gold)}
-html[data-theme="dark"] .ag-context-rail button:focus-visible{outline:2px solid var(--ag-gold);outline-offset:2px}
-
-@media(min-width:1180px){
- html[data-theme="dark"] body:not(.right-dock-active):not(.left-dock-active):not(.doc-view) .chat-container{padding-right:370px}
- html[data-theme="dark"] body:not(.right-dock-active):not(.left-dock-active):not(.doc-view) .ag-page-heading{height:76px;overflow:hidden}
- html[data-theme="dark"] body:not(.right-dock-active):not(.left-dock-active):not(.doc-view) .ag-page-heading p{margin-top:13px}
- html[data-theme="dark"] body:not(.right-dock-active):not(.left-dock-active):not(.doc-view) #welcome-screen{left:calc(50% - 165px)}
- /* top = 26px padding + 76px heading + 10px gap + 28px meta bar: level with the transcript. */
- html[data-theme="dark"] body:not(.right-dock-active):not(.left-dock-active):not(.doc-view) .ag-context-rail{display:block;position:absolute;z-index:4;top:140px;right:36px;bottom:24px;width:306px;margin:0;padding:26px 24px;overflow:auto}
- html[data-theme="dark"] body:not(.right-dock-active):not(.left-dock-active):not(.doc-view) .ag-context-rail section{display:block;padding:0}
- html[data-theme="dark"] body:not(.right-dock-active):not(.left-dock-active):not(.doc-view) .ag-context-rail section{border-left:0}
- html[data-theme="dark"] body:not(.right-dock-active):not(.left-dock-active):not(.doc-view) .ag-context-rail section+section{margin-top:31px;padding-top:25px;border-top:1px solid var(--ag-border)}
- html[data-theme="dark"] body:not(.right-dock-active):not(.left-dock-active):not(.doc-view) .ag-context-rail section>p{display:block;margin:0;color:var(--ag-muted);font-size:14px;line-height:1.55}
- html[data-theme="dark"] body:not(.right-dock-active):not(.left-dock-active):not(.doc-view) .ag-context-rail h3{margin:0 0 14px;font-size:12px}
- html[data-theme="dark"] body:not(.right-dock-active):not(.left-dock-active):not(.doc-view) .ag-context-rail dl{display:block;font-size:14px;line-height:1.55}
- html[data-theme="dark"] body:not(.right-dock-active):not(.left-dock-active):not(.doc-view) .ag-context-rail dl div,
- html[data-theme="dark"] body:not(.right-dock-active):not(.left-dock-active):not(.doc-view) .ag-context-rail dl div:first-child{display:flex;justify-content:space-between;margin:8px 0}
- html[data-theme="dark"] body:not(.right-dock-active):not(.left-dock-active):not(.doc-view) .ag-context-rail button{width:100%;margin:8px 0 0}
+/* No session-context column: the transcript expands with the viewport. */
+html[data-theme="dark"] .ag-run-detail h3{margin:0;color:var(--ag-gold);font:700 11px/1 'Space Grotesk';letter-spacing:.16em}
+/* Live progress sits above the composer without taking the conversation away.
+   Each disclosure has its own scroll area; no control or checklist step is
+   discarded. This matters when both panels and a dock are open together. */
+html[data-theme="dark"] :is(.task-checklist,.agent-strip){box-sizing:border-box;width:100%;max-width:none;min-width:0;margin:6px 0 0;padding:0;font-size:12px}
+/* The progress shelf gets only the space it needs, not two full-width
+   vertically stacked popups. Query the actual chat column, not the browser:
+   a dock can halve the chat while the viewport remains desktop-sized. */
+html[data-theme="dark"] .chat-container{container-type:inline-size}
+html[data-theme="dark"] .chat-progress-shelf{display:grid;grid-template-columns:minmax(0,1fr);gap:6px;flex:none;min-width:0;margin-top:6px}
+html[data-theme="dark"] .chat-progress-shelf :is(.task-checklist,.agent-strip){margin:0}
+html[data-theme="dark"] .chat-progress-shelf :is(.tc-list,.agent-strip-rows){max-height:clamp(54px,9vh,76px)}
+html[data-theme="dark"] .chat-progress-shelf .publish-approvals{grid-column:1/-1}
+@container (min-width: 900px){
+ html[data-theme="dark"] .chat-progress-shelf{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+html[data-theme="dark"] :is(.tc-head,.agent-strip-head){background:var(--ag-rail);border-color:var(--ag-border-strong);border-radius:0;min-height:32px}
+html[data-theme="dark"] :is(.tc-toggle,.agent-strip-toggle){min-height:30px;height:auto;color:var(--ag-text)}
+html[data-theme="dark"] :is(.tc-list,.agent-strip-rows){box-sizing:border-box;max-height:clamp(64px,13vh,112px);overflow:auto;background:var(--ag-panel);border-color:var(--ag-border-strong);border-radius:0}
+html[data-theme="dark"] .chat-progress-shelf :is(.tc-list,.agent-strip-rows){max-height:clamp(54px,9vh,76px)}
+html[data-theme="dark"] .agent-strip-row{grid-template-columns:auto auto minmax(0,1fr) auto auto auto auto;gap:6px}
+html[data-theme="dark"] .agent-strip-activity{display:none}
+html[data-theme="dark"] .agent-strip-progress{grid-column:3/-1}
+html[data-theme="dark"] :is(.tc-toggle,.agent-strip-toggle,.agent-strip-head button):focus-visible{outline:2px solid var(--ag-gold);outline-offset:-2px}
+/* Once a dock narrows the conversation, the job name owns a complete line.
+   Actions wrap underneath instead of pushing the title to an ellipsis. */
+@container (max-width: 899px){
+ html[data-theme="dark"] .agent-strip-row{display:flex;flex-wrap:wrap;gap:5px 8px;padding:7px 8px}
+ html[data-theme="dark"] .agent-strip-title{order:-1;flex:0 0 100%;white-space:normal;overflow-wrap:anywhere;font-size:13px}
+ html[data-theme="dark"] .agent-strip-progress{flex:0 0 100%;white-space:normal}
+ html[data-theme="dark"] .agent-strip-row .wb-btn{min-height:32px}
+ html[data-theme="dark"] .chat-progress-shelf .tc-list{max-height:48px}
+ html[data-theme="dark"] .chat-progress-shelf .agent-strip-rows{max-height:88px}
+}
+@media(max-width:700px){
+ html[data-theme="dark"] .agent-strip-row .wb-chip{display:none}
 }
 
 /* ── Shared tool-window skin (docked or page) ─────────────────────────── */
@@ -267,13 +266,7 @@ html[data-theme="dark"] #workbench-modal .wb-panel.hidden{display:none!important
  /* Leave the top-right corner to the sidebar's hamburger. */
  html[data-theme="dark"] .ag-page-heading{padding-right:48px;margin-bottom:8px}
  html[data-theme="dark"] .ag-page-heading p{margin-top:6px;font-size:13px}
- /* Phone: the model is on the composer and status in the heading, so the
-    strip keeps only its actions, in one row. */
- html[data-theme="dark"] .ag-context-rail{margin-bottom:8px;padding:6px;gap:6px;border-width:1px}
- html[data-theme="dark"] .ag-context-rail section{padding:0;border:0}
- html[data-theme="dark"] .ag-context-rail section:has(dl),html[data-theme="dark"] .ag-context-rail h3{display:none}
- html[data-theme="dark"] .ag-context-rail section:has(>button){display:flex;flex-direction:row;gap:6px}
- html[data-theme="dark"] .ag-context-rail button{padding:6px 9px;font-size:12.5px}
+
  html[data-theme="dark"] #workbench-modal .workbench-modal-body>.wb-tabs{flex-wrap:wrap!important;overflow:visible!important}
  html[data-theme="dark"] .ag-console-hero{grid-template-columns:64px minmax(0,1fr);row-gap:8px}
  html[data-theme="dark"] .ag-console-robot-bay{width:64px;height:64px}

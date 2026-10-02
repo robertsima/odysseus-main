@@ -106,6 +106,8 @@ def _api_response(state: StubState, method: str, path: str, body: dict) -> tuple
                       "updated_at": "2026-10-01T10:00:00Z", "message_count": 4}]
     if path.startswith("/api/history/"):
         return 200, HISTORY
+    if path.startswith("/api/agents/sessions/") and path.endswith("/checklist"):
+        return 200, {"plan": "- [x] Inspect migration tables\n- [ ] Migrate orders in batches\n- [ ] Verify counts and rollback"}
     if path == "/api/agents/overview":
         rows = [dict(row, soldier_appearance=state.appearance.get(row["session_id"], row.get("soldier_appearance")))
                 for row in AGENT_ROWS]
@@ -117,7 +119,9 @@ def _api_response(state: StubState, method: str, path: str, body: dict) -> tuple
     if path.startswith("/api/agents/runs/"):
         return 200, {"events": []}
     if path == "/api/workbench/runs":
-        return 200, {"runs": []}
+        return 200, {"runs": [{"run_id": RUN_ID, "session_id": SESSION_ID, "source": "claude_code",
+                                "status": "running", "title": "Claude Code · migrate orders",
+                                "started_at": NOW - 60, "detail": "Checking migration safety"}]}
     if path == "/api/workbench/repo/roots":
         return 200, {"roots": [{"path": "/repo", "label": "repo"}]}
     if path in ("/api/workbench/repo/changes", "/api/workbench/repo/commits"):
