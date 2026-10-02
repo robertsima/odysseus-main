@@ -12,9 +12,12 @@ html:not([data-theme="dark"]) .brand-crest-icon{display:none}
 html[data-theme="dark"] #chat-history .msg-ai{box-sizing:border-box;width:calc(100% - 32px);max-width:none;margin:18px 16px;padding:18px 20px;background:#20262c;border:1px solid var(--ag-border-strong);border-radius:0}
 html[data-theme="dark"] #chat-history .msg-ai .body{max-width:none;color:#f7f8fa}
 html[data-theme="dark"] #chat-history .msg-user{margin:0 0 18px;max-width:none;background:transparent;border:0;border-radius:0}
-/* On touch screens the always-visible run/edit/copy actions previously sat
-   over the first code line. Reserve a toolbar row above scrollable code. */
-@media(max-width:768px){html[data-theme="dark"] #chat-history pre:has(> .copy-code,> .edit-code,> .run-code){padding-top:58px}}
+/* Keep the code actions in a reserved row at every size. A long first line
+   must be readable by scrolling the code, not obscured by hover actions. */
+html[data-theme="dark"] #chat-history pre:has(> .copy-code,> .edit-code,> .run-code){padding-top:58px}
+/* The shared transcript can flip actions to the bottom of a code block near
+   the viewport edge. The themed toolbar always belongs in its reserved row. */
+html[data-theme="dark"] #chat-history pre:has(> .copy-code,> .edit-code,> .run-code) :is(.copy-code,.edit-code,.run-code).bottom{top:6px;bottom:auto}
 html[data-theme="dark"] #chat-history .msg-ai .role,html[data-theme="dark"] #chat-history .msg-user .role{color:var(--ag-gold);font:700 11px/1.2 'Space Grotesk';letter-spacing:.14em;text-transform:uppercase}
 @media(max-width:768px){html[data-theme="dark"] #chat-history .msg-ai{width:100%;margin:12px 0;padding:14px}}
 

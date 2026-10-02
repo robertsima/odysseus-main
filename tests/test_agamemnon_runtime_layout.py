@@ -271,21 +271,44 @@ def test_phalanx_mobile_names_and_actions_are_reachable(open_app, width):
     assert_no_sideways_scroll(page, '.agents-modal-content')
 
 
-@pytest.mark.parametrize('width', [390, 320])
-def test_mobile_code_actions_leave_the_code_readable(open_app, width):
+@pytest.mark.parametrize('width', [1440, 390, 320])
+def test_code_actions_leave_the_code_readable(open_app, width):
     page = open_app(width)
-    code = page.eval("(() => {const p=document.querySelector('#chat-history pre:has(> .copy-code)'); const btn=p.querySelector('.copy-code');const content=p.querySelector('code');return {padding:parseFloat(getComputedStyle(p).paddingTop),buttonBottom:btn.getBoundingClientRect().bottom,codeTop:content.getBoundingClientRect().top};})()")
-    assert code['padding'] >= 44 and code['codeTop'] >= code['buttonBottom'], code
+    for flip in (False, True):
+        code = page.eval("""(() => {const p=document.querySelector('#chat-history pre:has(> .copy-code)');
+            if (%s) p.querySelectorAll('.copy-code,.edit-code,.run-code').forEach(b => b.classList.add('bottom'));
+            const content=p.querySelector('code'); const actions=[...p.querySelectorAll('.copy-code,.edit-code,.run-code')];
+            return {padding:parseFloat(getComputedStyle(p).paddingTop),
+                    buttonBottom:Math.max(...actions.map(b=>b.getBoundingClientRect().bottom)),
+                    codeTop:content.getBoundingClientRect().top};})()""" % json.dumps(flip))
+        assert code['padding'] >= 44 and code['codeTop'] >= code['buttonBottom'], code
 
 
-@pytest.mark.parametrize('width', [390, 320])
-def test_mobile_workbench_sheds_empty_run_panel_height(open_app, width):
+@pytest.mark.parametrize('width', [1440, 1024, 390, 320])
+def test_workbench_sheds_empty_run_panel_height(open_app, width):
     page = open_app(width)
     open_workbench(page)
     timeline, output = page.probe('.ag-run-timeline'), page.probe('.ag-run-console')
     # 320px wraps the event names; let real content grow instead of clipping.
-    assert timeline['height'] < 200 and output['height'] < 110, (timeline, output)
+    assert timeline['height'] < (200 if width <= 390 else 210) and output['height'] < 110, (timeline, output)
     assert_no_sideways_scroll(page, '.workbench-modal-content')
+    if width <= 390:
+        toolbar, feed, detail = (page.probe(s) for s in ('.wb-panel[data-wb-panel="activity"]>.wb-toolbar', '.wb-panel[data-wb-panel="activity"]>.wb-activity', '.ag-run-detail'))
+        assert toolbar['top'] >= output['bottom'] and feed['top'] >= toolbar['bottom'], (toolbar, feed)
+        assert detail['top'] >= feed['bottom'], (feed, detail)
+
+
+def test_long_workbench_run_panels_remain_bounded_and_scrollable(open_app):
+    page = open_app(1440)
+    open_workbench(page)
+    page.eval("""(() => {
+        const list=document.getElementById('ag-run-timeline-list');
+        for (let i=0;i<40;i++) { const li=document.createElement('li');li.textContent='Recorded step '+i;list.append(li); }
+        document.getElementById('ag-run-console-output').textContent = ('Output event\\n').repeat(50);
+    })()""")
+    for selector, cap in (('.ag-run-timeline', 260), ('.ag-run-console', 160)):
+        measured = page.eval("(() => {const e=document.querySelector('%s');return {height:e.getBoundingClientRect().height,scroll:e.scrollHeight,client:e.clientHeight};})()" % selector)
+        assert measured['height'] <= cap + 1 and measured['scroll'] > measured['client'], measured
 
 
 def test_workbench_keyboard_tabs_and_theme_switch(open_app):
