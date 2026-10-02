@@ -105,13 +105,19 @@ html[data-style="agamemnon"] .agent-strip-row{grid-template-columns:auto auto mi
 html[data-style="agamemnon"] .agent-strip-activity{display:none}
 html[data-style="agamemnon"] .agent-strip-progress{grid-column:3/-1}
 html[data-style="agamemnon"] :is(.tc-toggle,.agent-strip-toggle,.agent-strip-head button):focus-visible{outline:2px solid var(--ag-gold);outline-offset:-2px}
-/* Once a dock narrows the conversation, the job name owns a complete line.
-   Actions wrap underneath instead of pushing the title to an ellipsis. */
+/* The run strip is a distinct, bounded chat surface, not a miniature fleet.
+   A title and state occupy the first line; controls share the second. */
 @container (max-width: 899px){
- html[data-style="agamemnon"] .agent-strip-row{display:flex;flex-wrap:wrap;gap:5px 8px;padding:7px 8px}
- html[data-style="agamemnon"] .agent-strip-title{order:-1;flex:0 0 100%;white-space:normal;overflow-wrap:anywhere;font-size:13px}
- html[data-style="agamemnon"] .agent-strip-progress{flex:0 0 100%;white-space:normal}
- html[data-style="agamemnon"] .agent-strip-row .wb-btn{min-height:32px}
+ html[data-style="agamemnon"] .agent-strip-head{padding-right:34px}
+ html[data-style="agamemnon"] .agent-strip-row{grid-template-columns:auto minmax(0,1fr) auto;gap:4px 8px;padding:6px 26px 6px 8px}
+ html[data-style="agamemnon"] .agent-strip-row .wb-chip{display:none}
+ html[data-style="agamemnon"] .agent-strip-title{grid-column:2;grid-row:1;white-space:normal;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;line-height:1.25;font-size:12px}
+ html[data-style="agamemnon"] .agent-strip-time{grid-column:3;grid-row:1}
+ html[data-style="agamemnon"] .agent-strip-row .wb-btn{grid-row:2;min-height:36px;justify-self:start}
+ html[data-style="agamemnon"] .agent-strip-row .wb-btn[data-strip-act="open"]{grid-column:1}
+ html[data-style="agamemnon"] .agent-strip-row .wb-btn[data-strip-act="wrap-up"]{grid-column:2}
+ html[data-style="agamemnon"] .agent-strip-row .wb-btn[data-strip-act="stop"]{grid-column:3}
+ html[data-style="agamemnon"] .agent-strip-progress{grid-column:1/-1;grid-row:3;white-space:normal}
  html[data-style="agamemnon"] .chat-progress-shelf .tc-list{max-height:48px}
  html[data-style="agamemnon"] .chat-progress-shelf .agent-strip-rows{max-height:88px}
 }
@@ -190,7 +196,7 @@ html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.mod
 html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-list .ag-card-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,max(360px,calc((100% - 30px) / 2))),1fr));gap:28px 30px;max-width:1050px}
 html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-card-workers{display:contents}
 html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-list .ag-card{grid-template-columns:64px minmax(0,1fr) auto;gap:16px;min-height:152px;margin:0;padding:22px 24px}
-html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-compact .ag-fleet-list .ag-card{grid-template-columns:44px minmax(0,1fr) auto;gap:12px;min-height:96px;padding:14px 16px}
+html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-compact .ag-fleet-list .ag-card{grid-template-columns:34px minmax(0,1fr) auto;gap:8px;min-height:0;padding:9px 12px}
 html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-card-actions{flex-direction:row;align-self:start;gap:6px}
 html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-card-actions .wb-icon-btn{width:32px;height:32px}
 html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-detail{display:flex;min-height:320px;overflow:visible;padding:24px 26px;scroll-margin-top:24px}
@@ -283,11 +289,7 @@ html[data-style="agamemnon"] #workbench-modal .wb-panel.hidden{display:none!impo
     fill the screen, so keep an explicit way out. */
  html[data-style="agamemnon"] #agents-dashboard #close-agents-dashboard,html[data-style="agamemnon"] #workbench-modal #close-workbench-modal{display:inline-flex!important;width:44px;height:44px}
  html[data-style="agamemnon"] .ag-head-actions{flex-wrap:wrap;margin-left:0}
- /* At phone width, actions must not steal the only line available to the
-    unit name. Put actions under the copy, with 44px hit areas. */
- html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-list .ag-card{grid-template-columns:48px minmax(0,1fr);column-gap:12px;row-gap:4px;min-height:0;padding:16px}
- html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-card-actions{grid-column:2;grid-row:2;justify-content:flex-start;align-self:center}
- html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-card-actions .wb-icon-btn{width:44px;height:44px}
+
  html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-row-name{white-space:normal;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;line-height:1.3}
  html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-row-dur{font-size:11px}
  html[data-style="agamemnon"] #workbench-modal .workbench-modal-body>.wb-tabs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0}
@@ -322,18 +324,31 @@ html[data-style="agamemnon"] #workbench-modal .wb-panel.hidden{display:none!impo
 .theme-style-card label{display:flex;justify-content:space-between;align-items:center;gap:20px;cursor:pointer;min-height:48px}
 .theme-style-card small{display:block;margin-top:5px;line-height:1.45;opacity:.8}
 .theme-style-card input{width:22px;height:22px;flex:none;accent-color:var(--red)}
-html[data-style="agamemnon"] #agents-dashboard:is(.modal-right-docked,.modal-left-docked) .ag-card,
-html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-bot-card{grid-template-columns:34px minmax(0,1fr) auto!important;gap:8px;min-height:76px;padding:8px!important}
-html[data-style="agamemnon"] #agents-dashboard:is(.modal-right-docked,.modal-left-docked) .ag-card-actions,
-html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-card-actions{grid-column:3;grid-row:1;display:flex;flex-flow:column wrap;gap:4px;align-items:center;justify-content:center;opacity:1}
+html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-fleet-list .ag-bot-card,
+html[data-style="agamemnon"] #agents-dashboard:is(.modal-right-docked,.modal-left-docked) .ag-fleet-list .ag-bot-card{grid-template-columns:34px minmax(0,1fr) auto;gap:8px;min-height:0;padding:9px 12px}
+html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-card-avatar{min-height:0;padding:2px 0 0}
+html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-card-copy{min-height:0;min-width:0;gap:2px;justify-content:start}
+html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-row-top{min-height:0}
+html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-row-name{line-height:1.25;white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-row-dur{flex:none}
+html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-row-sub{display:block;line-height:1.3}
+html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-row-meta-inline{display:none}
+html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-row-latest{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;white-space:normal;line-height:1.3}
+html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-card-actions,
+html[data-style="agamemnon"] #agents-dashboard:is(.modal-right-docked,.modal-left-docked) .ag-card-actions{grid-column:3;grid-row:1;display:flex;flex-direction:row;gap:4px;align-items:start;align-self:start;opacity:1}
 html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-card-actions button{min-width:44px;min-height:44px;width:auto;padding:4px 6px;font-size:11px}
-html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-card-copy{min-height:0;min-width:0}
-html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-row-latest{white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 html[data-style="agamemnon"] #agents-dashboard:is(.modal-right-docked,.modal-left-docked) .ag-fleet-tools{display:flex;flex-wrap:wrap;gap:8px}
 html[data-style="agamemnon"] #agents-dashboard :is(.ag-card,.ag-detail,.ag-launch){overflow-wrap:anywhere;min-width:0}
 @media(max-width:600px){
  html[data-style="agamemnon"] #agents-dashboard .ag-head{display:flex;flex-wrap:wrap;gap:8px}
  html[data-style="agamemnon"] #agents-dashboard .ag-head-actions{width:100%;display:flex;flex-wrap:wrap;gap:6px}
- html[data-style="agamemnon"] #agents-dashboard .ag-fleet-list .ag-bot-card{grid-template-columns:34px minmax(0,1fr) auto!important;padding:8px!important}
- html[data-style="agamemnon"] #agents-dashboard .ag-fleet-list .ag-bot-card .ag-card-actions{grid-column:3!important;grid-row:1!important}
+ html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-list .ag-card{grid-template-columns:48px minmax(0,1fr);column-gap:12px;row-gap:4px;min-height:0;padding:16px}
+ html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-card-actions{grid-column:2;grid-row:2;justify-content:flex-start;align-self:center}
+ html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-card-actions .wb-icon-btn{width:44px;height:44px}
+ /* At phone width names and latest activity get the full copy column. Keep
+    the two labeled, touch-sized actions together underneath rather than
+    stranding them in a thin right-hand column. */
+ html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-fleet-list .ag-bot-card{grid-template-columns:34px minmax(0,1fr);padding:8px 10px}
+ html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-fleet-list .ag-card-actions{grid-column:2;grid-row:2;justify-self:start}
+ html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-row-dur{font-size:10px}
 }

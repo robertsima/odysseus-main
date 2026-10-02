@@ -28,7 +28,7 @@ from tests.helpers.agamemnon_browser import (
 EXE = chromium_path()
 pytestmark = pytest.mark.skipif(not EXE, reason="needs a Chromium binary (ODYSSEUS_TEST_CHROMIUM)")
 
-VIEWPORTS = {1440: 920, 1280: 800, 1024: 768, 390: 844, 320: 740}
+VIEWPORTS = {1440: 920, 1280: 800, 1024: 768, 700: 844, 390: 844, 320: 740}
 SHOTS = os.environ.get("AGAMEMNON_SCREENSHOT_DIR")
 ODYSSEUS_THEME = json.dumps({"name": "odysseus", "colors": {
     "bg": "#211f1c", "fg": "#f2eee5", "panel": "#171614", "border": "#554b36", "red": "#c99a45"}})
@@ -108,6 +108,50 @@ def open_agents(page) -> None:
     page.eval("window.agentsDashboard.open()")
     page.wait_for("document.querySelectorAll('#agents-dashboard .ag-card').length === 3")
     time.sleep(0.3)
+
+
+@pytest.mark.parametrize('width', [320, 390, 700])
+def test_compact_phalanx_and_chat_strip_are_distinct_and_readable(open_app, width):
+    page = open_app(width)
+    assert page.eval("document.getElementById('sidebar-command-menu').hidden") is True
+    page.wait_for("!document.getElementById('agent-strip').hidden")
+    page.eval("document.querySelector('.agent-strip-toggle').click()")
+    page.wait_for("document.querySelector('.agent-strip-toggle').getAttribute('aria-expanded') === 'false'")
+    shot(page, 'strip-collapsed')
+    assert_usable(page, '.agent-strip-toggle')
+    assert page.probe('.agent-strip-head')['height'] < 55
+    page.eval("document.querySelector('.agent-strip-toggle').click()")
+    shot(page, 'strip-expanded')
+    assert page.probe('.agent-strip-row')['height'] <= 130
+    assert_no_sideways_scroll(page)
+
+    open_agents(page)
+    page.wait_for("document.querySelector('.ag-fleet').classList.contains('ag-fleet-compact')")
+    shot(page, 'compact-phalanx')
+    for card in page.eval("[...document.querySelectorAll('.ag-fleet-compact .ag-bot-card')].map(c => {const b=c.getBoundingClientRect();return {height:b.height,left:b.left,right:b.right};})"):
+        assert card['height'] <= (155 if width <= 390 else 110), card
+        assert card['left'] >= 0 and card['right'] <= width + 1, card
+    for action in page.eval("[...document.querySelectorAll('.ag-fleet-compact .ag-card-actions button')].map(c => {const b=c.getBoundingClientRect();return {height:b.height,width:b.width,right:b.right};})"):
+        assert action['height'] >= 44 and action['width'] >= 44 and action['right'] <= width + 1, action
+    assert_no_sideways_scroll(page, '.agents-modal-content')
+
+
+def test_chat_strip_with_half_width_docked_workbench(open_app):
+    page = open_app(1024)
+    open_workbench(page)
+    page.click('#wb-dock-right')
+    page.wait_for("document.getElementById('workbench-modal').classList.contains('modal-right-docked')")
+    shot(page, 'strip-half-workbench')
+    strip, chat = page.probe('.agent-strip'), page.probe('.chat-container')
+    assert strip['width'] <= chat['width'] and strip['height'] <= 155
+    assert_usable(page, '.agent-strip-toggle')
+    assert_usable(page, '#message')
+    assert_no_sideways_scroll(page)
+    page.click('.agent-strip-toggle')
+    page.wait_for("document.querySelector('.agent-strip-toggle').getAttribute('aria-expanded') === 'false'")
+    shot(page, 'strip-half-workbench-collapsed')
+    assert page.probe('.agent-strip-head')['height'] < 55
+    assert_usable(page, '#message')
 
 
 # ── Chat ────────────────────────────────────────────────────────────────────
