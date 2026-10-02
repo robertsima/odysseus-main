@@ -173,7 +173,12 @@ async def test_updating_a_loadout_from_a_worker_cannot_reach_past_the_worker(mon
     saved = {"profiles": [{"name": "Helper", "tool_access": "selected", "enabled_tools": ["read_file"]}]}
     monkeypatch.setattr(agent_loadouts, "_write", lambda p: saved.__setitem__("profiles", list(p)))
     monkeypatch.setattr("src.agent_profiles.load_profiles", lambda: list(saved["profiles"]))
-    monkeypatch.setattr("src.agent_tools.loadout_tools._widening_authorization",
+    # The module the tool function lives in, not a dotted string: another test
+    # file swaps `src.agent_tools` in sys.modules, and under xdist the string
+    # then resolves to the wrong object.
+    import sys
+
+    monkeypatch.setattr(sys.modules[manage_agent_loadout.__module__], "_widening_authorization",
                         lambda *a, **k: type("A", (), {"ok": True, "worker": False, "unnamed": []})())
     await manage_agent_loadout(json.dumps({
         "action": "update", "name": "Helper", "tool_access": "selected",

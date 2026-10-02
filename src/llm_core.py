@@ -722,7 +722,9 @@ _STREAM_STATUS_RETRY_BACKOFF = 5.0
 # a Lead Engineer mid-run; the admin resumed it by hand 80 s later. 520-524 are
 # the Cloudflare edge failing to reach or hear from the origin, 529 is
 # "overloaded": like 502/503, nothing was produced, so a replay is safe.
-_STREAM_RETRY_STATUSES = frozenset({502, 503, 504, 520, 521, 522, 523, 524, 529})
+# 504 stays out: a local connection-pool timeout is reported as 504 and must
+# fall through to the next route at once, not replay the same one.
+_STREAM_RETRY_STATUSES = frozenset({502, 503, 520, 521, 522, 523, 524, 529})
 _STREAM_STATUS_RETRIES = 3
 
 
@@ -792,7 +794,7 @@ def is_transient_upstream_error(err: BaseException) -> bool:
     if isinstance(err, socket.gaierror):
         return True
     status = getattr(err, "status_code", None)
-    if isinstance(status, int) and status in _STREAM_RETRY_STATUSES:
+    if isinstance(status, int) and (status == 504 or status in _STREAM_RETRY_STATUSES):
         return True
     text = str(getattr(err, "detail", "") or err).lower()
     return any(marker in text for marker in _TRANSIENT_UPSTREAM_MARKERS)

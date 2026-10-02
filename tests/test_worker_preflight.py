@@ -188,6 +188,16 @@ def send_env(tmp_path, monkeypatch, checkouts):
     mgr = _Manager()
     monkeypatch.setattr(st, "get_session_manager", lambda: mgr)
     monkeypatch.setattr(st, "_caller_workspace", lambda sid: None)
+    # The fake manager keeps chats in memory, so the child's settings row is
+    # stored here. Since 2026-10-02 a nameless child's capped policy must be
+    # saved before it starts.
+    saved = {}
+
+    def save(sid, patch):
+        saved.setdefault(sid, {}).update(patch)
+        return dict(saved[sid])
+
+    monkeypatch.setattr("core.database.update_session_settings", save)
     yield st, mgr, act
     act._reset_for_tests()
 
