@@ -716,3 +716,141 @@ def test_navigation_and_background_effect_survive_customization(open_app, theme)
     assert 'bg-pattern-dots' in page.eval('document.body.className')
     assert 'radial-gradient' in page.eval('getComputedStyle(document.body).backgroundImage')
     shot(page, 'customization-' + style)
+
+
+# ── Product crest and soldier sizing ────────────────────────────────────────
+
+LIGHT_THEME = json.dumps({"name": "light", "colors": {
+    "bg": "#f0ebe3", "fg": "#5a5248", "panel": "#faf6f0", "border": "#d4cdc2", "red": "#c47d5a"}})
+
+# Every drawn soldier and the slot it is meant to sit in.
+SPRITE_FIT_JS = r"""
+(slotSelector) => [...document.querySelectorAll(slotSelector)].filter(s => s.offsetParent).map(slot => {
+  const sprite = slot.querySelector('.ag-soldier-sprite');
+  const s = sprite.getBoundingClientRect(), b = slot.getBoundingClientRect();
+  return {slot: {left: b.left, right: b.right, top: b.top, bottom: b.bottom, width: b.width},
+          sprite: {left: s.left, right: s.right, top: s.top, bottom: s.bottom, width: s.width, height: s.height},
+          display: getComputedStyle(sprite).display};
+})
+"""
+
+
+def assert_sprites_fit(page, slot_selector: str, *, min_fill: float, min_px: float = 16) -> list:
+    fits = page.eval(f"({SPRITE_FIT_JS})({json.dumps(slot_selector)})")
+    assert fits, f"no soldiers drawn in {slot_selector}"
+    for fit in fits:
+        slot, sprite = fit["slot"], fit["sprite"]
+        assert fit["display"] != "none", fit
+        assert sprite["left"] >= slot["left"] - 1 and sprite["right"] <= slot["right"] + 1, (slot_selector, fit)
+        assert sprite["width"] >= max(min_px, slot["width"] * min_fill), (slot_selector, fit)
+        assert abs(sprite["width"] - sprite["height"]) <= 1, (slot_selector, fit)
+    return fits
+
+
+def crest_paint(page, selector: str) -> dict:
+    return page.eval(f"(() => {{ const el = document.querySelector({json.dumps(selector)}), cs = getComputedStyle(el);"
+                     " return {tag: el.tagName, mask: cs.webkitMaskImage || cs.maskImage, bg: cs.backgroundColor,"
+                     " border: cs.borderTopWidth, hidden: el.getAttribute('aria-hidden')}; })()")
+
+
+@pytest.mark.parametrize("theme", [None, LIGHT_THEME, ODYSSEUS_THEME])
+def test_sidebar_crest_is_the_helmet_in_the_active_brand_color(open_app, theme):
+    page = open_app(1440, theme)
+    crest = crest_paint(page, '.sidebar-brand-icon')
+    assert 'agamemnon-trojan-helmet.svg' in crest['mask'], crest
+    # An <img> keeps the SVG file's own gold whatever the palette; the masked
+    # crest is drawn in the same brand colour as the wordmark beside it.
+    assert crest['tag'] != 'IMG' and crest['hidden'] == 'true', crest
+    assert crest['bg'] == page.probe('.sidebar-brand-title')['color'], crest
+    if theme == LIGHT_THEME:
+        assert crest['bg'] == 'rgb(196, 125, 90)', crest
+    box = page.probe('.sidebar-brand-icon')
+    assert box['width'] == 40 and box['height'] == 40 and box['visible'], box
+    # The "Agamemnon crest" colour in Customize > Advanced reaches the mark.
+    page.eval("document.documentElement.style.setProperty('--brand-color', 'rgb(1, 2, 3)')")
+    assert crest_paint(page, '.sidebar-brand-icon')['bg'] == 'rgb(1, 2, 3)'
+    assert page.probe('.sidebar-brand-title')['color'] == 'rgb(1, 2, 3)'
+
+
+@pytest.mark.parametrize("theme", [LIGHT_THEME, ODYSSEUS_THEME])
+def test_classic_phalanx_header_shows_the_product_helmet(open_app, theme):
+    page = open_app(1440, theme)
+    assert page.eval("document.documentElement.dataset.style") == "classic"
+    open_agents(page)
+    assert page.eval("document.querySelector('#agents-dashboard .ag-window-antenna')") is None
+    mark = page.probe('#agents-dashboard .ag-window-mark')
+    title = page.probe('#agents-dashboard .ag-window-title')
+    assert mark['visible'] and 22 <= mark['width'] <= 32 and mark['width'] == mark['height'], mark
+    assert mark['right'] <= title['left'], (mark, title)
+    assert mark['top'] >= page.probe('#agents-dashboard .agents-window-header')['top'], mark
+    paint = crest_paint(page, '#agents-dashboard .ag-window-mark')
+    assert 'agamemnon-trojan-helmet.svg' in paint['mask'], paint
+    assert paint['bg'] == crest_paint(page, '.sidebar-brand-icon')['bg'], paint
+    assert paint['border'] == '0px', paint
+
+
+@pytest.mark.parametrize("width", [1440, 1024, 390])
+def test_soldier_sprites_fit_large_compact_and_detail_slots(open_app, width):
+    page = open_app(width)
+    open_agents(page)
+    page.wait_for("document.querySelector('.ag-fleet').classList.contains('ag-fleet-compact')")
+    assert_sprites_fit(page, '#agents-dashboard .ag-card-avatar', min_fill=0.85, min_px=28)
+    page.click('[data-ag="fleet-density"]')
+    page.wait_for("document.querySelector('.ag-fleet').classList.contains('ag-fleet-expanded')")
+    time.sleep(0.2)
+    shot(page, 'phalanx-large-sprites')
+    assert_sprites_fit(page, '#agents-dashboard .ag-card-avatar', min_fill=0.85, min_px=44 if width <= 600 else 60)
+    page.click(f'.ag-card-select[data-sid="{PARENT_ID}"]')
+    page.wait_for(f"document.querySelector('#ag-detail').dataset.sessionId === '{PARENT_ID}'")
+    time.sleep(0.3)
+    assert_sprites_fit(page, '#ag-detail .ag-console-robot-bay', min_fill=0.6, min_px=48)
+    if page.eval("!!document.querySelector('#ag-detail .ag-child .ag-bot')"):
+        assert_sprites_fit(page, '#ag-detail .ag-child .ag-bot', min_fill=0.9, min_px=20)
+    page.click('[data-ag="fleet-density"]')  # density persists in localStorage
+
+
+def test_docked_phalanx_soldiers_stay_inside_their_column(open_app):
+    page = open_app(1440)
+    open_agents(page)
+    page.click('[data-ag="fleet-density"]')  # large cards: the docked geometry must still win
+    page.wait_for("document.querySelector('.ag-fleet').classList.contains('ag-fleet-expanded')")
+    page.click("#ag-dock-right")
+    page.wait_for("document.getElementById('agents-dashboard').classList.contains('modal-right-docked')")
+    time.sleep(0.4)
+    shot(page, 'phalanx-docked-sprites')
+    fits = assert_sprites_fit(page, '#agents-dashboard .ag-card-avatar', min_fill=0.85, min_px=28)
+    copies = page.eval("[...document.querySelectorAll('#agents-dashboard .ag-card-avatar')].filter(c => c.offsetParent)"
+                       ".map(c => c.parentElement.querySelector('.ag-card-copy').getBoundingClientRect().left)")
+    for fit, left in zip(fits, copies):
+        assert fit['sprite']['right'] <= left + 1, (fit, left)
+    page.click('[data-ag="fleet-density"]')
+
+
+@pytest.mark.parametrize("theme", [None, LIGHT_THEME])
+@pytest.mark.parametrize("width", [700, 390, 320])
+def test_open_phone_sidebar_keeps_the_wordmark_clear_of_the_hamburger(open_app, width, theme):
+    page = open_app(width, theme)
+    if not page.eval("(() => { const r = document.getElementById('sidebar').getBoundingClientRect(); return r.right > 0 && r.left < innerWidth; })()"):
+        page.click('#hamburger-btn')
+        time.sleep(0.5)
+    sidebar, hamburger = page.probe('.sidebar'), page.probe('#hamburger-btn')
+    crest, title = page.probe('.sidebar-brand-icon'), page.probe('.sidebar-brand-title')
+    assert crest['visible'] and title['visible'], (crest, title)
+    assert sidebar['left'] <= crest['left'] and title['right'] <= sidebar['right'], (sidebar, title)
+    for box in (crest, title):
+        overlaps = (box['left'] < hamburger['right'] and box['right'] > hamburger['left']
+                    and box['top'] < hamburger['bottom'] and box['bottom'] > hamburger['top'])
+        assert not overlaps, (box, hamburger)
+
+
+@pytest.mark.parametrize("width", [390, 320])
+def test_classic_phalanx_toolbar_actions_wrap_on_phones(open_app, width):
+    page = open_app(width, LIGHT_THEME)
+    assert page.eval("document.documentElement.dataset.style") == "classic"
+    open_agents(page)
+    assert page.eval("(() => { const h = document.querySelector('#agents-dashboard .ag-head'); return h.scrollWidth <= h.clientWidth + 1; })()")
+    buttons = page.eval("[...document.querySelectorAll('#agents-dashboard .ag-head-actions button')].map(b => {"
+                        " const r = b.getBoundingClientRect(); return {text: b.textContent.trim(), left: r.left, right: r.right}; })")
+    assert buttons
+    for button in buttons:
+        assert button['left'] >= 0 and button['right'] <= width + 1, button

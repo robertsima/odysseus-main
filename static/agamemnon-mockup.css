@@ -32,8 +32,8 @@ html[data-style="agamemnon"] .ody-brand-name,html[data-style="agamemnon"] .ody-p
 html[data-style="agamemnon"] .sidebar{width:240px!important;min-width:240px!important;background:var(--ag-rail)!important;border-right:2px solid var(--ag-border)}
 html[data-style="agamemnon"] .sidebar .sidebar-header{height:88px;min-height:88px;padding:0 24px 0 32px;align-items:flex-start;border:0!important;box-shadow:none!important}
 html[data-style="agamemnon"] .sidebar .sidebar-brand{height:100%;flex-direction:row;gap:13px}
-html[data-style="agamemnon"] .sidebar-brand-icon{width:40px;height:40px;margin:0;color:var(--ag-gold)}
-html[data-style="agamemnon"] .sidebar .sidebar-brand-title{font:700 20px/1 'Space Grotesk',sans-serif;letter-spacing:.04em;color:var(--ag-gold);text-transform:uppercase}
+html[data-style="agamemnon"] .sidebar-brand-icon{width:40px;height:40px;margin:0;color:var(--brand-color,var(--ag-gold))}
+html[data-style="agamemnon"] .sidebar .sidebar-brand-title{font:700 20px/1 'Space Grotesk',sans-serif;letter-spacing:.04em;color:var(--brand-color,var(--ag-gold));text-transform:uppercase}
 html[data-style="agamemnon"] .sidebar-inner{padding:20px 24px}
 html[data-style="agamemnon"] .sidebar-inner::before{content:'COMMAND';display:block;margin:0 0 10px;color:var(--ag-gold);font:700 11px/1 'Space Grotesk';letter-spacing:.18em}
 html[data-style="agamemnon"] .sidebar .list-item,html[data-style="agamemnon"] .sidebar .section-title{font-family:'Space Grotesk',sans-serif;border-radius:0}
@@ -145,9 +145,20 @@ html[data-style="agamemnon"] .ag-card{box-sizing:border-box;border:2px solid var
 html[data-style="agamemnon"] .ag-card.active{border-color:var(--ag-gold)!important}
 html[data-style="agamemnon"] .ag-card.attn,html[data-style="agamemnon"] .ag-card-failed{border-color:var(--ag-coral)!important}
 html[data-style="agamemnon"] .ag-card-actions{opacity:1}
-html[data-style="agamemnon"] .ag-card-avatar{align-self:start}
+html[data-style="agamemnon"] .ag-card-avatar{align-self:start;min-height:0;padding:0}
 html[data-style="agamemnon"] .ag-seal-mark{display:none}
-html[data-style="agamemnon"] .ag-soldier-sprite{display:block;width:64px;height:64px;color:var(--agent-model-color,var(--ag-gold));filter:drop-shadow(0 0 8px color-mix(in srgb,var(--agent-model-color,var(--ag-gold)) 22%,transparent))}
+/* The soldier fills its .ag-bot box, and each slot sizes that box: 64px
+   card column, 34px compact/docked column, 28px worker row, 64px detail
+   bay. Scale transforms and zoom from the seal layout would otherwise draw
+   the sprite larger than the column reserved for it. */
+html[data-style="agamemnon"] .ag-bot{width:64px;height:64px}
+html[data-style="agamemnon"] .ag-soldier-sprite{display:block;width:100%;height:100%;color:var(--agent-model-color,var(--ag-gold));filter:drop-shadow(0 0 8px color-mix(in srgb,var(--agent-model-color,var(--ag-gold)) 22%,transparent))}
+html[data-style="agamemnon"] .ag-bot-mini{width:28px;height:28px;margin:0;transform:none}
+html[data-style="agamemnon"] .ag-bot-micro{width:18px;height:18px;margin:0;padding:0;transform:none}
+html[data-style="agamemnon"] :is(.ag-bot-mini,.ag-bot-micro) .ag-soldier-sprite{filter:none}
+html[data-style="agamemnon"] .ag-bot-hero{width:64px;height:64px;transform:none}
+html[data-style="agamemnon"] .ag-bot-hero.ag-bot-running{animation-name:ag-bot-work}
+html[data-style="agamemnon"] .ag-bot-hero.ag-bot-waiting_approval{animation-name:ag-bot-wait}
 html[data-style="agamemnon"] .ag-seal-unit{color:var(--ag-muted)}
 html[data-style="agamemnon"] .ag-agent-identity{display:flex;align-items:flex-start;gap:14px}
 html[data-style="agamemnon"] .ag-agent-identity>dl{flex:1;min-width:0}
@@ -278,6 +289,7 @@ html[data-style="agamemnon"] #workbench-modal .wb-panel.hidden{display:none!impo
  html[data-style="agamemnon"] #workbench-modal .workbench-modal-body>.wb-tabs{flex-wrap:wrap!important;overflow:visible!important}
  html[data-style="agamemnon"] .ag-console-hero{grid-template-columns:64px minmax(0,1fr);row-gap:8px}
  html[data-style="agamemnon"] .ag-console-robot-bay{width:64px;height:64px}
+ html[data-style="agamemnon"] .ag-bot-hero{width:56px;height:56px}
  html[data-style="agamemnon"] .ag-console-status{grid-column:1/-1;flex-direction:row;flex-wrap:wrap;align-items:center;justify-content:space-between}
  html[data-style="agamemnon"] .ag-detail-name{white-space:normal}
  html[data-style="agamemnon"] .chat-top-bar{min-height:24px}
@@ -343,7 +355,11 @@ html[data-style="classic"] .sidebar .sidebar-brand{gap:13px}
 html[data-style="classic"] .sidebar-brand-icon{width:40px;height:40px;margin:0}
 html[data-style="classic"] .sidebar .sidebar-brand-title{font-size:20px;line-height:1;letter-spacing:.04em;top:0;left:0;margin:0}
 html[data-style="classic"] .sidebar .sidebar-brand-title,html[data-style="agamemnon"] .sidebar .sidebar-brand-title{font-size:18px}
-html[data-style="classic"] .sidebar.right-side .sidebar-header{padding-left:32px;padding-right:24px}
+/* A right-hand sidebar (always the case on phones) shares its top-right
+   corner with the fixed hamburger (30px desktop, 44px touch): reserve it so
+   the wordmark never runs underneath, in either style. */
+html[data-style] .sidebar.right-side .sidebar-header{padding-left:14px;padding-right:52px}
+html[data-style] .sidebar.right-side .sidebar-brand{gap:10px;padding:0}
 @media(max-width:480px){html[data-style="classic"] .sidebar .sidebar-header{height:64px;min-height:64px;padding:0 16px}html[data-style="classic"] .sidebar .sidebar-brand-title{font-size:17px}}
 /* The app's resizing/docking controller owns tool window geometry. */
 #workbench-modal .wb-branch-picker{display:flex;align-items:center;gap:8px;min-width:0;font-size:11px;color:var(--wb-muted)}
@@ -366,7 +382,9 @@ html[data-style="classic"] .sidebar.right-side .sidebar-header{padding-left:32px
 @media(max-width:480px){#theme-modal .admin-card:has(#theme-font-select) .theme-fd-row{grid-template-columns:1fr}}
 html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-fleet-list .ag-bot-card,
 html[data-style="agamemnon"] #agents-dashboard:is(.modal-right-docked,.modal-left-docked) .ag-fleet-list .ag-bot-card{grid-template-columns:34px minmax(0,1fr) auto;gap:8px;min-height:0;padding:9px 12px}
-html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-card-avatar{min-height:0;padding:2px 0 0}
+html[data-style="agamemnon"] #agents-dashboard :is(.ag-fleet-compact,.ag-fleet-expanded) .ag-card-avatar{min-height:0;padding:2px 0 0}
+html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-card-avatar .ag-bot,
+html[data-style="agamemnon"] #agents-dashboard:is(.modal-right-docked,.modal-left-docked) .ag-card-avatar .ag-bot{width:34px;height:34px;zoom:1}
 html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-card-copy{min-height:0;min-width:0;gap:2px;justify-content:start}
 html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-row-top{min-height:0}
 html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-row-name{line-height:1.25;white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
@@ -383,6 +401,7 @@ html[data-style="agamemnon"] #agents-dashboard :is(.ag-card,.ag-detail,.ag-launc
  html[data-style="agamemnon"] #agents-dashboard .ag-head{display:flex;flex-wrap:wrap;gap:8px}
  html[data-style="agamemnon"] #agents-dashboard .ag-head-actions{width:100%;display:flex;flex-wrap:wrap;gap:6px}
  html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-list .ag-card{grid-template-columns:48px minmax(0,1fr);column-gap:12px;row-gap:4px;min-height:0;padding:16px}
+ html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-expanded .ag-card-avatar .ag-bot{width:48px;height:48px}
  html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-card-actions{grid-column:2;grid-row:2;justify-content:flex-start;align-self:center}
  html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-card-actions .wb-icon-btn{width:44px;height:44px}
  /* At phone width names and latest activity get the full copy column. Keep
