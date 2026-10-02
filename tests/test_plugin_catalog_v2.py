@@ -90,6 +90,35 @@ def test_v2_validation_rejects(mutate, match):
         validate_manifest(raw)
 
 
+@pytest.mark.parametrize("name", [
+    "BASH_ENV", "ENV", "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "PERL5OPT", "RUBYOPT",
+    "GIT_SSH_COMMAND", "NPM_CONFIG_PREFIX", "NODE_EXTRA_CA_CERTS", "PYTHONINSPECT",
+    "LD_AUDIT", "DYLD_INSERT_LIBRARIES", "HTTPS_PROXY", "SSL_CERT_FILE", "ODYSSEUS_DATA_DIR",
+    "HOME", "PATH",
+])
+def test_v2_refuses_env_that_changes_how_code_runs(name):
+    # 2026-10-01 security review: the first denylist named eight variables.
+    raw = v2()
+    raw["integration"]["mcp_server"]["env"] = [{"name": name}]
+    with pytest.raises(PluginManifestError, match="may not set|upper-case"):
+        validate_manifest(raw)
+
+
+@pytest.mark.parametrize("name", ["api_key", "Api_Key", "http_proxy"])
+def test_v2_env_names_are_upper_case(name):
+    raw = v2()
+    raw["integration"]["mcp_server"]["env"] = [{"name": name}]
+    with pytest.raises(PluginManifestError, match="upper-case"):
+        validate_manifest(raw)
+
+
+@pytest.mark.parametrize("name", ["DEMO_TOKEN", "AWS_ACCESS_KEY_ID", "GITHUB_TOKEN", "API_BASE_URL"])
+def test_v2_server_settings_are_still_allowed(name):
+    raw = v2()
+    raw["integration"]["mcp_server"]["env"] = [{"name": name}]
+    validate_manifest(raw)
+
+
 def test_instructions_need_a_server():
     raw = v2()
     del raw["integration"]["mcp_server"]

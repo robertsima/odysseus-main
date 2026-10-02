@@ -43,13 +43,32 @@ MAX_SKILL_CHARS = 32 * 1024
 MAX_TEMPLATES = 10
 MAX_ENV_VARS = 20
 _SKILL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
-_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+# Upper-case names only: a server's own settings look like API_KEY, and
+# case-folded duplicates (http_proxy vs HTTP_PROXY) stay out.
+_ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-# Variables that change how the host loads code rather than configure a server.
-# An admin could still type them into the Settings form by hand; a package does
-# not get to ask for them.
-_FORBIDDEN_ENV = {"PATH", "PYTHONPATH", "PYTHONSTARTUP", "NODE_OPTIONS", "LD_PRELOAD",
-                  "LD_LIBRARY_PATH", "PYTHONHOME", "NODE_PATH"}
+# Variables that change how the host runs code, finds code, trusts TLS or routes
+# traffic, rather than configure a server. An admin can still type them into
+# the MCP Settings form by hand; a package does not get to ask for them. Whole
+# families are matched by prefix: the first list (2026-10-01) named eight
+# variables and a security review found BASH_ENV, JAVA_TOOL_OPTIONS, PERL5OPT,
+# GIT_SSH_COMMAND and NPM_CONFIG_* still open.
+_FORBIDDEN_ENV = {
+    "PATH", "HOME", "SHELL", "ENV", "BASH_ENV", "IFS", "PS4", "PROMPT_COMMAND", "CDPATH",
+    "TMPDIR", "TEMP", "TMP", "EDITOR", "VISUAL", "PAGER", "BROWSER",
+    "CLASSPATH", "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+}
+_FORBIDDEN_ENV_PREFIXES = (
+    "LD_", "DYLD_", "PYTHON", "NODE_", "NPM_CONFIG_", "NPX_", "PIP_", "UV_", "PERL", "RUBY",
+    "GEM_", "GIT_", "BUN_", "DENO_", "JAVA", "DOCKER_", "ODYSSEUS_",
+)
+
+
+def _forbidden_env_name(name: str) -> bool:
+    upper = name.upper()
+    return upper in _FORBIDDEN_ENV or upper.startswith(_FORBIDDEN_ENV_PREFIXES)
 _TEMPLATE_FORMAT = "odysseus-agent-profiles"
 
 
@@ -138,9 +157,9 @@ def _env_vars(value: Any) -> list[dict[str, Any]]:
                 "each mcp_server.env entry is {name, description, required}; values are entered at install")
         name = item.get("name")
         if not isinstance(name, str) or not _ENV_NAME_RE.fullmatch(name):
-            raise PluginManifestError("mcp_server.env names must be variable names such as API_KEY")
-        if name.upper() in _FORBIDDEN_ENV or name.upper().startswith("DYLD_"):
-            raise PluginManifestError(f"mcp_server.env may not set {name}")
+            raise PluginManifestError("mcp_server.env names must be upper-case variable names such as API_KEY")
+        if _forbidden_env_name(name):
+            raise PluginManifestError(f"mcp_server.env may not set {name}: it changes how code runs or connects")
         if name in seen:
             raise PluginManifestError(f"mcp_server.env lists {name} twice")
         seen.add(name)
