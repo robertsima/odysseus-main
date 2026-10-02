@@ -156,7 +156,7 @@ function _showSnapHint(on, side = 'right') {
 // Check if the body's current chat area would be narrower than the
 // MIN_CHAT_WIDTH floor after reserving dockW pixels on the right. Returns
 // true if the wide sidebar should be collapsed to the rail.
-function _shouldAutoCollapseSidebar(dockW) {
+function _shouldAutoCollapseSidebar(dockW, owner) {
   const sidebar = document.getElementById('sidebar');
   const rail = document.getElementById('icon-rail');
   if (!sidebar) return false;
@@ -167,7 +167,11 @@ function _shouldAutoCollapseSidebar(dockW) {
     ? rail.getBoundingClientRect().width
     : 0;
   const remaining = window.innerWidth - sb - rl - _activeDockWidth('left') - dockW;
-  return remaining < MIN_CHAT_WIDTH;
+  // Workbench includes dense run detail; a 380px chat beside it leaves the
+  // transcript and progress controls unusable. Preserve the icon rail while
+  // giving the conversation more space than the generic dock floor.
+  const chatFloor = owner?.id === 'workbench-modal' ? 520 : MIN_CHAT_WIDTH;
+  return remaining < chatFloor;
 }
 
 // Right edge (px) of whatever left navigation is currently showing — the
@@ -502,7 +506,7 @@ function _applyDockInternal(modal, side, dockClass) {
     content.style.maxWidth = w + 'px';
     document.body.classList.add('right-dock-active');
     document.documentElement.style.setProperty('--right-dock-w', w + 'px');
-    if (_shouldAutoCollapseSidebar(w)) {
+    if (_shouldAutoCollapseSidebar(w, modal)) {
       _collapseSidebarToRail();
       content._preDockSnapshot.collapsedSidebar = true;
     }
@@ -877,7 +881,7 @@ export function makeEdgeDockController(modal, side = 'right', dockClass) {
       content.style.maxWidth = w + 'px';
       document.body.classList.add('right-dock-active');
       document.documentElement.style.setProperty('--right-dock-w', w + 'px');
-      if (_shouldAutoCollapseSidebar(w)) {
+      if (_shouldAutoCollapseSidebar(w, owner)) {
         _collapseSidebarToRail();
         if (content._preDockSnapshot) content._preDockSnapshot.collapsedSidebar = true;
       }

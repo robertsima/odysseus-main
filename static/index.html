@@ -1554,9 +1554,13 @@
     if (!container || !chatBar || !bottomBtn) return;
 
     function reposition() {
-      const barRect = chatBar.getBoundingClientRect();
-      bottomBtn.style.bottom = (window.innerHeight - barRect.top + 16) + 'px';
-      bottomBtn.style.right = (window.innerWidth - barRect.right + 8) + 'px';
+      // Anchor this control inside its transcript, not above the composer:
+      // checklist and Agents disclosures may occupy that intervening space.
+      const historyRect = container.getBoundingClientRect();
+      const buttonHeight = bottomBtn.getBoundingClientRect().height || 38;
+      const top = Math.max(historyRect.top + 8, historyRect.bottom - buttonHeight - 8);
+      bottomBtn.style.bottom = (window.innerHeight - top - buttonHeight) + 'px';
+      bottomBtn.style.right = (window.innerWidth - historyRect.right + 8) + 'px';
     }
 
     function update() {
@@ -1601,6 +1605,7 @@
       _scrollTimeout = setTimeout(() => { if (_scrollingToBottom) { container.scrollTop = target; _scrollingToBottom = false; } }, 1500);
     });
     new ResizeObserver(reposition).observe(chatBar);
+    new ResizeObserver(reposition).observe(container);
     new MutationObserver(update).observe(container, {childList:true, subtree:true});
     window.addEventListener('resize', reposition);
     update();

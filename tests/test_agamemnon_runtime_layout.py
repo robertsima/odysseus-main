@@ -141,9 +141,18 @@ def test_chat_strip_with_half_width_docked_workbench(open_app):
     open_workbench(page)
     page.click('#wb-dock-right')
     page.wait_for("document.getElementById('workbench-modal').classList.contains('modal-right-docked')")
+    page.wait_for("document.getElementById('sidebar').classList.contains('hidden')")
     shot(page, 'strip-half-workbench')
     strip, chat = page.probe('.agent-strip'), page.probe('.chat-container')
     assert strip['width'] <= chat['width'] and strip['height'] <= 155
+    assert chat['width'] >= 520
+    assert page.probe('#chat-history')['height'] >= 200
+    assert page.probe('.chat-progress-shelf')['height'] <= 205
+    assert page.eval("getComputedStyle(document.querySelector('.agent-strip-head [data-strip-act=workbench]')).display") == 'none'
+    assert_usable(page, '.agent-strip-row [data-strip-act="stop"]')
+    scroll = page.probe('#scroll-bottom-btn')
+    if scroll['visible']:
+        assert scroll['bottom'] <= page.probe('#chat-history')['bottom'], scroll
     assert_usable(page, '.agent-strip-toggle')
     assert_usable(page, '#message')
     assert_no_sideways_scroll(page)
@@ -152,6 +161,27 @@ def test_chat_strip_with_half_width_docked_workbench(open_app):
     shot(page, 'strip-half-workbench-collapsed')
     assert page.probe('.agent-strip-head')['height'] < 55
     assert_usable(page, '#message')
+    assert page.probe('#chat-history')['height'] >= 250
+
+
+@pytest.mark.parametrize('width', [700, 390])
+def test_narrow_scribe_progress_and_workbench_do_not_cover_controls(open_app, width):
+    page = open_app(width)
+    page.wait_for("!document.getElementById('agent-strip').hidden")
+    if width == 700:
+        open_workbench(page)
+        # At 700px Workbench takes the available workspace as a page;
+        # docking is deliberately disabled rather than squeezing chat.
+        assert not page.probe('#wb-dock-right')['visible']
+        shot(page, 'combined-workbench-page')
+        page.click('#close-workbench-modal')
+        page.wait_for("document.getElementById('workbench-modal').classList.contains('hidden')")
+    shot(page, 'combined-progress-workbench' if width == 700 else 'combined-progress-mobile')
+    assert_usable(page, '.agent-strip-row [data-strip-act="stop"]')
+    assert_usable(page, '#message')
+    assert page.probe('.chat-progress-shelf')['height'] <= 210
+    assert page.probe('#chat-history')['height'] >= 175
+    assert_no_sideways_scroll(page)
 
 
 # ── Chat ────────────────────────────────────────────────────────────────────
@@ -171,7 +201,9 @@ def test_chat_transcript_and_composer_fill_the_available_screen(open_app, width)
     assert bar["width"] >= history["width"] - 2
     assert message["width"] >= bar["width"] * 0.6
     # The transcript is the part that grows, and it scrolls on its own.
-    assert history["height"] >= (220 if width <= 390 else 330)
+    # At 1024px a live checklist may use ~80px; 300px still leaves a real
+    # scrolling transcript without forcing the progress off screen.
+    assert history["height"] >= (220 if width <= 390 else 300 if width == 1024 else 330)
     assert history["overflowY"] == "auto" and history["scrollHeight"] > history["clientHeight"]
     assert heading["visible"] and heading["bottom"] <= history["top"]
     assert page.probe('.ag-context-rail') is None
