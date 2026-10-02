@@ -41,6 +41,24 @@ html[data-theme="dark"] .sidebar-inner{padding:20px 24px}
 html[data-theme="dark"] .sidebar-inner::before{content:'COMMAND';display:block;margin:0 0 10px;color:var(--ag-gold);font:700 11px/1 'Space Grotesk';letter-spacing:.18em}
 html[data-theme="dark"] .sidebar .list-item,html[data-theme="dark"] .sidebar .section-title{font-family:'Space Grotesk',sans-serif;border-radius:0}
 html[data-theme="dark"] .sidebar .list-item:hover{background:var(--ag-raised);color:var(--ag-gold)}
+/* Command links belong in the same scrollable navigation as the existing
+   session list. The rail and mobile off-canvas modes remain owned by the app. */
+.ag-command-link,.ag-nav-label{display:none}
+html[data-theme="dark"] .ody-nav-label{display:none}
+html[data-theme="dark"] .ag-nav-label{display:inline}
+html[data-theme="dark"] .sidebar-inner::before{content:'COMMAND /';padding-bottom:4px}
+html[data-theme="dark"] .sidebar .ag-command-link{display:flex;align-items:center;gap:12px;min-height:44px;padding:10px 12px;margin:3px 0;border-left:2px solid transparent;cursor:pointer;font-size:15px;color:var(--ag-text)}
+html[data-theme="dark"] .sidebar .ag-command-link:hover,html[data-theme="dark"] .sidebar .ag-command-link:focus-visible{border-left-color:var(--ag-gold);background:var(--ag-raised);color:var(--ag-gold);outline:none}
+html[data-theme="dark"] .ag-command-icon{width:18px;flex:none;text-align:center;color:var(--ag-gold);font-size:18px}
+html[data-theme="dark"] .sidebar #sidebar-new-chat-btn,html[data-theme="dark"] .sidebar #sidebar-search-btn{min-height:44px;padding:10px 12px;margin:3px 0;border-left:2px solid transparent;font-size:15px}
+html[data-theme="dark"] #theme-tabs [data-tab="theme-tab-customize"],html[data-theme="dark"] #theme-tab-customize{display:none!important}
+html[data-theme="dark"] .sidebar #sessions-section,html[data-theme="dark"] .sidebar #tools-section{margin-top:18px;padding-top:16px;border-top:1px solid var(--ag-border)}
+html[data-theme="dark"] .sidebar .section-title{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--ag-gold)}
+html[data-theme="dark"] .sidebar #sessions-section .section-title-label{font-size:0}
+html[data-theme="dark"] .sidebar #sessions-section .section-title-label::after{content:'SCRIBE / RECENT';font-size:11px}
+html[data-theme="dark"] .sidebar #tools-section .section-title{font-size:0}
+html[data-theme="dark"] .sidebar #tools-section .section-title::after{content:'SYSTEM /';font-size:11px}
+html[data-theme="dark"] .sidebar #tool-agents-btn,html[data-theme="dark"] .sidebar #tool-workbench-btn{display:none!important}
 
 /* ── Chat / Strategy Room ─────────────────────────────────────────────────
  * The base flex column stays: heading, context, meta bar, transcript (the
@@ -148,6 +166,9 @@ html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-lef
 html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .agents-modal-content::after{content:none}
 html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .agents-window-header,
 html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-content>.modal-header{display:flex;align-items:flex-start;gap:16px;height:auto;min-height:0;margin:-26px 0 0;padding:26px 0 24px!important;border:0!important;background:var(--ag-bg);cursor:default}
+/* The base modal's sticky header used to overlap the first row of Workbench
+   tabs after the page treatment shifted it upward. Keep header in flow. */
+html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-content>.modal-header{position:sticky;top:-26px;z-index:5;margin:0;padding:0 0 20px!important}
 html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-window-title h3,
 html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-content>.modal-header h4{margin:0 auto 0 0;font:700 30px/1.2 'Space Grotesk';letter-spacing:.02em;text-transform:none}
 html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-window-title>span{display:block;margin-top:10px;font:400 15px/1.5 'Space Grotesk';color:var(--ag-muted)}
@@ -181,28 +202,30 @@ html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-le
  * them, then the working tabs. Only the selected tab's panel is drawn: the
  * panels are hidden with the base `.wb-panel.hidden` rule, which nothing in
  * the Agamemnon layer overrides. */
-html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-body{display:grid;grid-template-columns:minmax(0,790px) 306px;grid-template-rows:auto;gap:28px;align-content:start;justify-content:start;min-width:0;padding:0;overflow:visible}
-html[data-theme="dark"] .ag-run-control{display:grid;grid-column:1;grid-row:1;grid-template-rows:auto 330px 200px;gap:28px;min-width:0}
+html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-body{display:flex;flex-direction:column;gap:18px;min-width:0;padding:0;overflow:visible}
+html[data-theme="dark"] .wb-panel[data-wb-panel="activity"]{display:grid;grid-template-columns:minmax(0,790px) minmax(240px,306px);gap:20px 28px;align-content:start;justify-content:start}
+html[data-theme="dark"] .ag-run-control{display:grid;grid-column:1;grid-row:1;grid-template-rows:auto minmax(180px,260px) minmax(110px,160px);gap:16px;min-width:0}
 html[data-theme="dark"] .ag-run-control>section{box-sizing:border-box;min-width:0;padding:22px 26px;background:var(--ag-panel);border:2px solid var(--ag-border-strong)}
 html[data-theme="dark"] .ag-run-summary{border-color:var(--ag-gold)!important}
 html[data-theme="dark"] .ag-run-timeline,html[data-theme="dark"] .ag-run-console{overflow:auto}
 html[data-theme="dark"] .ag-run-console{background:var(--ag-console)!important}
 html[data-theme="dark"] .ag-run-detail{display:block;grid-column:2;grid-row:1;box-sizing:border-box;min-width:0;margin:0;padding:27px 24px;background:var(--ag-rail);border:2px solid var(--ag-border);overflow:auto}
-html[data-theme="dark"] #workbench-modal .workbench-modal-body>.wb-tabs,
-html[data-theme="dark"] #workbench-modal .workbench-modal-body>.wb-panel,
-html[data-theme="dark"] #workbench-modal .workbench-modal-body>.wb-statusbar{grid-column:1/-1;min-width:0}
+html[data-theme="dark"] .wb-panel[data-wb-panel="activity"]>.wb-toolbar,html[data-theme="dark"] .wb-panel[data-wb-panel="activity"]>.wb-activity{grid-column:1/-1;min-width:0}
 html[data-theme="dark"] #workbench-modal .workbench-modal-body>.wb-tabs{display:flex;flex-wrap:wrap;gap:4px;margin:4px 0 0;border:0;border-bottom:2px solid var(--ag-border)}
 html[data-theme="dark"] #workbench-modal .workbench-modal-body>.wb-panel{position:relative;box-sizing:border-box;padding:20px;background:var(--ag-panel);border:2px solid var(--ag-border-strong);border-radius:0}
-html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-body>.wb-panel{height:clamp(380px,64vh,680px);min-height:0}
+html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-body>.wb-panel{height:auto;min-height:380px}
+html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .wb-activity{min-height:280px;max-height:500px;overflow:auto}
 html[data-theme="dark"] .wb-panel[data-wb-panel="activity"]::after{content:none!important}
 /* Docked: the run summary would crowd out the working tabs in a side panel. */
 html[data-theme="dark"] #workbench-modal.modal-right-docked .ag-run-control,html[data-theme="dark"] #workbench-modal.modal-right-docked .ag-run-detail,
 html[data-theme="dark"] #workbench-modal.modal-left-docked .ag-run-control,html[data-theme="dark"] #workbench-modal.modal-left-docked .ag-run-detail{display:none}
+html[data-theme="dark"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .wb-panel[data-wb-panel="activity"]{display:flex;flex-direction:column}
+html[data-theme="dark"] #workbench-modal .wb-panel.hidden{display:none!important}
 
 /* ── Narrower boards ──────────────────────────────────────────────────── */
 @media(max-width:1179px){
- html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-body{grid-template-columns:minmax(0,1fr)}
- html[data-theme="dark"] .ag-run-control{grid-template-rows:auto minmax(0,260px) minmax(0,180px)}
+ html[data-theme="dark"] .wb-panel[data-wb-panel="activity"]{grid-template-columns:minmax(0,1fr)}
+ html[data-theme="dark"] .ag-run-control{grid-template-rows:auto minmax(0,220px) minmax(0,150px)}
  html[data-theme="dark"] .ag-run-control,html[data-theme="dark"] .ag-run-detail{grid-column:1;grid-row:auto}
  html[data-theme="dark"] .ag-run-detail{padding:20px 22px}
 }
@@ -234,7 +257,7 @@ html[data-theme="dark"] #workbench-modal.modal-left-docked .ag-run-control,html[
  html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .agents-modal-content,
  html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-content{padding:16px 14px 24px!important}
  html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .agents-window-header,
- html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-content>.modal-header{margin-top:-16px;padding-top:16px!important;padding-bottom:16px!important}
+ html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-content>.modal-header{top:-16px;margin-top:0;padding-top:0!important;padding-bottom:16px!important}
  /* The shared sheet hides close buttons for swipe-to-dismiss; these pages
     fill the screen, so keep an explicit way out. */
  html[data-theme="dark"] #agents-dashboard #close-agents-dashboard,html[data-theme="dark"] #workbench-modal #close-workbench-modal{display:inline-flex!important;width:44px;height:44px}

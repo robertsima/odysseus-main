@@ -196,6 +196,54 @@ def test_context_actions_open_the_phalanx_and_the_workbench(open_app, width):
     assert page.probe(".ag-run-summary")["visible"]
 
 
+@pytest.mark.parametrize('width', [1440, 390])
+def test_scribe_navigation_and_phalanx_identity(open_app, width):
+    page = open_app(width)
+    assert page.eval("document.querySelector('.ag-page-heading h1').textContent") == 'Scribe'
+    assert page.eval("document.title") == 'Scribe — Agamemnon'
+    assert page.eval("document.getElementById('message').placeholder") == 'Message Scribe…'
+    assert page.eval("document.querySelector('link[rel=icon]').getAttribute('href')") == '/static/branding/agamemnon-trojan-helmet.svg'
+    assert not page.probe('#ag-open-theme')
+    assert not page.probe('#theme-tabs [data-tab="theme-tab-customize"]')['visible']
+    if width == 390:
+        page.eval("window._odyOpenSidebar('left')")
+        page.wait_for("document.getElementById('sidebar-agents-shortcut').getBoundingClientRect().left >= 0")
+    assert page.probe('#sidebar-agents-shortcut')['visible']
+    page.click('#sidebar-agents-shortcut')
+    page.wait_for("!document.getElementById('agents-dashboard').hidden")
+    assert page.eval("document.querySelector('.ag-phalanx-title').textContent") == 'Phalanx'
+    assert 'Command center' in page.eval("document.getElementById('ag-window-summary').textContent")
+    page.click('#close-agents-dashboard')
+
+
+def test_non_agamemnon_navigation_and_activity_remain_intact(open_app):
+    page = open_app(1440, ODYSSEUS_THEME)
+    assert not page.probe('.ag-command-link')['visible']
+    assert page.probe('#tool-agents-btn')['visible']
+    assert page.eval("document.querySelector('.ody-nav-label').textContent") == 'Agents'
+    assert page.eval("getComputedStyle(document.querySelector('#theme-tabs [data-tab=\"theme-tab-customize\"]')).display") != 'none'
+    assert page.eval("document.querySelector('link[rel=icon]').getAttribute('href')") != '/static/branding/agamemnon-trojan-helmet.svg'
+    open_workbench(page)
+    assert not page.probe('.ag-run-summary')['visible']
+    assert visible_panels(page) == ['activity']
+    assert page.eval("document.getElementById('message').placeholder") == 'Message Odysseus...'
+
+
+def test_workbench_keyboard_tabs_and_theme_switch(open_app):
+    page = open_app(1440)
+    open_workbench(page)
+    page.eval("document.getElementById('wb-tab-activity').focus(); document.getElementById('wb-tab-activity').dispatchEvent(new KeyboardEvent('keydown', {key:'ArrowRight',bubbles:true}))")
+    assert visible_panels(page) == ['changes']
+    assert page.eval("document.activeElement.id") == 'wb-tab-changes'
+    assert page.eval("document.getElementById('wb-tab-changes').getAttribute('aria-selected')") == 'true'
+    assert page.eval("document.getElementById('wb-tab-activity').tabIndex") == -1
+    assert page.eval("document.getElementById('wb-changes').getAttribute('aria-labelledby')") == 'wb-tab-changes'
+    page.eval("document.getElementById('wb-tab-changes').dispatchEvent(new KeyboardEvent('keydown', {key:'Home',bubbles:true}))")
+    assert visible_panels(page) == ['activity']
+    page.eval("document.querySelector('#theme-tabs [data-tab=\"theme-tab-customize\"]').click(); import('/static/js/theme.js').then(m => m.applyThemeIdentity('dark'))")
+    assert page.eval("document.getElementById('theme-tab-customize').style.display") == 'none'
+
+
 # ── Workbench ───────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("width", list(VIEWPORTS))

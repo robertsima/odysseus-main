@@ -22,7 +22,8 @@ BRAND_CREST = (ROOT / "static/branding/agamemnon-trojan-helmet.svg").read_text()
 
 def test_explicit_root_theme_identity_attribute_exists_and_defaults_to_agamemnon():
     assert "export function applyThemeIdentity(name)" in THEME
-    assert "document.documentElement.setAttribute('data-theme', name || DEFAULT_THEME)" in THEME
+    assert "document.documentElement.setAttribute('data-theme', identity)" in THEME
+    assert "const identity = name || DEFAULT_THEME" in THEME
     # First paint sets it before any module loads, defaulting to Agamemnon
     # (DEFAULT_THEME) so the layout never flashes the wrong composition.
     assert "document.documentElement.setAttribute('data-theme', 'dark');" in HTML

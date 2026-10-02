@@ -1384,12 +1384,24 @@ function setTab(tab) {
     const on = b.dataset.wbTab === tab;
     b.classList.toggle('active', on);
     b.setAttribute('aria-selected', String(on));
+    b.tabIndex = on ? 0 : -1;
   });
   document.querySelectorAll('#workbench-modal [data-wb-panel]').forEach((p) => p.classList.toggle('hidden', p.dataset.wbPanel !== tab));
   if (tab === 'activity') renderActivity();
   if (tab === 'changes') { renderChanges(); autoSelectFirstFile(); }
   if (tab === 'commits') renderCommits();
   if (tab === 'prs') { if (!state.pr.config) loadPRConfig(); else renderPRs(); }
+}
+function handleTabKeys(event) {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+  const tabs = [...document.querySelectorAll('#workbench-modal [data-wb-tab]')];
+  const index = tabs.indexOf(event.target.closest('[data-wb-tab]'));
+  if (index < 0) return;
+  event.preventDefault();
+  const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1
+    : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+  setTab(tabs[next].dataset.wbTab);
+  tabs[next].focus();
 }
 // The Workbench is a tool window like Lotus or Settings: `_` minimizes it to a
 // dock chip (freeing the chat, including a right-docked layout), and the
@@ -1451,6 +1463,7 @@ function wireWindow() {
   if (dm) makeWindowDraggable(dm, { content: dm.querySelector('.modal-content'), header: dm.querySelector('.modal-header'), resizeStorageKey: 'odysseus-workbench-diff-size' });
 
   modal.querySelectorAll('[data-wb-tab]').forEach((b) => b.addEventListener('click', () => setTab(b.dataset.wbTab)));
+  modal.querySelector('.wb-tabs')?.addEventListener('keydown', handleTabKeys);
   $('wb-scope')?.addEventListener('change', (e) => { state.prefs.scope = e.target.value; savePrefs(); state.focusRun = null; connect(true); });
   $('wb-filter')?.addEventListener('change', (e) => { state.prefs.filter = e.target.value; savePrefs(); state.focusRun = null; renderActivity(); });
   $('wb-pause')?.addEventListener('click', (e) => {
