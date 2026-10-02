@@ -27,6 +27,10 @@ The first clarification review returned **PASS WITH CHANGES** and drove the earl
 - `website/agamemnon-preview-chat.html` — 1440 × 920 Strategy Room render with no contextual soldier.
 - `website/agamemnon-preview-workbench.html` — 1440 × 920 Run Control render with no contextual soldier.
 
+## Parent soldier appearance selector
+
+`website/agamemnon-appearance-preview.html` renders seven selectable variants at 64 px with a shared coral model accent. The parent-agent detail fieldset uses native radio controls, keyboard focus treatment, and an announced success/error message. Automatic retains the existing role-based choice. The owner-scoped API validates canonical symbol IDs and stores `agamemnon_soldier_appearance` in per-session settings, so selection survives reloads. This preference affects only Agamemnon; Odysseus keeps its legacy seals. Sword fighter and crested guard use attributed CC BY 3.0 Game Icons vector paths. The picker is a new detail-panel interaction beyond the original Penpot board, which retains its two-column layout.
+
 ## Known difference
 
 Direct side-by-side comparison with the three successfully rendered Penpot boards is now available. The command rail, headings, two-column Agents grid, Chat context rail, and Workbench detail rail align in composition and approximate placement; local fixtures improve legibility over the board viewer's dark-on-dark text. The viewer includes chrome and renders dark text, so exact pixel overlays, color contrast equivalence, and a production-browser behavior check are not established. The implementation uses attributed Game Icons vectors for the clarified helmet and role-specific soldiers rather than the mockup's earlier ambiguous crest; the engineer and scout are now legible standing pikeman and bowman figures at the production 64 px size. Standalone SVG and HTML previews are local review fixtures, not proof of a live app keyboard/accessibility audit.

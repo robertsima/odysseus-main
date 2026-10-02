@@ -25,17 +25,17 @@ def update_symbols(text: str, symbols: str) -> str:
 
 def sync() -> None:
     source = ET.parse(SOURCE).getroot()
-    roles = ('primary', 'worker', 'scout', 'reviewer', 'specialist')
+    roles = ('primary', 'worker', 'scout', 'archer', 'reviewer', 'specialist', 'sword', 'helmet')
     soldier_symbols = [child for child in source if child.tag == f'{{{SVG_NS}}}symbol' and child.get('id') in {f'soldier-{role}' for role in roles}]
     legacy_symbols = [child for child in source if child.tag == f'{{{SVG_NS}}}symbol' and child.get('id') in ('command', 'implement', 'scout', 'review')]
-    assert len(soldier_symbols) == 5 and len(legacy_symbols) == 4
+    assert len(soldier_symbols) == len(roles) and len(legacy_symbols) == 4
     def serialize(items):
         return '\n'.join(line for symbol in items for line in ET.tostring(symbol, encoding='unicode').strip().splitlines() if line.strip())
     symbols = serialize(soldier_symbols)
     production_symbols = serialize(soldier_symbols + legacy_symbols)
     # HTML uses same-document fragments, avoiding file:// and cross-origin SVG
     # <use> restrictions. Hidden definitions do not affect either theme layout.
-    for relative in ('static/index.html', 'website/agamemnon-preview-agents.html', 'website/agamemnon-role-marks-preview.html'):
+    for relative in ('static/index.html', 'website/agamemnon-preview-agents.html', 'website/agamemnon-role-marks-preview.html', 'website/agamemnon-appearance-preview.html'):
         target = ROOT / relative
         embedded = production_symbols if relative == 'static/index.html' else symbols
         text = update_symbols(target.read_text(), f'<svg xmlns="{SVG_NS}" style="position:absolute;width:0;height:0;overflow:hidden" aria-hidden="true" focusable="false"><defs>\n{embedded}\n</defs></svg>')

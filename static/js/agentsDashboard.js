@@ -93,6 +93,7 @@ const state = {
   // profile_problems), shown in the launch form instead of an empty picker.
   profileProblems: [],
   detailDrafts: new Map(),
+  appearanceSaving: false,
   // Parent session ids whose worker chats are unfolded under them in Recent.
   expandedParents: new Set(),
   // Saved personas the loadout editor can copy from (loadPersonaSources).
@@ -136,6 +137,12 @@ function hashUnit(value) {
   for (const ch of String(value || 'agent')) { hash ^= ch.charCodeAt(0); hash = Math.imul(hash, 16777619); }
   return Math.abs(hash >>> 0);
 }
+
+const SOLDIER_CHOICES = [
+  ['primary', 'Mounted commander'], ['worker', 'Pikeman'], ['scout', 'Bowman'],
+  ['reviewer', 'Shield charger'], ['specialist', 'Paired guards'],
+  ['sword', 'Sword fighter'], ['helmet', 'Crested guard'],
+];
 function robotHtml(agent, size = '') {
   const key = agent?.session_id || agent?.run_id || agent?.name || agent?.title || 'agent';
   // Role describes the stable identity archetype, not the live status class.
@@ -156,7 +163,8 @@ function robotHtml(agent, size = '') {
   // Each operational archetype has genuinely different licensed soldier
   // geometry; model identity remains a semantic colour accent, never the
   // only way one Phalanx unit differs from another.
-  const soldierVariant = role;
+  const soldierVariant = SOLDIER_CHOICES.some(([key]) => key === agent?.soldier_appearance)
+    ? agent.soldier_appearance : role;
   const modelIdentity = resolveAgamemnonModelIdentity(agent?.model || agent?.config?.model, agent?.source || agent?.kind);
   return `<span class="ag-bot ag-seal ag-seal-${role} ag-bot-${esc(status)}${size ? ` ag-bot-${esc(size)}` : ''}" data-model-family="${modelIdentity.family}" data-soldier-variant="${soldierVariant}" style="--agent-model-color:${modelIdentity.color}" aria-hidden="true">
     <svg class="ag-soldier-sprite" viewBox="0 0 512 512" focusable="false">
@@ -165,6 +173,20 @@ function robotHtml(agent, size = '') {
       <use class="ag-seal-glyph ag-seal-glyph-${emblem}" href="#${emblem}"/>
     </svg><span class="ag-seal-unit">${unit}</span>
   </span>`;
+}
+function appearancePickerHtml(agent) {
+  if (agent.parent_session) return '';
+  const selected = agent.soldier_appearance || '';
+  const choices = [['', 'Automatic', 'Keep the current role-based soldier'],
+    ...SOLDIER_CHOICES.map(([key, label]) => [key, label, ''])];
+  const modelColor = resolveAgamemnonModelIdentity(agent.model || agent.config?.model, agent.source).color;
+  return `<fieldset class="ag-appearance" aria-describedby="ag-appearance-help" style="--agent-model-color:${modelColor}">
+    <legend>Choose this parent agent’s soldier</legend>
+    <p id="ag-appearance-help">Pick how this agent appears in the Agamemnon Phalanx. Model color stays tied to the model. Saved for this agent across visits.</p>
+    <div class="ag-appearance-options">${choices.map(([key, label, hint]) => `<label class="ag-appearance-option"><input type="radio" id="ag-appearance-${key || 'auto'}" name="ag-appearance" value="${key}"${selected === key ? ' checked' : ''}>
+      ${key ? `<svg viewBox="0 0 512 512" aria-hidden="true" focusable="false"><use href="#soldier-${key}"/></svg>` : robotHtml({...agent, soldier_appearance: null}, 'mini')}<span>${label}${hint ? `<small>${hint}</small>` : ''}</span></label>`).join('')}</div>
+    <span id="ag-appearance-status" role="status" aria-live="polite"></span>
+  </fieldset>`;
 }
 // ── data ──────────────────────────────────────────────────────────────────
 async function refresh() {
@@ -901,6 +923,10 @@ function rowHtml(r, nest = {}) {
 function renderDetail() {
   const box = $('ag-detail');
   if (!box) return;
+  // Polling must not replace a focused radio group or detach a pending save's
+  // live status node. Render updates resume after the user leaves the picker.
+  if (box.dataset.sessionId === state.selected &&
+      (state.appearanceSaving || box.querySelector('.ag-appearance')?.contains(document.activeElement))) return;
   // Capture the outgoing agent before a selection changes.  renderDetail is
   // also called after `state.selected` has already changed, so limiting this
   // to the new selection would silently lose a half-written steer/reply.
@@ -934,6 +960,7 @@ function renderDetail() {
     .map(([key, label]) => `<button type="button" id="ag-tab-${key}" class="ag-detail-tab${tab === key ? ' active' : ''}" data-ag="detail-tab" data-tab="${key}" role="tab" aria-label="${label} for ${esc(r.name)}" aria-controls="ag-panel-${key}" aria-selected="${tab === key}" tabindex="${tab === key ? '0' : '-1'}">${label}</button>`).join('');
   const overview = `
     ${loadoutSummaryHtml(r)}
+    ${appearancePickerHtml(r)}
     ${(r.hidden_run_ids || []).length ? `<div class="ag-hidden-runs"><span>${r.hidden_run_ids.length} completed run card${r.hidden_run_ids.length === 1 ? '' : 's'} hidden</span><button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="restore-runs" data-sid="${esc(r.session_id)}">Restore cards</button></div>` : ''}
     ${approvals.length || children.length ? `<div class="ag-detail-top">
       ${approvals.length ? `<div class="ag-section"><div class="wb-group-h"><span class="wb-group-title">Waiting for your approval</span><span class="wb-count">${approvals.length}</span></div>${approvals.map(approvalHtml).join('')}</div>` : ''}
@@ -1152,6 +1179,41 @@ async function saveCrewProfile(select) {
   }
 }
 function onConfigChange(e) {
+  if (e.target.matches('input[name="ag-appearance"]')) {
+    const input = e.target;
+    const row = state.rows.find((item) => item.session_id === state.selected);
+    if (!row || row.parent_session || document.documentElement.dataset.theme !== 'dark') return;
+    const choice = input.value || null;
+    if (state.appearanceSaving) {
+      const active = $('ag-appearance-' + (state.pendingAppearance || 'auto'));
+      if (active) active.checked = true;
+      return;
+    }
+    const previous = row.soldier_appearance || '';
+    state.pendingAppearance = choice;
+    const status = $('ag-appearance-status');
+    state.appearanceSaving = true;
+    if (status) status.textContent = 'Saving appearance…';
+    post(`/api/agents/sessions/${encodeURIComponent(row.session_id)}/appearance`, { appearance: choice })
+      .then(() => {
+        row.soldier_appearance = choice;
+        const fresh = state.rows.find((item) => item.session_id === row.session_id);
+        if (fresh) fresh.soldier_appearance = choice;
+        renderFleetOnly();
+        if (state.selected === row.session_id) {
+          const hero = $('ag-detail')?.querySelector('.ag-console-robot-bay');
+          if (hero) hero.innerHTML = robotHtml(row, 'hero');
+        }
+        if (status.isConnected) status.textContent = 'Appearance saved';
+      }).catch((error) => {
+        if (input.isConnected) {
+          const old = $('ag-appearance-' + (previous || 'auto'));
+          if (old) old.checked = true;
+        }
+        if (status.isConnected) status.textContent = `Could not save appearance: ${error.message}`;
+      }).finally(() => { state.appearanceSaving = false; state.pendingAppearance = null; });
+    return;
+  }
   if (e.target.matches('[data-ag-crew-profile]')) {
     saveCrewProfile(e.target);
     return;
