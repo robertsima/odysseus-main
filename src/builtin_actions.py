@@ -1487,6 +1487,12 @@ async def action_classify_events(owner: str, **kwargs) -> Tuple[str, bool]:
                 # travel as untrusted data (2026-10-01 prompt audit).
                 events_message = untrusted_context_message("calendar events to classify", _json.dumps(items))
                 try:
+                    # Hand the pooled connection back while waiting for quiet
+                    # and for the model (minutes, together); `items` already
+                    # holds what the prompt needs, and the rows reload on write.
+                    # 2026-10-03: routes holding a session across a model call
+                    # showed up as 5 s pool checkouts on SQLite.
+                    db.commit()
                     await wait_for_interactive_quiet("calendar classification action")
                     raw = await llm_call_async_with_fallback(
                         llm_candidates,

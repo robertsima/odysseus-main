@@ -86,9 +86,12 @@ def test_coding_rules_send_visual_work_to_real_artwork_and_the_user():
     assert "ask the user to pick" in rules
 
 
-def test_delegation_rules_say_run_tests_yourself_and_review_once_per_iteration():
-    assert "Run tests and builds yourself" in al._DELEGATION_RULES
+def test_delegation_rules_say_who_runs_tests_and_review_once_per_iteration():
+    assert "The implementer runs tests and builds" in al._DELEGATION_RULES
     assert "one independent review per iteration" in al._DELEGATION_RULES
+    # 2026-10-03: the admin re-ran the worker's 8.5-minute suite on the same
+    # commit; a hand-back is verified from its evidence plus one quick check.
+    assert "Re-run the long suites only when the commit changed" in al._DELEGATION_RULES
 
 
 def test_visual_asset_sourcing_skill_parses_and_is_cross_linked():

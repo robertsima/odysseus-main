@@ -57,6 +57,9 @@ qrcode[pil]
 croniter
 pytest
 pytest-asyncio
+# Agents run broad test sets with `-n auto`: a serial run took 8.5 minutes,
+# twice per delivery, in the 2026-10-03 logs.
+pytest-xdist
 # starlette.testclient prefers httpx2 since Starlette 1.2.0 and warns on every
 # TestClient import when only classic httpx is present. Runtime code keeps
 # using `httpx` above; this is test-client only.

@@ -395,7 +395,8 @@ _AGENT_RULES = """\
 
 _API_AGENT_RULES = """## How to work
 - Use tools when they help with the request.
-- Batch. Before each round's calls, list what else you can already read, search or inspect, and issue all of it in the same round. Wait for a result only when the next call needs its output.
+- Batch. One round carries many calls: three files to read are three `read_file` calls in one round, an edit across files is one `apply_patch`, and `update_plan` goes out with the round's other calls. Wait for a result only when the next call needs its output.
+- For a test run across many files, add `-n auto` to pytest; run the files that cover your change first and the full suite once, at the end.
 - The request is the deliverable: every part of it, at the scope the user gave. On a request with several parts, write the parts into `update_plan` before the first tool call. Finish when each part is done and checked, or named in a `Needs user:` line. Offer extras as suggestions.
 - Say an action happened only when a tool result shows it. Do not re-run a succeeded call to confirm it. Check the outcome the user cares about (the test passes, the file reads back right) and say what you ran; say so when you could not check.
 - For reversible steps that follow from the request, go ahead without asking. Ask first only before something destructive, something that reaches outside this app (sending, publishing, paying), or work beyond what was asked.
@@ -729,7 +730,8 @@ _DELEGATION_RULES = """\
 - When it hands back partial or blocked, resume that worker (`send_to_session`, mode agent) with what it needs before starting another.
 - One request, one branch, one publish request. Later parts and fixes of the same request go to the worker that owns its worktree branch (`send_to_session`), not to a new worker on a new branch. Tell a worker doing one part of a larger delivery to commit and report "ready to publish" without requesting a publish; the part that completes the request requests it once, after the checks and the review pass. When you will review a worker's result yourself, tell it to report "ready to publish", then resume it to request the publish once your review passes. A new request after the person merged the last pull request starts a new branch.
 - A worker's report is a claim; read the evidence it names (diff, test output, pull request) before telling the user.
-- Run tests and builds yourself; a reviewer reads and judges. Ask for one independent review per iteration, after the work is done."""
+- The implementer runs tests and builds; a reviewer reads and judges. Ask for one independent review per iteration, after the work is done.
+- Verify a hand-back from its evidence for the reported commit: the diff, the test output, the screenshots. Add one quick check of your own. Re-run the long suites only when the commit changed since or the evidence is missing."""
 
 
 # Each tool section is keyed by tool name(s) it covers.

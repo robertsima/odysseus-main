@@ -1040,6 +1040,10 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
         if not url or not model:
             raise HTTPException(500, "No endpoint configured for AI tidy")
 
+        # The model call can take a minute; holding a pooled connection across
+        # it (2026-10-03: a 5.06 s checkout warning from this route) blocks
+        # other writers on SQLite. Read and build the prompt, release the
+        # connection, ask the model, then apply verdicts in a fresh session.
         db = SessionLocal()
         try:
             q = (
@@ -1061,26 +1065,43 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             # array position.
             batch = to_review[:30]
             handles = {f"d{i + 1}": doc for i, doc in enumerate(batch)}
+            messages = _tidy_messages(handles)
+            handle_ids = {handle: doc.id for handle, doc in handles.items()}
+            remaining = len(to_review) - len(batch)
+        finally:
+            db.close()
+
+        try:
             response = await llm_call_async(
                 url, model,
-                _tidy_messages(handles),
+                messages,
                 temperature=0.1,
                 max_tokens=_TIDY_MAX_TOKENS,
                 headers=headers,
                 timeout=60,
             )
+        except Exception as e:
+            logger.error(f"AI tidy failed: {e}")
+            raise HTTPException(500, f"AI tidy failed: {e}")
 
-            junk_ids = _parse_junk_handles(response, set(handles))
-            if junk_ids is None:
-                # Unparseable, or it names a handle that is not in this batch.
-                # Deleting from an answer we cannot trust is the failure to
-                # avoid, so delete nothing and cache no verdicts: the same
-                # documents are offered again on the next Tidy.
-                raise HTTPException(500, "AI returned an unusable answer; nothing was deleted")
+        junk_ids = _parse_junk_handles(response, set(handle_ids))
+        if junk_ids is None:
+            # Unparseable, or it names a handle that is not in this batch.
+            # Deleting from an answer we cannot trust is the failure to
+            # avoid, so delete nothing and cache no verdicts: the same
+            # documents are offered again on the next Tidy.
+            raise HTTPException(500, "AI returned an unusable answer; nothing was deleted")
 
+        db = SessionLocal()
+        try:
             deleted = 0
             reviewed = 0
-            for handle, doc in handles.items():
+            for handle, doc_id in handle_ids.items():
+                doc = db.query(Document).filter(Document.id == doc_id).first()
+                # Gone, archived or reviewed while the model was answering:
+                # leave it to what changed it.
+                if doc is None or not doc.is_active or doc.archived or doc.tidy_verdict:
+                    continue
                 if handle in junk_ids:
                     doc.tidy_verdict = "junk"
                     db.delete(doc)
@@ -1093,7 +1114,7 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
             return {
                 "deleted": deleted,
                 "reviewed": reviewed,
-                "remaining": len(to_review) - len(batch),
+                "remaining": remaining,
                 "message": f"Reviewed {reviewed}, removed {deleted} junk document{'s' if deleted != 1 else ''}",
             }
         except HTTPException:
