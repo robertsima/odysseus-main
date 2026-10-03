@@ -24,7 +24,7 @@
   --ag-muted:color-mix(in srgb,var(--fg,#f7f8fa) 72%,var(--bg,#111417));
   --ag-faint:color-mix(in srgb,var(--fg,#f7f8fa) 58%,var(--bg,#111417));
 }
-.ag-page-heading,.ag-context-rail,.ag-phalanx-title,.ag-phalanx-summary,.ag-workbench-title,.ag-run-control,.ag-run-detail{display:none}
+.ag-page-heading,.ag-context-rail,.ag-phalanx-title,.ag-phalanx-summary,.ag-workbench-title,.ag-run-control,.ag-run-timeline,.ag-run-console,.ag-run-detail{display:none}
 html[data-style="agamemnon"] body{font-family:'Space Grotesk',system-ui,sans-serif;background-color:var(--ag-bg);color:var(--ag-text)}
 /* Keep the chat work surface translucent when an effect is selected. Reading
    surfaces remain dark enough to preserve contrast and the unselected theme
@@ -213,11 +213,11 @@ html[data-style="agamemnon"] #agents-dashboard .ag-card-actions .wb-icon-btn{wid
 html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-body{display:flex;flex-direction:column;gap:12px;min-width:0;overflow:auto}
 html[data-style="agamemnon"] .wb-panel[data-wb-panel="activity"]{display:grid;grid-template-columns:minmax(0,790px) minmax(240px,306px);gap:20px 28px;align-content:start;justify-content:start}
 html[data-style="agamemnon"] .ag-run-control{display:grid;grid-column:1;grid-row:1;grid-template-rows:auto auto auto;gap:16px;min-width:0;align-self:start}
-html[data-style="agamemnon"] .ag-run-control>section{box-sizing:border-box;min-width:0;padding:22px 26px;background:var(--ag-panel);border:2px solid var(--ag-border-strong)}
+html[data-style="agamemnon"] .wb-panel[data-wb-panel="activity"] :is(.ag-run-summary,.ag-run-timeline,.ag-run-console){display:block;box-sizing:border-box;min-width:0;padding:22px 26px;background:var(--ag-panel);border:2px solid var(--ag-border-strong)}
 /* One boundary for each information block, not a panel inside a second
    equally prominent panel. The active tab's feed is still its own region. */
 html[data-style="agamemnon"] #workbench-modal .wb-panel[data-wb-panel="activity"]{padding:0;background:transparent;border:0}
-html[data-style="agamemnon"] .ag-run-control>section{border-width:1px}
+html[data-style="agamemnon"] .wb-panel[data-wb-panel="activity"] :is(.ag-run-summary,.ag-run-timeline,.ag-run-console){border-width:1px}
 html[data-style="agamemnon"] .ag-run-control>.ag-run-summary{border-width:2px}
 html[data-style="agamemnon"] .ag-run-summary{border-color:var(--ag-gold)!important}
 /* Sparse runs shrink to their contents; long runs scroll within bounded
@@ -237,7 +237,7 @@ html[data-style="agamemnon"] .wb-panel[data-wb-panel="activity"]::after{content:
    into its own scroll container. The dock content provides primary scrolling. */
 html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .ag-run-control{display:grid;grid-template-rows:auto auto auto;gap:8px}
 html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .wb-panel[data-wb-panel="activity"]{padding:0;background:transparent;border:0}
-html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .ag-run-control>section{padding:12px 14px}
+html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .wb-panel[data-wb-panel="activity"] :is(.ag-run-summary,.ag-run-timeline,.ag-run-console){padding:12px 14px}
 html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) :is(.ag-run-timeline,.ag-run-console,.ag-run-detail){overflow:visible;max-height:none}
 html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .ag-run-detail{display:block;padding:12px 14px}
 /* In the dock the Activity column already spans the available width. Let
@@ -252,7 +252,7 @@ html[data-style="agamemnon"] #workbench-modal .wb-panel.hidden{display:none!impo
 html[data-style="agamemnon"] #workbench-modal .workbench-modal-body{container-type:inline-size}
 html[data-style="agamemnon"] #workbench-modal .wb-panel[data-wb-panel="activity"]{display:grid;grid-template-columns:minmax(0,1fr);gap:14px;align-content:start}
 html[data-style="agamemnon"] #workbench-modal .ag-run-control{display:contents}
-html[data-style="agamemnon"] #workbench-modal .ag-run-control>section{grid-column:1;min-width:0;border:1px solid var(--ag-border);padding:16px 18px}
+html[data-style="agamemnon"] #workbench-modal .wb-panel[data-wb-panel="activity"] :is(.ag-run-summary,.ag-run-timeline,.ag-run-console){grid-column:1;min-width:0;border:1px solid var(--ag-border);padding:16px 18px}
 html[data-style="agamemnon"] #workbench-modal .ag-run-summary{grid-row:1;padding:4px 0 16px!important;border:0!important;border-bottom:1px solid var(--ag-border-strong)!important;background:transparent}
 html[data-style="agamemnon"] #workbench-modal .ag-run-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}
 html[data-style="agamemnon"] #workbench-modal .ag-run-eyebrow{font:700 11px/1.4 'Space Grotesk';letter-spacing:.13em;text-transform:uppercase;color:var(--ag-gold)}
@@ -276,25 +276,19 @@ html[data-style="agamemnon"] #workbench-modal .wb-activity{border-width:1px}
  html[data-style="agamemnon"] #workbench-modal .ag-run-control>.ag-run-summary{grid-column:1/-1}
  html[data-style="agamemnon"] #workbench-modal .wb-panel[data-wb-panel="activity"]>.wb-toolbar{grid-column:1;grid-row:2}
  html[data-style="agamemnon"] #workbench-modal .wb-panel[data-wb-panel="activity"]>.wb-activity{grid-column:1;grid-row:3/6;align-self:start}
- html[data-style="agamemnon"] #workbench-modal .ag-run-control>.ag-run-timeline{grid-column:2;grid-row:3}
- html[data-style="agamemnon"] #workbench-modal .ag-run-control>.ag-run-console{grid-column:2;grid-row:4}
+ html[data-style="agamemnon"] #workbench-modal .wb-panel[data-wb-panel="activity"]>.ag-run-timeline{grid-column:2;grid-row:3}
+ html[data-style="agamemnon"] #workbench-modal .wb-panel[data-wb-panel="activity"]>.ag-run-console{grid-column:2;grid-row:4}
  html[data-style="agamemnon"] #workbench-modal .ag-run-detail{grid-column:2;grid-row:5}
 }
 /* Docked panels always take the narrow path, independent of viewport width. */
 html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .wb-panel[data-wb-panel="activity"]{display:grid;grid-template-columns:minmax(0,1fr)}
 html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .ag-run-summary{grid-column:1}
-/* In an attached window the primary feed must follow the run masthead.
-   The wide window's grid rows leak onto display:contents children and put
-   timeline/output before the feed; an explicit dock-only flex stack keeps
-   all sections reachable in reading order at every hand-resized width. */
+/* Match the DOM's summary → feed → supporting run detail order in the dock.
+   Avoid CSS order: it diverges from keyboard and assistive-tech traversal. */
 html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .wb-panel[data-wb-panel="activity"]{display:flex;flex-direction:column;gap:14px;min-width:0}
 html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .ag-run-control{display:contents}
-html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .ag-run-summary{order:0}
-html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .wb-toolbar{order:1;flex-shrink:0}
-html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .wb-activity{order:2;flex-shrink:0}
-html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .ag-run-timeline{order:3}
-html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .ag-run-console{order:4}
-html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .ag-run-detail{order:5}
+html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .wb-toolbar,
+html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .wb-activity{flex-shrink:0}
 
 /* Phalanx: compact but legible command hierarchy, with one adaptable card
    column in half-screen instead of desktop-sized cards squeezed together. */
@@ -448,6 +442,16 @@ html[data-style] .sidebar.right-side .sidebar-brand{gap:10px;padding:0}
  html[data-style="agamemnon"] #workbench-modal .workbench-modal-body>.wb-tabs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));overflow:visible}
  #workbench-modal .wb-tabs .memory-tab{justify-content:center;min-width:0}
  html[data-style="agamemnon"] #workbench-modal .wb-tabs .memory-tab{padding-inline:4px}
+ /* A narrow dock on a wide monitor needs the same discoverable filter
+    disclosure and touch-sized feed actions as a narrow viewport. */
+ html[data-style="agamemnon"] #workbench-modal:is(.modal-left-docked,.modal-right-docked) .wb-filter-options{display:block}
+ html[data-style="agamemnon"] #workbench-modal:is(.modal-left-docked,.modal-right-docked) .wb-filter-options>summary{display:list-item;cursor:pointer;box-sizing:border-box;min-height:44px;padding:12px 6px;color:var(--ag-gold)}
+ html[data-style="agamemnon"] #workbench-modal:is(.modal-left-docked,.modal-right-docked) .wb-filter-options:not([open]) .wb-filter-fields{display:none}
+ html[data-style="agamemnon"] #workbench-modal:is(.modal-left-docked,.modal-right-docked) .wb-filter-options[open]{flex-basis:100%}
+ html[data-style="agamemnon"] #workbench-modal:is(.modal-left-docked,.modal-right-docked) .wb-filter-options[open] .wb-filter-fields{display:flex;flex-wrap:wrap;gap:8px;padding:4px 0 10px}
+ html[data-style="agamemnon"] #workbench-modal:is(.modal-left-docked,.modal-right-docked) .wb-filter-options[open] .wb-select{flex:1 1 120px;max-width:100%;min-height:44px}
+ html[data-style="agamemnon"] #workbench-modal:is(.modal-left-docked,.modal-right-docked) .wb-toolbar :is(#wb-pause,#wb-clear){min-height:44px;min-width:44px}
+ html[data-style="agamemnon"] #workbench-modal:is(.modal-left-docked,.modal-right-docked) .wb-run-actions .wb-btn{min-height:44px;min-width:44px}
 }
 @container wbwindow (max-width:430px){
  html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .workbench-modal-body>.wb-tabs{grid-template-columns:repeat(2,minmax(0,1fr))}

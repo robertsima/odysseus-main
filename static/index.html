@@ -387,10 +387,7 @@
         <div id="wb-panel-activity" class="wb-panel" data-wb-panel="activity" role="tabpanel" aria-labelledby="wb-tab-activity">
           <div class="ag-run-control" aria-label="Run control summary">
             <section class="ag-run-summary"><div class="ag-run-heading"><span class="ag-run-eyebrow">Run activity</span><span class="ag-run-state" id="ag-run-state" role="status" aria-live="polite">Ready</span></div><h3 id="ag-run-title">Select a run to inspect</h3><p id="ag-run-summary-meta">No run selected · activity ready</p></section>
-            <section class="ag-run-timeline"><h3>RUN TIMELINE</h3><ol id="ag-run-timeline-list"><li>Run events will appear here as they are recorded.</li></ol></section>
-            <section class="ag-run-console"><h3>Output and artifacts</h3><div class="ag-run-console-output" id="ag-run-console-output">Actual run output and source links appear here when available.</div></section>
           </div>
-          <aside class="ag-run-detail" aria-label="Run details"><section><h3>RUN DETAILS</h3><dl><div><dt>Agent</dt><dd id="ag-run-agent">—</dd></div><div><dt>Started</dt><dd id="ag-run-started">—</dd></div><div><dt>Status</dt><dd id="ag-run-status">Ready</dd></div></dl></section><section><h3>ACTIVITY</h3><p id="ag-run-activity-note">Inspect the recorded per-run event history below.</p></section></aside>
           <div class="wb-toolbar">
             <details class="wb-filter-options"><summary>Filters</summary><div class="wb-filter-fields">
               <select id="wb-scope" class="wb-select" title="Which sessions to follow" aria-label="Scope"><option value="session">This chat</option><option value="all">All sessions</option></select>
@@ -402,6 +399,9 @@
             <button type="button" class="wb-btn" id="wb-clear" title="Clear the visible feed">Clear</button>
           </div>
           <div class="wb-activity" id="wb-activity"></div>
+          <section class="ag-run-timeline"><h3>RUN TIMELINE</h3><ol id="ag-run-timeline-list"><li>Run events will appear here as they are recorded.</li></ol></section>
+          <section class="ag-run-console"><h3>Output and artifacts</h3><div class="ag-run-console-output" id="ag-run-console-output">Actual run output and source links appear here when available.</div></section>
+          <aside class="ag-run-detail" aria-label="Run details"><section><h3>RUN DETAILS</h3><dl><div><dt>Agent</dt><dd id="ag-run-agent">—</dd></div><div><dt>Started</dt><dd id="ag-run-started">—</dd></div><div><dt>Status</dt><dd id="ag-run-status">Ready</dd></div></dl></section><section><h3>ACTIVITY</h3><p id="ag-run-activity-note">Inspect the recorded per-run event history below.</p></section></aside>
         </div>
         <div class="wb-panel hidden" data-wb-panel="changes" id="wb-changes" role="tabpanel" aria-labelledby="wb-tab-changes"></div>
         <div class="wb-panel hidden" data-wb-panel="commits" id="wb-commits" role="tabpanel" aria-labelledby="wb-tab-commits"></div>

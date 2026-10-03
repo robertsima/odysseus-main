@@ -238,6 +238,66 @@ def test_attached_workbench_side_is_operable_during_resize(open_app, side, style
 
 
 @pytest.mark.parametrize('side', ['left', 'right'])
+@pytest.mark.parametrize('width', [350, 480, 680])
+def test_attached_workbench_reading_and_keyboard_order(open_app, side, width):
+    page = open_app(1440)
+    open_workbench(page)
+    if side == 'left':
+        attach_workbench_left(page)
+    else:
+        page.click('#wb-dock-right')
+    resize_workbench_dock(page, width, side)
+    # Timeline may contain an interactive source link in a real run. Tab from
+    # the feed actions must reach that link *after* the visible feed controls.
+    page.eval("document.getElementById('ag-run-timeline-list').innerHTML='<li><a id=run-source-link href=#source>Source</a></li>'")
+    dom = page.eval("[...document.querySelector('#wb-panel-activity').querySelectorAll('.ag-run-summary,.wb-toolbar,.wb-activity,.ag-run-timeline,.ag-run-console,.ag-run-detail')].map(e=>e.className)")
+    assert dom == ['ag-run-summary', 'wb-toolbar', 'wb-activity', 'ag-run-timeline', 'ag-run-console', 'ag-run-detail'], dom
+    positions = [page.probe('.'+name)['top'] for name in dom]
+    assert positions == sorted(positions), positions
+    page.eval("document.getElementById('wb-clear').focus()")
+    page.press('Tab', key_code=9)
+    assert page.eval("document.activeElement.closest('#wb-activity') !== null"), 'feed must follow feed controls'
+    for _ in range(20):
+        if page.eval("document.activeElement.id") == 'run-source-link':
+            break
+        page.press('Tab', key_code=9)
+    assert page.eval("document.activeElement.id") == 'run-source-link', page.eval("document.activeElement.outerHTML")
+    if page.probe('.wb-filter-options summary')['visible']:
+        assert_usable(page, '.wb-filter-options summary')
+        page.click('.wb-filter-options summary')
+    for selector in ('#wb-scope', '#wb-filter'):
+        assert_usable(page, selector)
+    for selector in ('#wb-pause', '#wb-clear'):
+        target = page.probe(selector)
+        assert target['height'] >= 40 and target['width'] >= 44, (selector, target)
+    if page.probe('.wb-filter-options summary')['visible']:
+        run_actions = page.eval("[...document.querySelectorAll('#wb-activity .wb-run-actions button')].map(e=>({width:e.getBoundingClientRect().width,height:e.getBoundingClientRect().height}))")
+        assert run_actions and all(a['width'] >= 44 and a['height'] >= 44 for a in run_actions), run_actions
+    assert_no_sideways_scroll(page, '.workbench-modal-content')
+    shot(page, f'keyboard-attached-{side}-{width}')
+
+
+@pytest.mark.parametrize('style,width', [('classic', 1440), ('agamemnon', 1440), ('agamemnon', 390), ('agamemnon', 320)])
+def test_floating_workbench_reading_order_after_dom_reflow(open_app, style, width):
+    page = open_app(width, style=style)
+    open_workbench(page)
+    if style == 'classic':
+        assert not page.probe('.ag-run-summary')['visible']
+        assert not page.probe('.ag-run-timeline')['visible']
+        assert not page.probe('.ag-run-console')['visible']
+        assert_usable(page, '#wb-pause')
+    else:
+        dom = page.eval("[...document.querySelector('#wb-panel-activity').querySelectorAll('.ag-run-summary,.wb-toolbar,.wb-activity,.ag-run-timeline,.ag-run-console,.ag-run-detail')].map(e=>e.className)")
+        assert dom == ['ag-run-summary', 'wb-toolbar', 'wb-activity', 'ag-run-timeline', 'ag-run-console', 'ag-run-detail']
+        if width <= 390:
+            positions = [page.probe('.'+name)['top'] for name in dom]
+            assert positions == sorted(positions), positions
+        assert_usable(page, '#wb-pause')
+    assert_no_sideways_scroll(page, '.workbench-modal-content')
+    shot(page, f'floating-reading-{style}')
+
+
+@pytest.mark.parametrize('side', ['left', 'right'])
 def test_attached_workbench_theme_switch_keeps_feed_and_draft(open_app, side):
     page = open_app(1440, style='classic')
     open_workbench(page, activity=False)
