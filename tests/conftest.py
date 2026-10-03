@@ -3,6 +3,7 @@ import sys
 import os
 import types
 import importlib.util
+import itertools
 from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -104,13 +105,26 @@ def pytest_collection_modifyitems(config, items):
 import pytest  # noqa: E402
 
 
+@pytest.fixture(scope="session")
+def _declared_tools_root(tmp_path_factory):
+    return str(tmp_path_factory.mktemp("declared_tools"))
+
+
+_declared_tools_numbers = itertools.count()
+
+
 @pytest.fixture(autouse=True)
-def _isolated_declared_tools(tmp_path):
+def _isolated_declared_tools(_declared_tools_root):
     """Give every test an empty declared-tools state (src/stable_tools.py).
 
     The ChatGPT route persists each chat's declared tool list under the data
     folder; tests reuse session ids, so without this one test's list would be
     loaded by the next and the tools it sends would depend on test order.
+
+    Each test gets its own folder name under one session folder. stable_tools
+    creates the folder on its first write, so most tests never touch the disk;
+    requesting ``tmp_path`` here made a numbered folder for every test, which
+    cost about 30 s per serial run.
 
     Patched by hand, not with ``monkeypatch``: an autouse fixture that requests
     it makes monkeypatch outlive the test module's own fixtures, and a module
@@ -121,7 +135,7 @@ def _isolated_declared_tools(tmp_path):
     if mod is None:
         import src.stable_tools as mod
     mod.reset_for_tests()
-    store = str(tmp_path / "declared_tools")
+    store = os.path.join(_declared_tools_root, str(next(_declared_tools_numbers)))
     original = mod._store_dir
     mod._store_dir = lambda: store
     try:
