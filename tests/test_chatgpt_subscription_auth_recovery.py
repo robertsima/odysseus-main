@@ -24,8 +24,9 @@ import time
 
 import httpx
 import pytest
-from sqlalchemy import Column, DateTime, String, create_engine
+from sqlalchemy import Column, DateTime, String
 from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.pool import QueuePool
 
 from src import chatgpt_subscription as cs
 from src import llm_core
@@ -77,7 +78,7 @@ class FakeOAuth:
 
 
 @pytest.fixture
-def store(monkeypatch, tmp_path):
+def store(monkeypatch, make_test_db):
     """One stored ChatGPT credential in a private SQLite table."""
     mapped = declarative_base()
 
@@ -92,10 +93,7 @@ def store(monkeypatch, tmp_path):
         last_refresh = Column(DateTime)
         auth_mode = Column(String)
 
-    engine = create_engine(f"sqlite:///{tmp_path / 'auth.db'}",
-                           connect_args={"check_same_thread": False})
-    mapped.metadata.create_all(engine)
-    factory = sessionmaker(bind=engine)
+    factory = sessionmaker(bind=make_test_db(mapped.metadata, poolclass=QueuePool).engine)
     access, refresh = _jwt(), "rt-initial"
     with factory() as db:
         db.add(Auth(id="auth-abc12345", provider=cs.CHATGPT_SUBSCRIPTION_PROVIDER, owner="robert",
@@ -122,8 +120,7 @@ def store(monkeypatch, tmp_path):
 
     s = Store()
     s.initial_access, s.oauth, s.auth_id = access, oauth, "auth-abc12345"
-    yield s
-    engine.dispose()
+    return s
 
 
 # ── refresh machinery ────────────────────────────────────────────────────
@@ -493,15 +490,12 @@ async def test_owner_token_that_is_the_rejected_one_is_not_replayed(store, codex
     assert error["status"] == 401 and len(fake.bearers) == 1
 
 
-def test_session_credential_ref_uses_the_chats_owner_and_endpoint(monkeypatch, tmp_path):
+def test_session_credential_ref_uses_the_chats_owner_and_endpoint(monkeypatch, make_test_db):
     from sqlalchemy.orm import sessionmaker as _sessionmaker
 
     import core.database as database
 
-    engine = create_engine(f"sqlite:///{tmp_path / 'app.db'}", connect_args={"check_same_thread": False})
-    database.Base.metadata.create_all(engine, tables=[database.Session.__table__,
-                                                      database.ModelEndpoint.__table__])
-    factory = _sessionmaker(bind=engine)
+    factory = _sessionmaker(bind=make_test_db(poolclass=QueuePool).engine)
     monkeypatch.setattr(database, "SessionLocal", factory)
     codex_base = cs.DEFAULT_CHATGPT_SUBSCRIPTION_BASE_URL
     with factory() as db:
@@ -522,47 +516,41 @@ def test_session_credential_ref_uses_the_chats_owner_and_endpoint(monkeypatch, t
     assert cs._session_credential_ref("child-1") == ("auth-robert", "robert")
     assert cs._session_credential_ref("child-2") is None  # not a ChatGPT chat
     assert cs._session_credential_ref("missing") is None
-    engine.dispose()
 
 
 # ── the metadata refresh that wiped the bearer ───────────────────────────
 
 
-def _manager(monkeypatch, tmp_path):
+def _manager(monkeypatch, make_test_db):
     from sqlalchemy.orm import sessionmaker as _sessionmaker
 
-    import core.database as database
     from core import session_manager as sm
 
-    engine = create_engine(f"sqlite:///{tmp_path / 'sessions.db'}", connect_args={"check_same_thread": False})
-    database.Base.metadata.create_all(engine, tables=[database.Session.__table__,
-                                                      database.ChatMessage.__table__])
-    monkeypatch.setattr(sm, "SessionLocal", _sessionmaker(bind=engine))
+    monkeypatch.setattr(sm, "SessionLocal", _sessionmaker(bind=make_test_db(poolclass=QueuePool).engine))
     manager = sm.SessionManager.__new__(sm.SessionManager)
     manager.sessions = {}
-    return manager, engine
+    return manager
 
 
 @pytest.mark.parametrize("endpoint,kept", [
     (cs.DEFAULT_CHATGPT_SUBSCRIPTION_BASE_URL, True),
     ("https://api.openai.com/v1", False),  # static keys live in the row: it stays authoritative
 ])
-def test_get_session_keeps_a_request_local_chatgpt_bearer(monkeypatch, tmp_path, endpoint, kept):
-    manager, engine = _manager(monkeypatch, tmp_path)
+def test_get_session_keeps_a_request_local_chatgpt_bearer(monkeypatch, make_test_db, endpoint, kept):
+    manager = _manager(monkeypatch, make_test_db)
     sess = manager.create_session("child-1", "child", endpoint, "gpt-6-sol", owner="robert")
     sess.headers = cs.chatgpt_headers("tok-123")  # what resolve_session_auth does for a worker
 
     manager.get_session("child-1")  # what orchestrate_agents does right after launching
 
     assert ("Authorization" in sess.headers) is kept
-    engine.dispose()
 
 
-def test_get_session_drops_the_bearer_when_the_chat_moved_endpoint(monkeypatch, tmp_path):
+def test_get_session_drops_the_bearer_when_the_chat_moved_endpoint(monkeypatch, make_test_db):
     from core import session_manager as sm
     import core.database as database
 
-    manager, engine = _manager(monkeypatch, tmp_path)
+    manager = _manager(monkeypatch, make_test_db)
     sess = manager.create_session("child-1", "child", cs.DEFAULT_CHATGPT_SUBSCRIPTION_BASE_URL,
                                   "gpt-6-sol", owner="robert")
     sess.headers = cs.chatgpt_headers("tok-123")
@@ -574,7 +562,6 @@ def test_get_session_drops_the_bearer_when_the_chat_moved_endpoint(monkeypatch, 
     manager.get_session("child-1")
 
     assert sess.headers == {}
-    engine.dispose()
 
 
 # ── 502/503 before any output ────────────────────────────────────────────

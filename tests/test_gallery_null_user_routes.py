@@ -2,23 +2,13 @@ import uuid
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import NullPool
 
-import core.database as cdb
 from core.database import GalleryAlbum, GalleryImage
 import routes.gallery_routes as gallery_routes
 
 
-def _client_with_gallery(monkeypatch, tmp_path):
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'gallery.db'}",
-        connect_args={"check_same_thread": False},
-        poolclass=NullPool,
-    )
-    cdb.Base.metadata.create_all(engine)
-    session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+def _client_with_gallery(monkeypatch, app_db):
+    session_factory = app_db.SessionLocal
     monkeypatch.setattr(gallery_routes, "SessionLocal", session_factory)
 
     db = session_factory()
@@ -62,9 +52,9 @@ def _client_with_gallery(monkeypatch, tmp_path):
     return TestClient(app)
 
 
-def test_auth_enabled_null_user_gallery_routes_fail_closed(monkeypatch, tmp_path):
+def test_auth_enabled_null_user_gallery_routes_fail_closed(monkeypatch, app_db):
     monkeypatch.setenv("AUTH_ENABLED", "true")
-    client = _client_with_gallery(monkeypatch, tmp_path)
+    client = _client_with_gallery(monkeypatch, app_db)
 
     library = client.get("/api/gallery/library").json()
     assert library["items"] == []
@@ -94,9 +84,9 @@ def test_auth_enabled_null_user_gallery_routes_fail_closed(monkeypatch, tmp_path
     }
 
 
-def test_auth_disabled_null_user_gallery_routes_keep_single_user_mode(monkeypatch, tmp_path):
+def test_auth_disabled_null_user_gallery_routes_keep_single_user_mode(monkeypatch, app_db):
     monkeypatch.setenv("AUTH_ENABLED", "false")
-    client = _client_with_gallery(monkeypatch, tmp_path)
+    client = _client_with_gallery(monkeypatch, app_db)
 
     library = client.get("/api/gallery/library").json()
     assert {item["id"] for item in library["items"]} == {"img-alice", "img-bob"}
@@ -120,10 +110,10 @@ def test_auth_disabled_null_user_gallery_routes_keep_single_user_mode(monkeypatc
     assert set(batch["image_ids"]) == {"img-alice", "img-bob"}
 
 
-def test_authenticated_gallery_routes_remain_owner_scoped(monkeypatch, tmp_path):
+def test_authenticated_gallery_routes_remain_owner_scoped(monkeypatch, app_db):
     monkeypatch.setenv("AUTH_ENABLED", "true")
     monkeypatch.setattr(gallery_routes, "get_current_user", lambda request: "alice")
-    client = _client_with_gallery(monkeypatch, tmp_path)
+    client = _client_with_gallery(monkeypatch, app_db)
 
     library = client.get("/api/gallery/library").json()
     assert [item["id"] for item in library["items"]] == ["img-alice"]

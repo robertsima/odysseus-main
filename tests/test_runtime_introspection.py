@@ -23,15 +23,10 @@ field would lie.
 
 import asyncio
 import json
-import os
-import tempfile
 import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import NullPool
 
 import core.database as cdb
 from src import agent_activity as act
@@ -45,26 +40,14 @@ def _utc():
 
 
 @pytest.fixture
-def db(monkeypatch, tmp_path):
+def db(monkeypatch, tmp_path, app_db):
     """A real core.database schema on a throwaway file, wired into the readers."""
-    handle = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-    engine = create_engine(
-        f"sqlite:///{handle.name}",
-        connect_args={"check_same_thread": False},
-        poolclass=NullPool,
-    )
-    cdb.Base.metadata.create_all(engine)
-    maker = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    maker = app_db.SessionLocal
     monkeypatch.setattr(cdb, "SessionLocal", maker)
     monkeypatch.setattr(constants, "DATA_DIR", str(tmp_path))
     act._reset_for_tests()
     yield maker
     act._reset_for_tests()
-    engine.dispose()
-    try:
-        os.unlink(handle.name)
-    except OSError:
-        pass
 
 
 def _task(maker, *, owner="alice", task_id=None, name="Daily brief",

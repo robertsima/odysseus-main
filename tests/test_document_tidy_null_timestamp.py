@@ -6,27 +6,19 @@ compared None against a datetime and raised TypeError, aborting the entire
 tidy run. The sort key is now total-order safe.
 """
 import asyncio
-import tempfile
 import uuid
 from datetime import datetime
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import NullPool
 
 import core.database as cdb
 from core.database import Document
 
 
 @pytest.fixture
-def db_factory(monkeypatch):
-    tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-    engine = create_engine(f"sqlite:///{tmp.name}", connect_args={"check_same_thread": False}, poolclass=NullPool)
-    cdb.Base.metadata.create_all(engine)
-    TS = sessionmaker(bind=engine, autoflush=False, autocommit=False)
-    monkeypatch.setattr(cdb, "SessionLocal", TS)
-    return TS
+def db_factory(monkeypatch, app_db):
+    monkeypatch.setattr(cdb, "SessionLocal", app_db.SessionLocal)
+    return app_db.SessionLocal
 
 
 def test_tidy_survives_duplicate_with_null_timestamps(db_factory):

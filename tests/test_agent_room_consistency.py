@@ -46,16 +46,13 @@ def test_one_invalid_loadout_no_longer_hides_the_others(monkeypatch):
 # ── routes ──────────────────────────────────────────────────────────────────
 
 @pytest.fixture
-def routes(monkeypatch, tmp_path):
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
+def routes(monkeypatch, make_test_db):
+    from sqlalchemy.pool import QueuePool
 
     import core.database as database
     from routes import agents_routes as ar
 
-    engine = create_engine(f"sqlite:///{tmp_path / 'app.db'}", connect_args={"check_same_thread": False})
-    database.Base.metadata.create_all(bind=engine)
-    factory = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+    factory = make_test_db(poolclass=QueuePool).SessionLocal
     monkeypatch.setattr(database, "SessionLocal", factory)
     db = factory()
     from datetime import datetime, timedelta
@@ -78,8 +75,7 @@ def routes(monkeypatch, tmp_path):
     mgr = SimpleNamespace(get_sessions_for_user=lambda user: owned if user == "alice" else {})
     monkeypatch.setattr(ar, "effective_user", lambda request: "alice")
     router = ar.setup_agents_routes(mgr)
-    yield {(m, r.path): r.endpoint for r in router.routes for m in r.methods}
-    engine.dispose()
+    return {(m, r.path): r.endpoint for r in router.routes for m in r.methods}
 
 
 def test_history_lists_agent_chats_of_any_age_newest_first(routes):

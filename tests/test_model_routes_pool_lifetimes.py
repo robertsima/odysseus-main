@@ -2,7 +2,7 @@ import threading
 import time
 from types import SimpleNamespace
 
-from sqlalchemy import Boolean, Column, DateTime, String, Text, create_engine
+from sqlalchemy import Boolean, Column, DateTime, String, Text
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.pool import QueuePool
 
@@ -42,16 +42,15 @@ def _route(router, path, method):
     )
 
 
-def _pool_db(tmp_path):
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'pool.db'}",
+def _pool_db(make_test_db):
+    engine = make_test_db(
+        Base.metadata,
         poolclass=QueuePool,
         pool_size=1,
         max_overflow=0,
         pool_timeout=0.2,
         connect_args={"check_same_thread": False},
-    )
-    Base.metadata.create_all(engine)
+    ).engine
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     with factory() as db:
         db.add(PoolModelEndpoint(
@@ -71,8 +70,8 @@ def _request():
     )
 
 
-def test_probe_selected_releases_connection_while_network_blocks(monkeypatch, tmp_path):
-    engine, factory = _pool_db(tmp_path)
+def test_probe_selected_releases_connection_while_network_blocks(monkeypatch, make_test_db):
+    engine, factory = _pool_db(make_test_db)
     monkeypatch.setattr(model_routes, "SessionLocal", factory)
     monkeypatch.setattr(model_routes, "ModelEndpoint", PoolModelEndpoint)
     monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
@@ -98,11 +97,10 @@ def test_probe_selected_releases_connection_while_network_blocks(monkeypatch, tm
     release.set()
     worker.join(2)
     assert not worker.is_alive()
-    engine.dispose()
 
 
-def test_manual_refresh_releases_connection_while_network_blocks(monkeypatch, tmp_path):
-    engine, factory = _pool_db(tmp_path)
+def test_manual_refresh_releases_connection_while_network_blocks(monkeypatch, make_test_db):
+    engine, factory = _pool_db(make_test_db)
     monkeypatch.setattr(model_routes, "SessionLocal", factory)
     monkeypatch.setattr(model_routes, "ModelEndpoint", PoolModelEndpoint)
     monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
@@ -129,11 +127,10 @@ def test_manual_refresh_releases_connection_while_network_blocks(monkeypatch, tm
     release.set()
     worker.join(2)
     assert not worker.is_alive()
-    engine.dispose()
 
 
-def test_background_refresh_releases_connection_while_network_blocks(monkeypatch, tmp_path):
-    engine, factory = _pool_db(tmp_path)
+def test_background_refresh_releases_connection_while_network_blocks(monkeypatch, make_test_db):
+    engine, factory = _pool_db(make_test_db)
     monkeypatch.setattr(model_routes, "SessionLocal", factory)
     monkeypatch.setattr(model_routes, "ModelEndpoint", PoolModelEndpoint)
     monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
@@ -164,11 +161,10 @@ def test_background_refresh_releases_connection_while_network_blocks(monkeypatch
         time.sleep(0.01)
     else:
         raise AssertionError("background cache write did not finish")
-    engine.dispose()
 
 
-def test_manual_refresh_resolves_credentials_after_releasing_connection(monkeypatch, tmp_path):
-    engine, factory = _pool_db(tmp_path)
+def test_manual_refresh_resolves_credentials_after_releasing_connection(monkeypatch, make_test_db):
+    engine, factory = _pool_db(make_test_db)
     monkeypatch.setattr(model_routes, "SessionLocal", factory)
     monkeypatch.setattr(model_routes, "ModelEndpoint", PoolModelEndpoint)
     monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
@@ -195,11 +191,10 @@ def test_manual_refresh_resolves_credentials_after_releasing_connection(monkeypa
     release.set()
     worker.join(2)
     assert not worker.is_alive()
-    engine.dispose()
 
 
-def test_cached_model_list_never_resolves_runtime_credentials(monkeypatch, tmp_path):
-    engine, factory = _pool_db(tmp_path)
+def test_cached_model_list_never_resolves_runtime_credentials(monkeypatch, make_test_db):
+    engine, factory = _pool_db(make_test_db)
     monkeypatch.setattr(model_routes, "SessionLocal", factory)
     monkeypatch.setattr(model_routes, "ModelEndpoint", PoolModelEndpoint)
     monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
@@ -212,11 +207,10 @@ def test_cached_model_list_never_resolves_runtime_credentials(monkeypatch, tmp_p
     cached = _route(router, "/api/model-endpoints/{ep_id}/models", "GET")
     result = cached("ep1", _request(), SimpleNamespace(headers={}), refresh=False)
     assert [row["id"] for row in result] == ["cached"]
-    engine.dispose()
 
 
-def test_manual_refresh_does_not_persist_result_after_concurrent_endpoint_edit(monkeypatch, tmp_path):
-    engine, factory = _pool_db(tmp_path)
+def test_manual_refresh_does_not_persist_result_after_concurrent_endpoint_edit(monkeypatch, make_test_db):
+    engine, factory = _pool_db(make_test_db)
     monkeypatch.setattr(model_routes, "SessionLocal", factory)
     monkeypatch.setattr(model_routes, "ModelEndpoint", PoolModelEndpoint)
     monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
@@ -246,11 +240,10 @@ def test_manual_refresh_does_not_persist_result_after_concurrent_endpoint_edit(m
     assert not worker.is_alive()
     with factory() as db:
         assert db.get(PoolModelEndpoint, "ep1").cached_models == '["cached"]'
-    engine.dispose()
 
 
-def test_probe_routes_resolve_credentials_after_releasing_connection(monkeypatch, tmp_path):
-    engine, factory = _pool_db(tmp_path)
+def test_probe_routes_resolve_credentials_after_releasing_connection(monkeypatch, make_test_db):
+    engine, factory = _pool_db(make_test_db)
     monkeypatch.setattr(model_routes, "SessionLocal", factory)
     monkeypatch.setattr(model_routes, "ModelEndpoint", PoolModelEndpoint)
     monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
@@ -282,11 +275,10 @@ def test_probe_routes_resolve_credentials_after_releasing_connection(monkeypatch
         release.set()
         worker.join(2)
         assert not worker.is_alive()
-    engine.dispose()
 
 
-def test_background_refresh_discards_result_after_concurrent_endpoint_edit(monkeypatch, tmp_path):
-    engine, factory = _pool_db(tmp_path)
+def test_background_refresh_discards_result_after_concurrent_endpoint_edit(monkeypatch, make_test_db):
+    engine, factory = _pool_db(make_test_db)
     monkeypatch.setattr(model_routes, "SessionLocal", factory)
     monkeypatch.setattr(model_routes, "ModelEndpoint", PoolModelEndpoint)
     monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
@@ -325,11 +317,10 @@ def test_background_refresh_discards_result_after_concurrent_endpoint_edit(monke
         time.sleep(0.01)
     else:
         raise AssertionError("background refresh did not finish")
-    engine.dispose()
 
 
-def test_background_stale_cookbook_disable_is_persisted(monkeypatch, tmp_path):
-    engine, factory = _pool_db(tmp_path)
+def test_background_stale_cookbook_disable_is_persisted(monkeypatch, make_test_db):
+    engine, factory = _pool_db(make_test_db)
     with factory() as db:
         db.add(PoolModelEndpoint(
             id="local-stale", name="Stale serve", base_url="http://localhost:9999/v1",
@@ -359,4 +350,3 @@ def test_background_stale_cookbook_disable_is_persisted(monkeypatch, tmp_path):
         time.sleep(0.01)
     else:
         raise AssertionError("stale cookbook endpoint disable was not persisted")
-    engine.dispose()
