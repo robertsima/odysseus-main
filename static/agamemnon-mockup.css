@@ -21,8 +21,8 @@
   --ag-gold:var(--red,#d7b35a);
   --ag-coral:#e07b5a;
   --ag-text:var(--fg,#f7f8fa);
-  --ag-muted:color-mix(in srgb,var(--fg,#f7f8fa) 72%,var(--bg,#111417));
-  --ag-faint:color-mix(in srgb,var(--fg,#f7f8fa) 58%,var(--bg,#111417));
+  --ag-muted:color-mix(in srgb,var(--fg,#f7f8fa) 88%,var(--panel,#1b2127));
+  --ag-faint:color-mix(in srgb,var(--fg,#f7f8fa) 88%,var(--panel,#1b2127));
 }
 .ag-page-heading,.ag-context-rail,.ag-phalanx-title,.ag-phalanx-summary,.ag-workbench-title,.ag-run-control,.ag-run-detail{display:none}
 html[data-style="agamemnon"] body{font-family:'Space Grotesk',system-ui,sans-serif;background-color:var(--ag-bg);color:var(--ag-text)}
@@ -470,5 +470,8 @@ html[data-style="agamemnon"] #agents-dashboard :is(.ag-card,.ag-detail,.ag-launc
  /* The sheet itself scrolls on phones; avoid an independent scroll pane in
     the Overview tab and surface the sprite picker before settings. */
  html[data-style] #agents-dashboard .ag-detail-tab-panel{flex:0 0 auto;overflow:visible}
+ html[data-style] #agents-dashboard #ag-panel-overview>.ag-soldier-context{display:block;order:-2;position:sticky;top:0;z-index:2;min-width:0;padding:9px 12px;border:1px solid var(--border);background:var(--panel);color:var(--fg);font-size:13px;line-height:1.35;overflow-wrap:anywhere}
+ html[data-style="agamemnon"] #agents-dashboard #ag-panel-overview>.ag-soldier-context{border-color:var(--ag-border-strong);background:var(--ag-panel);color:var(--ag-text)}
  html[data-style] #agents-dashboard #ag-panel-overview>.ag-appearance{order:-1;flex-shrink:0;margin-top:0}
 }
+html[data-style] #agents-dashboard .ag-soldier-context{display:none}

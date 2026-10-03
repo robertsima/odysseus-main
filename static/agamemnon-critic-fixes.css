@@ -69,6 +69,10 @@ html[data-style="classic"] #close-agents-dashboard:focus-visible{outline:3px sol
 html[data-style="classic"] .ag-fleet-compact .ag-card-actions{opacity:1;gap:3px}
 html[data-style="classic"] .ag-fleet-compact .ag-card-actions .wb-icon-btn{box-sizing:border-box;min-width:28px;min-height:28px;padding:2px;border:1px solid var(--border);background:var(--panel);color:var(--fg);font-size:11px}
 html[data-style="classic"] .ag-fleet-compact .ag-card-actions .wb-icon-btn:focus-visible{outline:2px solid var(--fg);outline-offset:1px}
+/* Desktop controls should not require precision taps. Radio inputs are
+   enclosed by full-size selectable cards; the other actions need own hit areas. */
+#agents-dashboard :is(.ag-live,.ag-row-name.ag-card-select,.ag-console-actions .wb-btn,.ag-child .wb-btn){min-height:24px;height:auto}
+#agents-dashboard .ag-window-actions .modal-minimize-btn{min-width:24px;min-height:24px}
 @media(max-width:600px){
  html[data-style="classic"] #agents-dashboard .ag-window-actions .doc-action-icon-btn{display:none}
  html[data-style="classic"] #agents-dashboard .ag-window-title{min-width:0}

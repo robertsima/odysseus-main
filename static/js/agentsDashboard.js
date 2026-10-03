@@ -968,6 +968,7 @@ function renderDetail() {
   const tabs = [['overview', 'Overview'], ['activity', 'Activity'], ...(isSubAgent ? [['conversation', 'Conversation']] : []), ['steering', 'Steering']]
     .map(([key, label]) => `<button type="button" id="ag-tab-${key}" class="ag-detail-tab${tab === key ? ' active' : ''}" data-ag="detail-tab" data-tab="${key}" role="tab" aria-label="${label} for ${esc(r.name)}" aria-controls="ag-panel-${key}" aria-selected="${tab === key}" tabindex="${tab === key ? '0' : '-1'}">${label}</button>`).join('');
   const overview = `
+    <div class="ag-soldier-context">Soldier for <strong>${esc(r.name)}</strong></div>
     ${loadoutSummaryHtml(r)}
     ${appearancePickerHtml(r)}
     ${(r.hidden_run_ids || []).length ? `<div class="ag-hidden-runs"><span>${r.hidden_run_ids.length} completed run card${r.hidden_run_ids.length === 1 ? '' : 's'} hidden</span><button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="restore-runs" data-sid="${esc(r.session_id)}">Restore cards</button></div>` : ''}

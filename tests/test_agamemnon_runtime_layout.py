@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -753,7 +754,52 @@ def test_phone_soldier_chooser_precedes_settings_and_uses_sheet_scroll(open_app,
     assert positions['overflow'] == 'visible' and positions['detail'] == 'auto', positions
     page.eval("document.querySelector('#ag-appearance-scout').scrollIntoView({block:'center'})")
     assert_usable(page, 'label:has(#ag-appearance-scout)')
+    context = page.eval("""(() => {const d=document.querySelector('#ag-detail'), c=d.querySelector('.ag-soldier-context');
+      const option=d.querySelector('label:has(#ag-appearance-scout)'), r=c.getBoundingClientRect(), a=option.getBoundingClientRect(), b=d.getBoundingClientRect();
+      return {label:c.textContent.trim(),top:r.top,bottom:r.bottom,detailTop:b.top,detailBottom:b.bottom,
+        optionTop:a.top,position:getComputedStyle(c).position,atPoint:c.contains(document.elementFromPoint(r.left+20,r.top+10))};})()""")
+    assert context['label'] == 'Soldier for Lead engineer', context
+    assert context['position'] == 'sticky' and context['detailTop'] <= context['top'] < context['detailBottom'], context
+    assert context['bottom'] <= context['optionTop'] + 1 and context['atPoint'], context
     shot(page, 'phone-chooser-first-' + style)
+
+
+def _rgb(value: str) -> list[float]:
+    """Read Chromium's computed rgb() or color(srgb) for contrast checks."""
+    numbers = [float(v) for v in re.findall(r'(?<![a-z])[+-]?\d+(?:\.\d+)?', value)]
+    if value.startswith('color(srgb'):
+        return numbers[:3]
+    assert value.startswith('rgb('), value
+    return [v / 255 for v in numbers[:3]]
+
+
+def _luminance(rgb: list[float]) -> float:
+    linear = [v / 12.92 if v <= .04045 else ((v + .055) / 1.055) ** 2.4 for v in rgb]
+    return sum(v * weight for v, weight in zip(linear, [.2126, .7152, .0722]))
+
+
+@pytest.mark.parametrize('style', ['classic', 'agamemnon'])
+@pytest.mark.parametrize('theme', [ODYSSEUS_THEME, LIGHT_THEME])
+def test_desktop_phalanx_metadata_contrast_and_control_targets(open_app, style, theme):
+    page = open_app(1440, theme=theme, style=style)
+    open_agents(page)
+    page.click(f'.ag-card-select[data-sid="{PARENT_ID}"]')
+    # The solid reading panel is the backing for transparent metadata labels.
+    paints = page.eval("""(() => {const box=document.querySelector('#agents-dashboard');
+      const sample=document.createElement('span');sample.style.color='var(--panel)';box.appendChild(sample);
+      const backing=getComputedStyle(sample).color;sample.remove();return {panel:backing,
+        entries:['.ag-detail-meta','.ag-row-latest','.ag-row-dur','.ag-appearance p']
+          .map(s=>[s,getComputedStyle(box.querySelector(s)).color])};})()""")
+    for selector, fg in paints['entries']:
+        background = paints['panel']
+        a, b = sorted([_luminance(_rgb(fg)), _luminance(_rgb(background))])
+        assert (b + .05) / (a + .05) >= 4.5, (style, theme, selector, fg, background, (b + .05) / (a + .05))
+    targets = page.eval("""[...document.querySelectorAll('#agents-dashboard button')]
+      .filter(e=>e.getBoundingClientRect().width && e.getBoundingClientRect().height)
+      .map(e=>({label:e.textContent.trim(),className:e.className,width:e.getBoundingClientRect().width,
+        height:e.getBoundingClientRect().height}))
+      .filter(x=>x.width<24||x.height<24)""")
+    assert not targets, targets
 
 
 def test_floating_windows_stack_without_showing_the_other_window_through_them(open_app):
