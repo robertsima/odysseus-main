@@ -455,6 +455,14 @@ html[data-style] .sidebar.right-side .sidebar-brand{gap:10px;padding:0}
 }
 @container wbwindow (max-width:430px){
  html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .workbench-modal-body>.wb-tabs{grid-template-columns:repeat(2,minmax(0,1fr))}
+ /* Keep the two feed actions together instead of stranding Clear on a row
+    by itself when the 350px dock shares a wide desktop viewport. */
+ html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .wb-panel[data-wb-panel="activity"]>.wb-toolbar{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:center}
+ html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .wb-toolbar .wb-spacer{display:none}
+ html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .wb-toolbar .wb-live{min-width:0;overflow:hidden;text-overflow:ellipsis}
+ html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .wb-toolbar .wb-filter-options[open],
+ html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .wb-toolbar .wb-filter-options[open]~.wb-live{grid-column:1/-1}
+ html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .wb-toolbar :is(#wb-pause,#wb-clear){width:100%;min-width:0}
  html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-body>.wb-tabs{grid-template-columns:repeat(4,minmax(0,1fr))}
  html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .wb-pr-long{display:none}
  html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .wb-pr-short{display:inline}

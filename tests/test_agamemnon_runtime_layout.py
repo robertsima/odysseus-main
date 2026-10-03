@@ -270,6 +270,8 @@ def test_attached_workbench_reading_and_keyboard_order(open_app, side, width):
     for selector in ('#wb-pause', '#wb-clear'):
         target = page.probe(selector)
         assert target['height'] >= 40 and target['width'] >= 44, (selector, target)
+    if width == 350:
+        assert abs(page.probe('#wb-pause')['top'] - page.probe('#wb-clear')['top']) <= 2
     if page.probe('.wb-filter-options summary')['visible']:
         run_actions = page.eval("[...document.querySelectorAll('#wb-activity .wb-run-actions button')].map(e=>({width:e.getBoundingClientRect().width,height:e.getBoundingClientRect().height}))")
         assert run_actions and all(a['width'] >= 44 and a['height'] >= 44 for a in run_actions), run_actions
