@@ -2,10 +2,11 @@
 
 import json
 import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
+
+from tests.helpers.node import module_url, run_module
 
 _REPO = Path(__file__).resolve().parent.parent
 _HELPER = _REPO / "static" / "js" / "providerDeviceFlow.js"
@@ -13,21 +14,14 @@ pytestmark = pytest.mark.skipif(not shutil.which("node"), reason="node not on PA
 
 
 def _run_node(script: str):
-    proc = subprocess.run(
-        ["node", "--input-type=module"],
-        input=script,
-        capture_output=True,
-        text=True,
-        cwd=str(_REPO),
-        timeout=30,
-    )
+    proc = run_module(script)
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout.strip())
 
 
 def test_copilot_success_uses_complete_verification_uri():
     js = f"""
-      import {{ runProviderDeviceFlow }} from '{_HELPER.as_posix()}';
+      import {{ runProviderDeviceFlow }} from '{module_url(_HELPER)}';
       const calls = [];
       const opened = [];
       let polls = 0;
@@ -67,7 +61,7 @@ def test_copilot_success_uses_complete_verification_uri():
 
 def test_chatgpt_success_uses_plain_verification_uri():
     js = f"""
-      import {{ runProviderDeviceFlow }} from '{_HELPER.as_posix()}';
+      import {{ runProviderDeviceFlow }} from '{module_url(_HELPER)}';
       const opened = [];
       const response = (ok, status, payload) => ({{ ok, status, async json() {{ return payload; }} }});
       const fetchImpl = async (url) => {{
@@ -97,7 +91,7 @@ def test_chatgpt_success_uses_plain_verification_uri():
 
 def test_start_errors_surface_backend_detail():
     js = f"""
-      import {{ runProviderDeviceFlow }} from '{_HELPER.as_posix()}';
+      import {{ runProviderDeviceFlow }} from '{module_url(_HELPER)}';
       const response = (ok, status, payload) => ({{ ok, status, async json() {{ return payload; }} }});
       try {{
         await runProviderDeviceFlow('copilot', {{
@@ -116,7 +110,7 @@ def test_start_errors_surface_backend_detail():
 
 def test_thrown_fetch_errors_are_preserved():
     js = f"""
-      import {{ runProviderDeviceFlow }} from '{_HELPER.as_posix()}';
+      import {{ runProviderDeviceFlow }} from '{module_url(_HELPER)}';
       try {{
         await runProviderDeviceFlow('chatgpt-subscription', {{
           fetchImpl: async () => {{ throw new Error('network offline'); }},
@@ -134,7 +128,7 @@ def test_thrown_fetch_errors_are_preserved():
 
 def test_expired_flow_returns_expired_status():
     js = f"""
-      import {{ runProviderDeviceFlow }} from '{_HELPER.as_posix()}';
+      import {{ runProviderDeviceFlow }} from '{module_url(_HELPER)}';
       let currentTime = 0;
       const response = (ok, status, payload) => ({{ ok, status, async json() {{ return payload; }} }});
       const result = await runProviderDeviceFlow('copilot', {{

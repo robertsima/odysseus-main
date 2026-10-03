@@ -15,14 +15,15 @@ quotes, so no input can terminate the `url('...')` string early.
 import json
 import re
 import shutil
-import subprocess
 import textwrap
 from pathlib import Path
 
 import pytest
 
+from tests.helpers.node import module_url, run_module
+
 _REPO = Path(__file__).resolve().parent.parent
-_UTILS = (_REPO / "static" / "js" / "calendar" / "utils.js").as_posix()
+_UTILS = module_url(_REPO / "static" / "js" / "calendar" / "utils.js")
 _CALENDAR_JS = _REPO / "static" / "js" / "calendar.js"
 _HAS_NODE = shutil.which("node") is not None
 
@@ -30,10 +31,7 @@ pytestmark = pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 
 
 def _run(js: str) -> str:
-    proc = subprocess.run(
-        ["node", "--input-type=module"],
-        input=js, capture_output=True, text=True, cwd=str(_REPO), timeout=30,
-    )
+    proc = run_module(js)
     assert proc.returncode == 0, proc.stderr
     return proc.stdout.strip()
 

@@ -10,10 +10,11 @@ true) instead of an exact-email comparison.
 """
 import json
 import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
+
+from tests.helpers.node import module_url, run_module
 
 _REPO = Path(__file__).resolve().parent.parent
 _HELPER = _REPO / "static" / "js" / "emailLibrary" / "replyRecipients.js"
@@ -21,10 +22,7 @@ _HAS_NODE = shutil.which("node") is not None
 
 
 def _run(js: str) -> str:
-    proc = subprocess.run(
-        ["node", "--input-type=module"],
-        input=js, capture_output=True, text=True, cwd=str(_REPO), timeout=30,
-    )
+    proc = run_module(js)
     assert proc.returncode == 0, proc.stderr
     return proc.stdout.strip()
 
@@ -33,7 +31,7 @@ def _run(js: str) -> str:
 def test_reply_all_keeps_cc_when_self_unknown():
     data = {"to": "Alice <alice@x.com>, bob@x.com", "cc": "Carol <carol@x.com>"}
     js = f"""
-    import {{ buildReplyAllCc }} from '{_HELPER.as_posix()}';
+    import {{ buildReplyAllCc }} from '{module_url(_HELPER)}';
     console.log(JSON.stringify(buildReplyAllCc({json.dumps(data)}, '')));
     """
     cc = json.loads(_run(js))
@@ -45,7 +43,7 @@ def test_reply_all_keeps_cc_when_self_unknown():
 def test_reply_all_excludes_only_self_exactly():
     data = {"to": "Me <me@x.com>, Alice <alice@x.com>", "cc": "bob@x.com"}
     js = f"""
-    import {{ buildReplyAllCc }} from '{_HELPER.as_posix()}';
+    import {{ buildReplyAllCc }} from '{module_url(_HELPER)}';
     console.log(JSON.stringify(buildReplyAllCc({json.dumps(data)}, 'me@x.com')));
     """
     cc = json.loads(_run(js))
@@ -59,7 +57,7 @@ def test_reply_all_excludes_all_of_my_addresses():
     # not just the active one.
     data = {"to": "Alice <alice@x.com>, me@work.com", "cc": "me@personal.com, bob@x.com"}
     js = f"""
-    import {{ buildReplyAllCc }} from '{_HELPER.as_posix()}';
+    import {{ buildReplyAllCc }} from '{module_url(_HELPER)}';
     console.log(JSON.stringify(buildReplyAllCc({json.dumps(data)}, ["me@work.com", "me@personal.com"])));
     """
     cc = json.loads(_run(js))

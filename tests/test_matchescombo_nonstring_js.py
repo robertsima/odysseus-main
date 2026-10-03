@@ -10,10 +10,11 @@ whole keydown handler. The guard treats any non-string combo as "no match".
 """
 import json
 import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
+
+from tests.helpers.node import module_url, run_module
 
 _REPO = Path(__file__).resolve().parent.parent
 _MOD = _REPO / "static" / "js" / "keyboard-shortcuts.js"
@@ -24,13 +25,10 @@ _EVENT = "{key:'k',ctrlKey:false,altKey:false,shiftKey:false,metaKey:false}"
 
 def _match(combo_js):
     js = f"""
-    import {{ _matchesCombo }} from '{_MOD.as_posix()}';
+    import {{ _matchesCombo }} from '{module_url(_MOD)}';
     console.log(JSON.stringify(_matchesCombo({_EVENT}, {combo_js})));
     """
-    proc = subprocess.run(
-        ["node", "--input-type=module"],
-        input=js, capture_output=True, text=True, cwd=str(_REPO), timeout=30,
-    )
+    proc = run_module(js)
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout.strip())
 

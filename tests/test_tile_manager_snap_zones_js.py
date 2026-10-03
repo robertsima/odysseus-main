@@ -2,11 +2,12 @@
 
 import json
 import shutil
-import subprocess
 import textwrap
 from pathlib import Path
 
 import pytest
+
+from tests.helpers.node import module_url, run_module
 
 _REPO = Path(__file__).resolve().parent.parent
 _HELPER = _REPO / "static" / "js" / "tileManager.js"
@@ -43,7 +44,7 @@ def _run_tile_case():
           disconnect() {{}}
         }};
 
-        const mod = await import('{_HELPER.as_posix()}');
+        const mod = await import('{module_url(_HELPER)}');
         const pick = (zone) => zone ? {{
           name: zone.name,
           rect: {{
@@ -72,14 +73,7 @@ def _run_tile_case():
         }}));
         """
     )
-    proc = subprocess.run(
-        ["node", "--input-type=module"],
-        input=script,
-        capture_output=True,
-        text=True,
-        cwd=str(_REPO),
-        timeout=30,
-    )
+    proc = run_module(script)
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout.strip())
 

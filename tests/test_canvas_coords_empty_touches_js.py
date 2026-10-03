@@ -9,10 +9,11 @@ The guard falls back to the event's own clientX/clientY in that case.
 """
 import json
 import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
+
+from tests.helpers.node import module_url, run_module
 
 _REPO = Path(__file__).resolve().parent.parent
 _MOD = _REPO / "static" / "js" / "editor" / "canvas-coords.js"
@@ -23,14 +24,11 @@ _CANVAS = "{width:800,height:600,getBoundingClientRect:()=>({width:400,height:30
 
 def _coords(event_js):
     js = f"""
-    import {{ canvasCoords }} from '{_MOD.as_posix()}';
+    import {{ canvasCoords }} from '{module_url(_MOD)}';
     const canvas = {_CANVAS};
     console.log(JSON.stringify(canvasCoords({event_js}, canvas)));
     """
-    proc = subprocess.run(
-        ["node", "--input-type=module"],
-        input=js, capture_output=True, text=True, cwd=str(_REPO), timeout=30,
-    )
+    proc = run_module(js)
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout.strip())
 
