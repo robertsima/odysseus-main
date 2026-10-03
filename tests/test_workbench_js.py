@@ -50,7 +50,7 @@ _DIFF = """diff --git a/src/a.py b/src/a.py
 
 def _run(script: str) -> dict:
     res = subprocess.run(["node", "--input-type=module", "-e", _PRELUDE + textwrap.dedent(script)],
-                         cwd=_REPO, capture_output=True, timeout=30, text=True)
+                         cwd=_REPO, capture_output=True, timeout=30, text=True, encoding="utf-8")
     if res.returncode != 0:
         raise AssertionError(f"node failed:\n{res.stderr}")
     lines = [ln for ln in res.stdout.splitlines() if ln.strip()]
@@ -116,7 +116,7 @@ def test_split_and_unified_tables_pair_changes_and_carry_line_data():
 
 def test_workbench_module_parses():
     for name in ("workbench.js", "diffView.js"):
-        res = subprocess.run(["node", "--check", str(_REPO / "static" / "js" / name)], capture_output=True, text=True)
+        res = subprocess.run(["node", "--check", str(_REPO / "static" / "js" / name)], capture_output=True, text=True, encoding="utf-8")
         assert res.returncode == 0, res.stderr
 
 
@@ -193,7 +193,7 @@ def _fmt_progress(calls: str) -> list:
     src = (_REPO / "static" / "js" / "workbench.js").read_text(encoding="utf-8")
     body = src[src.index("function fmtDur("):src.index("function progressHtml(")].replace("export function", "function")
     res = subprocess.run(["node", "-e", body + f"\nconsole.log(JSON.stringify([{calls}]));"],
-                         capture_output=True, timeout=30, text=True)
+                         capture_output=True, timeout=30, text=True, encoding="utf-8")
     assert res.returncode == 0, res.stderr
     return json.loads(res.stdout)
 
