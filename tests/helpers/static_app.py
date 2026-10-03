@@ -328,11 +328,26 @@ async ([selector, timeout]) => {
 """
 
 
-def probe(page, selector: str) -> dict | None:
+def expect(target, message: str | None = None):
+    """Playwright's retrying ``expect``, imported on first use so test modules
+    still import (and deselect) where Playwright is not installed."""
+    from playwright.sync_api import expect as _expect
+    return _expect(target, message)
+
+
+def probe(page, selector: str, *, wait: bool = True) -> dict | None:
+    """Box, paint and hit-test facts for ``selector``; ``None`` when absent.
+
+    Waits for the element to exist unless ``wait`` is false: parts of the UI
+    re-render from polled data, so a fixed moment may fall between renders.
+    """
+    if wait:
+        page.wait_for_selector(selector, state="attached")
     return page.evaluate(PROBE_JS, selector)
 
 
 def contrast(page, selector: str) -> float | None:
+    page.wait_for_selector(selector, state="attached")
     return page.evaluate(CONTRAST_JS, selector)
 
 
@@ -376,3 +391,102 @@ def set_checkbox(page, selector: str, checked: bool) -> None:
     page.evaluate(
         "([sel, checked]) => { const t = document.querySelector(sel); t.checked = checked;"
         " t.dispatchEvent(new Event('change', {bubbles: true})); }", [selector, checked])
+
+
+# ── Driving the app ─────────────────────────────────────────────────────────
+
+def visible_panels(page) -> list[str]:
+    """The Workbench tab panels that are drawn."""
+    return page.evaluate(
+        "[...document.querySelectorAll('#workbench-modal [data-wb-panel]')]"
+        ".filter(p => getComputedStyle(p).display !== 'none' && p.getBoundingClientRect().height > 0)"
+        ".map(p => p.dataset.wbPanel)")
+
+
+def open_workbench(page, *, activity: bool = True) -> None:
+    page.evaluate("window.workbenchModule.open()")
+    page.wait_for_function("!document.getElementById('workbench-modal').classList.contains('hidden')")
+    if activity:
+        page.click("#wb-tab-activity")
+        page.wait_for_function("document.getElementById('wb-tab-activity').classList.contains('active')")
+    settle(page, ".workbench-modal-content")
+
+
+def open_agents(page) -> None:
+    page.evaluate("window.agentsDashboard.open()")
+    page.wait_for_function("document.querySelectorAll('#agents-dashboard .ag-card').length === 3")
+    settle(page, ".agents-modal-content")
+
+
+def select_agent(page, sid: str) -> None:
+    page.click(f'.ag-card-select[data-sid="{sid}"]')
+    page.wait_for_function("(sid) => document.querySelector('#ag-detail')?.dataset.sessionId === sid", arg=sid)
+
+
+def drag(page, start: tuple[float, float], end: tuple[float, float]) -> None:
+    """Press at ``start``, move to ``end`` and release, as a user drags."""
+    page.mouse.move(*start)
+    page.mouse.down()
+    page.mouse.move(*end)
+    page.mouse.up()
+
+
+def dock_workbench(page, side: str) -> None:
+    """Attach the Workbench to the right with its button, or to the left with
+    the title-bar snap gesture (there is no left-dock button)."""
+    if side == "right":
+        page.click("#wb-dock-right")
+    else:
+        header = probe(page, "#workbench-modal .modal-header h4")
+        edge = page.evaluate("document.querySelector('#sidebar').getBoundingClientRect().right")
+        y = header["top"] + min(header["bottom"] - header["top"], 24) / 2
+        drag(page, (header["left"] + 25, y), (edge + 2, y))
+    page.wait_for_function("(side) => document.getElementById('workbench-modal').classList.contains(`modal-${side}-docked`)",
+                           arg=side)
+    settle(page, ".workbench-modal-content")
+
+
+def resize_workbench_dock(page, width: int, side: str = "right") -> None:
+    """Drag the dock's own seam, not a test-only inline width."""
+    page.wait_for_function(
+        "(side) => getComputedStyle(document.querySelector(`.edge-dock-resize-handle-${side}`)).display !== 'none'",
+        arg=side)
+    grip = probe(page, f".edge-dock-resize-handle-{side}")
+    y = min(page.viewport_size["height"] // 2, 350)
+    if side == "left":
+        inner = page.evaluate(
+            "Math.max(document.querySelector('#sidebar').classList.contains('hidden') ? 0"
+            " : document.querySelector('#sidebar').getBoundingClientRect().right,"
+            " document.querySelector('#icon-rail').getBoundingClientRect().right)")
+        target = inner + width
+    else:
+        target = width_of(page) - width
+    drag(page, (grip["left"] + 5, y), (target, y))
+    page.wait_for_function(
+        "(w) => Math.abs(document.querySelector('.workbench-modal-content').getBoundingClientRect().width - w) < 15",
+        arg=width)
+    settle(page, ".workbench-modal-content")
+
+
+def assert_inside_parent(page, selectors) -> None:
+    """Each control stays inside its own panel, not merely inside the viewport."""
+    for selector, parent in selectors:
+        page.wait_for_selector(f"{parent} {selector}", state="attached")
+        result = page.evaluate(
+            """([target, parent]) => { const el = document.querySelector(target); el.scrollIntoView({block: 'center'});
+              const p = el.closest(parent), a = el.getBoundingClientRect(), b = p.getBoundingClientRect();
+              return {left: a.left, right: a.right, parentLeft: b.left, parentRight: b.right, width: a.width,
+                      visible: getComputedStyle(el).display !== 'none'}; }""",
+            [f"{parent} {selector}", parent])
+        assert (result["visible"] and result["width"] > 0 and result["left"] >= result["parentLeft"] - 2
+                and result["right"] <= result["parentRight"] + 2), (selector, result)
+
+
+def type_into_editor(page, text: str) -> None:
+    """Append to the Workbench editor's draft as typing would."""
+    page.evaluate("(text) => { const t = document.querySelector('#wb-editor-text'); t.value += text;"
+                  " t.dispatchEvent(new Event('input', {bubbles: true})); }", text)
+
+
+def editor_value(page) -> str | None:
+    return page.evaluate("document.querySelector('#wb-editor-text')?.value ?? null")

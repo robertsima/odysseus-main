@@ -49,8 +49,9 @@ def _playwright():
 @pytest.fixture(scope="session")
 def browser(_playwright):
     """The process's one headless Chrome."""
-    from playwright.sync_api import Error
+    from playwright.sync_api import Error, expect
 
+    expect.set_options(timeout=DEFAULT_TIMEOUT_MS)
     exe = os.environ.get("ODYSSEUS_TEST_CHROMIUM")
     options = {"executable_path": exe} if exe else {"channel": "chrome"}
     try:
