@@ -382,21 +382,23 @@
           <button id="wb-tab-activity" class="memory-tab active" data-wb-tab="activity" role="tab" aria-controls="wb-panel-activity" aria-selected="true" tabindex="0">Activity<span class="wb-tab-badge" data-wb-badge="activity" hidden></span></button>
           <button id="wb-tab-changes" class="memory-tab" data-wb-tab="changes" role="tab" aria-controls="wb-changes" aria-selected="false" tabindex="-1">Changes<span class="wb-tab-badge" data-wb-badge="changes" hidden></span></button>
           <button id="wb-tab-commits" class="memory-tab" data-wb-tab="commits" role="tab" aria-controls="wb-commits" aria-selected="false" tabindex="-1">Commits<span class="wb-tab-badge" data-wb-badge="commits" hidden></span></button>
-          <button id="wb-tab-prs" class="memory-tab" data-wb-tab="prs" role="tab" aria-controls="wb-prs" aria-selected="false" tabindex="-1">Pull Requests</button>
+          <button id="wb-tab-prs" class="memory-tab" data-wb-tab="prs" role="tab" aria-label="Pull Requests" aria-controls="wb-prs" aria-selected="false" tabindex="-1"><span class="wb-pr-long">Pull Requests</span><span class="wb-pr-short" aria-hidden="true">PRs</span></button>
         </div>
         <div id="wb-panel-activity" class="wb-panel" data-wb-panel="activity" role="tabpanel" aria-labelledby="wb-tab-activity">
           <div class="ag-run-control" aria-label="Run control summary">
-            <section class="ag-run-summary"><h3 id="ag-run-title">RUN SUMMARY</h3><p id="ag-run-summary-meta">No run selected · activity ready</p></section>
+            <section class="ag-run-summary"><div class="ag-run-heading"><span class="ag-run-eyebrow">Run activity</span><span class="ag-run-state" id="ag-run-state" role="status" aria-live="polite">Ready</span></div><h3 id="ag-run-title">Select a run to inspect</h3><p id="ag-run-summary-meta">No run selected · activity ready</p></section>
             <section class="ag-run-timeline"><h3>RUN TIMELINE</h3><ol id="ag-run-timeline-list"><li>Run events will appear here as they are recorded.</li></ol></section>
             <section class="ag-run-console"><h3>Output and artifacts</h3><div class="ag-run-console-output" id="ag-run-console-output">Actual run output and source links appear here when available.</div></section>
           </div>
           <aside class="ag-run-detail" aria-label="Run details"><section><h3>RUN DETAILS</h3><dl><div><dt>Agent</dt><dd id="ag-run-agent">—</dd></div><div><dt>Started</dt><dd id="ag-run-started">—</dd></div><div><dt>Status</dt><dd id="ag-run-status">Ready</dd></div></dl></section><section><h3>ACTIVITY</h3><p id="ag-run-activity-note">Inspect the recorded per-run event history below.</p></section></aside>
           <div class="wb-toolbar">
-            <select id="wb-scope" class="wb-select" title="Which sessions to follow" aria-label="Scope"><option value="session">This chat</option><option value="all">All sessions</option></select>
-            <select id="wb-filter" class="wb-select" title="Filter by source" aria-label="Source"><option value="">All sources</option><option value="odysseus">Odysseus</option><option value="claude_code">Claude Code</option><option value="session">Sub-agents</option><option value="pipeline">Pipelines</option><option value="bg_job">Background jobs</option><option value="worktree">Worktree</option><option value="system">System</option></select>
+            <details class="wb-filter-options"><summary>Filters</summary><div class="wb-filter-fields">
+              <select id="wb-scope" class="wb-select" title="Which sessions to follow" aria-label="Scope"><option value="session">This chat</option><option value="all">All sessions</option></select>
+              <select id="wb-filter" class="wb-select" title="Filter by source" aria-label="Source"><option value="">All sources</option><option value="odysseus">Odysseus</option><option value="claude_code">Claude Code</option><option value="session">Sub-agents</option><option value="pipeline">Pipelines</option><option value="bg_job">Background jobs</option><option value="worktree">Worktree</option><option value="system">System</option></select>
+            </div></details>
             <span class="wb-spacer"></span>
-            <span class="wb-live" id="wb-live" title="Live feed status">Live</span>
-            <button type="button" class="wb-btn" id="wb-pause" title="Pause the live feed">Pause</button>
+            <span class="wb-live" id="wb-live" role="status" aria-live="polite" title="Activity feed connection (separate from run status)">Feed offline</span>
+            <button type="button" class="wb-btn" id="wb-pause" title="Pause feed updates; does not pause an agent run">Pause feed</button>
             <button type="button" class="wb-btn" id="wb-clear" title="Clear the visible feed">Clear</button>
           </div>
           <div class="wb-activity" id="wb-activity"></div>

@@ -63,6 +63,7 @@ const state = {
   events: [],
   runs: new Map(),          // run_id → run summary (built from events)
   paused: false,
+  feedConnection: 'off', // SSE connection, independent of the selected run's status
   focusRun: null,
   // Approved repositories for the Changes / Commits pickers.
   repos: [],
@@ -653,12 +654,17 @@ function disconnect() {
   setLive('off');
 }
 function setLive(mode) {
+  state.feedConnection = mode;
+  renderFeedStatus();
+}
+function renderFeedStatus() {
   const el = $('wb-live');
   if (!el) return;
-  const m = state.paused ? 'paused' : mode;
-  el.dataset.state = m;
-  const labels = { live: 'Activity live', reconnecting: 'Activity reconnecting…', paused: 'Activity paused', off: 'Activity offline' };
-  el.textContent = labels[m] || m;
+  el.dataset.state = state.paused ? 'paused' : state.feedConnection;
+  const labels = { live: 'Feed live', reconnecting: 'Feed reconnecting…', off: 'Feed offline' };
+  el.textContent = state.paused
+    ? `Feed paused${state.feedConnection === 'reconnecting' ? ' · reconnecting…' : ''}`
+    : (labels[state.feedConnection] || 'Feed offline');
 }
 
 // Follow the chat's current session. There is no session-change event, so a
@@ -786,9 +792,18 @@ function renderAgamemnonRunControl(runs) {
   const title = $('ag-run-title');
   if (!title) return;
   const run = (state.focusRun && state.runs.get(state.focusRun)) || runs[0] || null;
+  const pause = $('wb-pause');
+  if (pause) {
+    const explanation = run && !isLive(run.status)
+      ? 'Selected run is finished. Pause incoming feed updates; this does not pause or resume an agent run.'
+      : 'Pause incoming feed updates; this does not pause or resume an agent run.';
+    pause.title = explanation;
+    pause.setAttribute('aria-description', explanation);
+  }
   const set = (id, value) => { const el = $(id); if (el) el.textContent = value; };
   if (!run) {
-    title.textContent = 'RUN SUMMARY';
+    title.textContent = 'Select a run to inspect';
+    set('ag-run-state', 'Ready');
     set('ag-run-summary-meta', 'No run selected · activity ready');
     set('ag-run-agent', '—'); set('ag-run-started', '—'); set('ag-run-status', 'Ready');
     set('ag-run-activity-note', 'Inspect the recorded per-run event history below.');
@@ -798,7 +813,8 @@ function renderAgamemnonRunControl(runs) {
   }
   const events = (run.events || []).slice(-8);
   const data = run.data || {};
-  title.textContent = `RUN ${String(run.run_id || '').slice(0, 8).toUpperCase()} / ${String(run.status || 'running').replaceAll('_', ' ').toUpperCase()}`;
+  title.textContent = run.title || `Run ${String(run.run_id || '').slice(0, 8)}`;
+  set('ag-run-state', String(run.status || 'running').replaceAll('_', ' '));
   set('ag-run-summary-meta', `${plural(events.length, 'recorded event')} · ${plural(run.tools || 0, 'tool')} · last update ${fmtTime((events.at(-1) || {}).ts || run.started_at)}`);
   set('ag-run-agent', SOURCE_LABEL[run.source] || run.source || 'Agent');
 
@@ -1555,9 +1571,9 @@ function wireWindow() {
   $('wb-filter')?.addEventListener('change', (e) => { state.prefs.filter = e.target.value; savePrefs(); state.focusRun = null; renderActivity(); });
   $('wb-pause')?.addEventListener('click', (e) => {
     state.paused = !state.paused;
-    e.currentTarget.textContent = state.paused ? 'Resume' : 'Pause';
+    e.currentTarget.textContent = state.paused ? 'Resume feed' : 'Pause feed';
     e.currentTarget.classList.toggle('wb-btn-primary', state.paused);
-    setLive(state.es ? 'live' : 'off');
+    renderFeedStatus();
     renderActivity();
   });
   $('wb-clear')?.addEventListener('click', () => { state.events = []; state.runs.clear(); state.focusRun = null; renderActivity(); });

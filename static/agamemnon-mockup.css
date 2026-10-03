@@ -28,6 +28,23 @@
 }
 .ag-page-heading,.ag-context-rail,.ag-phalanx-title,.ag-phalanx-summary,.ag-workbench-title,.ag-run-control,.ag-run-detail{display:none}
 html[data-style="agamemnon"] body{font-family:'Space Grotesk',system-ui,sans-serif;background-color:var(--ag-bg);color:var(--ag-text)}
+/* Keep the chat work surface translucent when an effect is selected. Reading
+   surfaces remain dark enough to preserve contrast and the unselected theme
+   stays solid. */
+html[data-style="agamemnon"] body[class*="bg-pattern-"] .chat-container{background:color-mix(in srgb,var(--ag-bg) 76%,transparent)}
+/* Animated strokes remain visible above the opaque reading cards too, at a
+   restrained strength; pointer events and the saved intensity still apply. */
+html[data-style="agamemnon"] body[class*="bg-pattern-"] :is(#synapse-canvas,#rain-canvas,#constellations-canvas,#perlin-flow-canvas,#petals-canvas,#sparkles-canvas,#embers-canvas){z-index:1002!important;opacity:calc(var(--bg-effect-intensity,1) * .6);pointer-events:none}
+/* Effects pass through the open gutters, never in front of readable cards,
+   form controls or modal text. The selected effect remains visible through
+   the translucent board backing without weakening the reading surfaces. */
+html[data-style="agamemnon"] body[class*="bg-pattern-"] :is(#workbench-modal,#agents-dashboard):not(.hidden){z-index:1003!important;background:color-mix(in srgb,var(--ag-bg) 36%,transparent)!important}
+html[data-style="agamemnon"] body[class*="bg-pattern-"] :is(.workbench-modal-content,.agents-modal-content){background:color-mix(in srgb,var(--ag-bg) 36%,transparent)!important}
+html[data-style="agamemnon"] body[class*="bg-pattern-"] #workbench-modal .ag-run-summary{background:var(--ag-bg)!important;padding:6px 8px 10px!important}
+/* An undocked board replaces Scribe. Do not let its transcript ghost through
+   the translucent effect gutters; docked boards must still show the chat. */
+html[data-style="agamemnon"] body[class*="bg-pattern-"]:has(:is(#workbench-modal,#agents-dashboard):not(.hidden):not(.modal-right-docked):not(.modal-left-docked)) .chat-container{visibility:hidden}
+html[data-style="agamemnon"] body[class*="bg-pattern-"] #chat-history{background:color-mix(in srgb,var(--ag-panel) 89%,transparent)}
 html[data-style="agamemnon"] .ody-brand-name,html[data-style="agamemnon"] .ody-page-title{display:none!important}
 html[data-style="agamemnon"] .sidebar{width:240px!important;min-width:240px!important;background:var(--ag-rail)!important;border-right:2px solid var(--ag-border)}
 html[data-style="agamemnon"] .sidebar .sidebar-header{height:88px;min-height:88px;padding:0 24px 0 32px;align-items:flex-start;border:0!important;box-shadow:none!important}
@@ -265,6 +282,71 @@ html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left
 html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .wb-panel[data-wb-panel="activity"]{display:flex;flex-direction:column}
 html[data-style="agamemnon"] #workbench-modal .wb-panel.hidden{display:none!important}
 
+/* A work surface, not a stack of equally loud boxes. The run identity is a
+   quiet masthead, while the live feed and its filters are the primary work. */
+html[data-style="agamemnon"] #workbench-modal .workbench-modal-body{container-type:inline-size}
+html[data-style="agamemnon"] #workbench-modal .wb-panel[data-wb-panel="activity"]{display:grid;grid-template-columns:minmax(0,1fr);gap:14px;align-content:start}
+html[data-style="agamemnon"] #workbench-modal .ag-run-control{display:contents}
+html[data-style="agamemnon"] #workbench-modal .ag-run-control>section{grid-column:1;min-width:0;border:1px solid var(--ag-border);padding:16px 18px}
+html[data-style="agamemnon"] #workbench-modal .ag-run-summary{grid-row:1;padding:4px 0 16px!important;border:0!important;border-bottom:1px solid var(--ag-border-strong)!important;background:transparent}
+html[data-style="agamemnon"] #workbench-modal .ag-run-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}
+html[data-style="agamemnon"] #workbench-modal .ag-run-eyebrow{font:700 11px/1.4 'Space Grotesk';letter-spacing:.13em;text-transform:uppercase;color:var(--ag-gold)}
+html[data-style="agamemnon"] #workbench-modal .ag-run-state{padding:3px 9px;border-left:2px solid var(--ag-gold);background:var(--ag-raised);font:600 12px/1.4 'Space Grotesk';color:var(--ag-text);text-transform:capitalize}
+html[data-style="agamemnon"] #workbench-modal .ag-run-summary h3{margin:0 0 4px;font:700 clamp(18px,2.5vw,23px)/1.25 'Space Grotesk';letter-spacing:0;text-transform:none;color:var(--ag-text);overflow-wrap:anywhere}
+html[data-style="agamemnon"] #workbench-modal .ag-run-summary p{margin:0;font-size:13px;line-height:1.4}
+html[data-style="agamemnon"] #workbench-modal .wb-panel[data-wb-panel="activity"]>.wb-toolbar{grid-column:1;grid-row:2;min-width:0}
+html[data-style="agamemnon"] #workbench-modal .wb-panel[data-wb-panel="activity"]>.wb-activity{grid-column:1;grid-row:3;min-width:0;min-height:260px}
+html[data-style="agamemnon"] #workbench-modal .ag-run-timeline{grid-row:4}
+html[data-style="agamemnon"] #workbench-modal .ag-run-console{grid-row:5}
+html[data-style="agamemnon"] #workbench-modal .ag-run-detail{grid-column:1;grid-row:6;width:100%;margin:0;padding:16px 18px;border:1px solid var(--ag-border);background:var(--ag-rail)}
+html[data-style="agamemnon"] #workbench-modal .ag-run-detail section+section{margin-top:14px;padding-top:14px}
+html[data-style="agamemnon"] #workbench-modal .workbench-modal-body>.wb-tabs{margin:0;gap:0;border-bottom:1px solid var(--ag-border-strong)}
+/* Keep the existing select controls in their usual desktop positions. */
+#workbench-modal .wb-filter-options,#workbench-modal .wb-filter-fields{display:contents}
+#workbench-modal .wb-filter-options>summary{display:none}
+#workbench-modal .wb-pr-short{display:none}
+html[data-style="agamemnon"] #workbench-modal .wb-activity{border-width:1px}
+@container (min-width:850px){
+ html[data-style="agamemnon"] #workbench-modal .wb-panel[data-wb-panel="activity"]{grid-template-columns:minmax(0,1fr) minmax(260px,32%);gap:14px 22px}
+ html[data-style="agamemnon"] #workbench-modal .ag-run-control>.ag-run-summary{grid-column:1/-1}
+ html[data-style="agamemnon"] #workbench-modal .wb-panel[data-wb-panel="activity"]>.wb-toolbar{grid-column:1;grid-row:2}
+ html[data-style="agamemnon"] #workbench-modal .wb-panel[data-wb-panel="activity"]>.wb-activity{grid-column:1;grid-row:3/6;align-self:start}
+ html[data-style="agamemnon"] #workbench-modal .ag-run-control>.ag-run-timeline{grid-column:2;grid-row:3}
+ html[data-style="agamemnon"] #workbench-modal .ag-run-control>.ag-run-console{grid-column:2;grid-row:4}
+ html[data-style="agamemnon"] #workbench-modal .ag-run-detail{grid-column:2;grid-row:5}
+}
+/* Docked panels always take the narrow path, independent of viewport width. */
+html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .wb-panel[data-wb-panel="activity"]{display:grid;grid-template-columns:minmax(0,1fr)}
+html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .ag-run-summary{grid-column:1}
+
+/* Phalanx: compact but legible command hierarchy, with one adaptable card
+   column in half-screen instead of desktop-sized cards squeezed together. */
+html[data-style="agamemnon"] #agents-dashboard .agents-dashboard-body{container-type:inline-size}
+html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-head{align-items:flex-start;gap:10px 18px;padding-bottom:12px;border-bottom:1px solid var(--ag-border)}
+html[data-style="agamemnon"] #agents-dashboard .ag-triage{gap:8px}
+html[data-style="agamemnon"] #agents-dashboard .ag-head-actions{gap:4px 9px}
+html[data-style="agamemnon"] #agents-dashboard .ag-head-actions .wb-btn-ghost{padding-inline:7px}
+html[data-style="agamemnon"] #agents-dashboard .ag-fleet-tools{gap:8px}
+html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-list .ag-card-grid{grid-template-columns:minmax(0,1fr);gap:12px;max-width:1050px}
+html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-list .ag-card{grid-template-columns:48px minmax(0,1fr) auto;gap:14px;min-height:100px;padding:14px 16px;border-width:1px!important}
+html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-expanded .ag-fleet-list .ag-card{grid-template-columns:64px minmax(0,1fr) auto}
+html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-expanded .ag-card-avatar .ag-bot{width:64px;height:64px}
+html[data-style="agamemnon"] #agents-dashboard .ag-card-actions .wb-icon-btn{min-height:40px}
+html[data-style="agamemnon"] #agents-dashboard .ag-card-copy{overflow:visible}
+html[data-style="agamemnon"] #agents-dashboard .ag-row-latest{font-family:'Space Grotesk';line-height:1.4}
+html[data-style="agamemnon"] #agents-dashboard :is(.ag-row-latest,.ag-row-meta-inline,.ag-row-dur){color:var(--ag-muted)}
+html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-detail{min-height:0;padding:20px;border-width:1px!important}
+html[data-style="agamemnon"] #agents-dashboard .ag-appearance{border-color:var(--ag-border);margin:16px 0;padding:14px}
+html[data-style="agamemnon"] #agents-dashboard .ag-appearance-options{grid-template-columns:repeat(auto-fit,minmax(min(100%,125px),1fr));gap:8px}
+@container (min-width:800px){
+ html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-list .ag-card-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@container (max-width:620px){
+ html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-head-actions{margin-left:0}
+ html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-list .ag-card{grid-template-columns:40px minmax(0,1fr) auto;gap:10px;padding:12px}
+ html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-expanded .ag-card-avatar .ag-bot{width:40px;height:40px}
+}
+
 /* ── Narrower boards ──────────────────────────────────────────────────── */
 @media(max-width:1179px){
  html[data-style="agamemnon"] .wb-panel[data-wb-panel="activity"]{grid-template-columns:minmax(0,1fr)}
@@ -279,14 +361,12 @@ html[data-style="agamemnon"] #workbench-modal .wb-panel.hidden{display:none!impo
 @media(max-width:768px){
  /* Sparse runs should not put the live feed a full viewport below the fold. */
  html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .ag-run-control{grid-template-rows:auto auto auto;gap:10px}
- html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .ag-run-control>section{padding:14px;min-height:0}
+ html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .ag-run-control>section{min-height:0}
  html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) :is(.ag-run-timeline,.ag-run-console,.ag-run-detail){overflow:visible;max-height:none}
  html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .ag-run-detail{padding:14px}
  /* Activity is the selected tab's working area. Put its live controls and
     feed before secondary run metadata on phones, without hiding details. */
- html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .wb-panel[data-wb-panel="activity"]>.wb-toolbar{grid-row:2}
- html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .wb-panel[data-wb-panel="activity"]>.wb-activity{grid-row:3}
- html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .ag-run-detail{grid-row:4}
+ /* Feed now precedes the supporting timeline/output in the narrow layout. */
  html[data-style="agamemnon"] .chat-container{padding:14px 12px calc(12px + env(safe-area-inset-bottom,0px))}
  /* Leave the top-right corner to the sidebar's hamburger. */
  html[data-style="agamemnon"] .ag-page-heading{padding-right:48px;margin-bottom:8px}
@@ -314,8 +394,22 @@ html[data-style="agamemnon"] #workbench-modal .wb-panel.hidden{display:none!impo
 
  html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-row-name{white-space:normal;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;line-height:1.3}
  html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-row-dur{font-size:11px}
- html[data-style="agamemnon"] #workbench-modal .workbench-modal-body>.wb-tabs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0}
+ html[data-style="agamemnon"] #workbench-modal .workbench-modal-body>.wb-tabs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:0}
  html[data-style="agamemnon"] #workbench-modal .wb-tabs .memory-tab{width:100%;justify-content:center}
+ html[data-style="agamemnon"] #workbench-modal .wb-tabs .memory-tab{padding-inline:3px;font-size:11px}
+ html[data-style="agamemnon"] #workbench-modal .wb-pr-long{display:none}
+ html[data-style="agamemnon"] #workbench-modal .wb-pr-short{display:inline}
+ html[data-style="agamemnon"] #workbench-modal .ag-run-summary{padding-bottom:10px!important}
+ html[data-style="agamemnon"] #workbench-modal .wb-panel[data-wb-panel="activity"]{gap:10px}
+ html[data-style="agamemnon"] #workbench-modal .wb-filter-options{display:block;order:0}
+ html[data-style="agamemnon"] #workbench-modal .wb-filter-options>summary{display:list-item;cursor:pointer;min-height:44px;box-sizing:border-box;padding:12px 6px;color:var(--ag-gold);font-size:12px}
+ html[data-style="agamemnon"] #workbench-modal .wb-filter-options>summary:focus-visible{outline:2px solid var(--ag-gold)}
+ html[data-style="agamemnon"] #workbench-modal .wb-filter-options:not([open]) .wb-filter-fields{display:none}
+ html[data-style="agamemnon"] #workbench-modal .wb-filter-options[open]{flex-basis:100%}
+ html[data-style="agamemnon"] #workbench-modal .wb-filter-options[open] .wb-filter-fields{display:flex;gap:8px;flex-wrap:wrap;padding:4px 0 10px}
+ html[data-style="agamemnon"] #workbench-modal .wb-toolbar .wb-spacer{display:none}
+ html[data-style="agamemnon"] #workbench-modal .wb-toolbar{gap:4px;justify-content:space-between}
+ html[data-style="agamemnon"] #workbench-modal .wb-toolbar :is(#wb-pause,#wb-clear){min-height:44px}
  html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-detail{padding:16px}
  html[data-style="agamemnon"] .ag-run-control>section{padding:16px 18px}
  html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-body>.wb-panel{height:auto;min-height:420px;padding:12px}
@@ -379,7 +473,7 @@ html[data-style] .sidebar.right-side .sidebar-brand{gap:10px;padding:0}
 @container wbpanel (max-width:610px){#workbench-modal .wb-branch-picker{width:100%}#workbench-modal .wb-repo-select{flex:1;max-width:100%}}
 /* Let all four views remain reachable even in a hand-resized dock. */
 #workbench-modal .workbench-modal-content{container:wbwindow / inline-size}
-@container wbwindow (max-width:660px){html[data-style="agamemnon"] #workbench-modal .workbench-modal-body>.wb-tabs,#workbench-modal .workbench-modal-body>.wb-tabs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}#workbench-modal .wb-tabs .memory-tab{justify-content:center;min-width:0}}
+@container wbwindow (max-width:660px){#workbench-modal .workbench-modal-body>.wb-tabs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}html[data-style="agamemnon"] #workbench-modal .workbench-modal-body>.wb-tabs{grid-template-columns:repeat(4,minmax(0,1fr))}#workbench-modal .wb-tabs .memory-tab{justify-content:center;min-width:0}}
 @container wbpane (max-width:460px){#workbench-modal .wb-diff-body:after{content:'↔ Scroll for long lines';display:block;position:sticky;left:0;width:max-content;padding:4px 8px;background:var(--panel);color:var(--wb-muted);font-size:11px}}
 /* Font/Layout previously required horizontal scrolling even at 1440px. */
 #theme-modal .admin-card:has(#theme-font-select) .theme-fd-row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
@@ -407,13 +501,16 @@ html[data-style="agamemnon"] #agents-dashboard :is(.ag-card,.ag-detail,.ag-launc
  html[data-style="agamemnon"] #agents-dashboard .ag-head{display:flex;flex-wrap:wrap;gap:8px}
  html[data-style="agamemnon"] #agents-dashboard .ag-head-actions{width:100%;display:flex;flex-wrap:wrap;gap:6px}
  html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-list .ag-card{grid-template-columns:48px minmax(0,1fr);column-gap:12px;row-gap:4px;min-height:0;padding:16px}
+ html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-expanded .ag-fleet-list .ag-card{grid-template-columns:48px minmax(0,1fr)}
  html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-expanded .ag-card-avatar .ag-bot{width:48px;height:48px}
  html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-card-actions{grid-column:2;grid-row:2;justify-content:flex-start;align-self:center}
  html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-card-actions .wb-icon-btn{width:44px;height:44px}
  /* At phone width names and latest activity get the full copy column. Keep
     the two labeled, touch-sized actions together underneath rather than
     stranding them in a thin right-hand column. */
- html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-fleet-list .ag-bot-card{grid-template-columns:34px minmax(0,1fr);padding:8px 10px}
+ html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-fleet-list .ag-bot-card{grid-template-columns:34px minmax(0,1fr);row-gap:0;padding:7px 10px}
  html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-fleet-list .ag-card-actions{grid-column:2;grid-row:2;justify-self:start}
+ html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-card-actions .wb-icon-btn{color:var(--ag-text);background:var(--ag-raised);border:1px solid var(--ag-border-strong);padding-inline:10px}
+ html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-card-actions .wb-icon-btn:focus-visible{outline:2px solid var(--ag-gold);outline-offset:2px}
  html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-row-dur{font-size:10px}
 }
