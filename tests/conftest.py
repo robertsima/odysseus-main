@@ -10,17 +10,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Shared fixtures and guards live in tests/plugins/, one module per concern.
 pytest_plugins = [
     "tests.plugins.network_guard",
+    "tests.plugins.database",
 ]
 
-# Importing core.database below runs init_db() at import time, and its default
-# (sqlite:///./data/app.db) can't be opened in a clean worktree because SQLite
-# won't create the missing ./data parent dir - pytest then dies during
-# collection, before any test module loads. Default to an in-memory DB for the
-# test session so collection is deterministic and writes no repo-local
-# artifacts. An explicit DATABASE_URL (a real test/CI database) is preserved.
-# This only unblocks collection/import-time init; it does not provide a shared
-# file-backed DB across processes - tests needing that must set DATABASE_URL.
-os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
+# Importing core.database below runs init_db() at import time against
+# DATABASE_URL. Unless DATABASE_URL is set, each test process gets its own
+# SQLite file in a temporary folder, shared by all of its threads and removed
+# at exit (tests/plugins/database.py). An explicit DATABASE_URL is preserved.
+from tests.plugins.database import use_process_database  # noqa: E402
+
+use_process_database()
 # Never append test output to the deployment's data/logs/app.log.
 os.environ["ODYSSEUS_FILE_LOG"] = "0"
 
