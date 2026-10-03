@@ -397,8 +397,8 @@
               <select id="wb-filter" class="wb-select" title="Filter by source" aria-label="Source"><option value="">All sources</option><option value="odysseus">Odysseus</option><option value="claude_code">Claude Code</option><option value="session">Sub-agents</option><option value="pipeline">Pipelines</option><option value="bg_job">Background jobs</option><option value="worktree">Worktree</option><option value="system">System</option></select>
             </div></details>
             <span class="wb-spacer"></span>
-            <span class="wb-live" id="wb-live" title="Live feed status">Live</span>
-            <button type="button" class="wb-btn" id="wb-pause" title="Pause the live feed">Pause</button>
+            <span class="wb-live" id="wb-live" role="status" aria-live="polite" title="Activity feed connection (separate from run status)">Feed offline</span>
+            <button type="button" class="wb-btn" id="wb-pause" title="Pause feed updates; does not pause an agent run">Pause feed</button>
             <button type="button" class="wb-btn" id="wb-clear" title="Clear the visible feed">Clear</button>
           </div>
           <div class="wb-activity" id="wb-activity"></div>

@@ -552,13 +552,57 @@ def test_compact_workbench_filters_keyboard_long_title_and_status(open_app, widt
     page.eval("document.querySelector('.wb-filter-options summary').click()")
     assert not page.probe('#wb-filter')['visible']
     page.click('#wb-pause')
-    assert page.eval("document.getElementById('wb-pause').textContent") == 'Resume'
+    assert page.eval("document.getElementById('wb-pause').textContent") == 'Resume feed'
     page.click('#wb-pause')
     page.eval("document.getElementById('ag-run-title').textContent = 'ExtremelyLongUnbrokenRunName'.repeat(12)")
     assert_no_sideways_scroll(page, '.workbench-modal-content')
     assert page.probe('#ag-run-title')['right'] <= width
     page.click('#wb-tab-prs')
     assert visible_panels(page) == ['prs']
+
+
+@pytest.mark.parametrize('width', [390, 700])
+def test_finished_run_feed_reconnect_and_keyboard_pause(open_app, server, width):
+    # SSE is deliberately unavailable in the static fixture: the feed retries
+    # while the durable run remains finished. A feed pause is never a run pause.
+    server.state.run_status = 'finished'
+    try:
+        page = open_app(width)
+        open_workbench(page)
+        page.wait_for("document.getElementById('ag-run-state').textContent === 'finished'")
+        page.wait_for("document.getElementById('wb-live').dataset.state === 'reconnecting'")
+        assert page.eval("document.getElementById('wb-live').textContent") == 'Feed reconnecting…'
+        assert page.eval("document.getElementById('wb-live').getAttribute('role')") == 'status'
+        assert 'finished' in page.eval("document.getElementById('wb-pause').getAttribute('aria-description')")
+        assert page.eval("document.getElementById('wb-pause').textContent") == 'Pause feed'
+        page.eval("document.getElementById('wb-pause').focus()")
+        page.press(' ', code='Space', key_code=32)
+        assert page.eval("document.getElementById('wb-pause').textContent") == 'Resume feed'
+        assert page.eval("document.getElementById('wb-live').textContent") == 'Feed paused · reconnecting…'
+        assert page.eval("document.getElementById('ag-run-state').textContent") == 'finished'
+        page.press(' ', code='Space', key_code=32)
+        assert page.eval("document.getElementById('wb-live').textContent") == 'Feed reconnecting…'
+        assert page.eval("document.getElementById('wb-pause').textContent") == 'Pause feed'
+        page.click('#wb-clear')
+        assert 'does not pause' in page.eval("document.getElementById('wb-pause').title")
+    finally:
+        server.state.run_status = 'running'
+
+
+def test_phone_phalanx_actions_and_muted_metadata(open_app):
+    page = open_app(390)
+    open_agents(page)
+    card = page.probe('.ag-fleet-compact .ag-bot-card')
+    actions = page.probe('.ag-fleet-compact .ag-card-actions')
+    assert actions['bottom'] <= card['bottom'] and actions['left'] < card['right']
+    for selector in ('.ag-fleet-compact .ag-card-actions button[data-ag="open-chat"]',
+                     '.ag-fleet-compact .ag-card-actions button[data-ag="stop-chat"]'):
+        button = page.probe(selector)
+        assert button['width'] >= 44 and button['height'] >= 44
+    assert page.probe('.ag-fleet-compact .ag-row-latest')['color'] == page.probe('.ag-row-dur')['color']
+    assert page.contrast('.ag-fleet-compact .ag-row-latest') >= 4.5
+    page.eval("document.querySelector('.ag-fleet-compact .ag-card-actions button').focus()")
+    assert page.eval("document.activeElement.matches('.ag-fleet-compact .ag-card-actions button')")
 
 
 def test_workbench_200_percent_zoom_equivalent_keeps_actions(open_app):

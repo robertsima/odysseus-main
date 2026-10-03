@@ -334,6 +334,7 @@ html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.mod
 html[data-style="agamemnon"] #agents-dashboard .ag-card-actions .wb-icon-btn{min-height:40px}
 html[data-style="agamemnon"] #agents-dashboard .ag-card-copy{overflow:visible}
 html[data-style="agamemnon"] #agents-dashboard .ag-row-latest{font-family:'Space Grotesk';line-height:1.4}
+html[data-style="agamemnon"] #agents-dashboard :is(.ag-row-latest,.ag-row-meta-inline,.ag-row-dur){color:var(--ag-muted)}
 html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-detail{min-height:0;padding:20px;border-width:1px!important}
 html[data-style="agamemnon"] #agents-dashboard .ag-appearance{border-color:var(--ag-border);margin:16px 0;padding:14px}
 html[data-style="agamemnon"] #agents-dashboard .ag-appearance-options{grid-template-columns:repeat(auto-fit,minmax(min(100%,125px),1fr));gap:8px}
@@ -507,7 +508,9 @@ html[data-style="agamemnon"] #agents-dashboard :is(.ag-card,.ag-detail,.ag-launc
  /* At phone width names and latest activity get the full copy column. Keep
     the two labeled, touch-sized actions together underneath rather than
     stranding them in a thin right-hand column. */
- html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-fleet-list .ag-bot-card{grid-template-columns:34px minmax(0,1fr);padding:8px 10px}
+ html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-fleet-list .ag-bot-card{grid-template-columns:34px minmax(0,1fr);row-gap:0;padding:7px 10px}
  html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-fleet-list .ag-card-actions{grid-column:2;grid-row:2;justify-self:start}
+ html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-card-actions .wb-icon-btn{color:var(--ag-muted);border:1px solid var(--ag-border-strong);padding-inline:10px}
+ html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-card-actions .wb-icon-btn:focus-visible{outline:2px solid var(--ag-gold);outline-offset:2px}
  html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-row-dur{font-size:10px}
 }
