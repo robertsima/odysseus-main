@@ -480,12 +480,26 @@ def test_pip_install_attempt_no_bare_pipe_tail():
     assert "| tail" not in snippet
 
 
+def _snippet_bash():
+    """The bash the product runs its runners with. On Windows a bare "bash"
+    can resolve to the WSL launcher in System32, which is another machine."""
+    from core.platform_compat import find_bash
+
+    return find_bash() or "bash"
+
+
+def _snippet_python():
+    """The interpreter running the tests, quoted for the snippet's inner bash.
+    The Windows bash has no python3 on its PATH."""
+    return '"' + Path(sys.executable).as_posix() + '"'
+
+
 def test_pip_install_attempt_failure_propagates_real_exit_code():
     """Run the generated snippet against a deliberately broken pip install
     to confirm the subshell exits with pip's non-zero status."""
-    snippet = _pip_install_attempt("python3 -m pip install __nonexistent_package_12345__")
+    snippet = _pip_install_attempt(f"{_snippet_python()} -m pip install __nonexistent_package_12345__")
     result = subprocess.run(
-        ["bash", "-c", snippet],
+        [_snippet_bash(), "-c", snippet],
         capture_output=True,
         text=True,
         timeout=60,
@@ -495,9 +509,9 @@ def test_pip_install_attempt_failure_propagates_real_exit_code():
 
 def test_pip_install_attempt_success_exits_zero():
     """When pip succeeds, the subshell should exit 0."""
-    snippet = _pip_install_attempt("python3 -c 'pass'")
+    snippet = _pip_install_attempt(f"{_snippet_python()} -c pass")
     result = subprocess.run(
-        ["bash", "-c", snippet],
+        [_snippet_bash(), "-c", snippet],
         capture_output=True,
         text=True,
         timeout=15,
@@ -507,9 +521,9 @@ def test_pip_install_attempt_success_exits_zero():
 
 def test_pip_install_attempt_surfaces_stderr_on_failure():
     """On failure, the last 5 lines of pip output should appear in stdout."""
-    snippet = _pip_install_attempt("python3 -m pip install __nonexistent_package_12345__")
+    snippet = _pip_install_attempt(f"{_snippet_python()} -m pip install __nonexistent_package_12345__")
     result = subprocess.run(
-        ["bash", "-c", snippet],
+        [_snippet_bash(), "-c", snippet],
         capture_output=True,
         text=True,
         timeout=60,

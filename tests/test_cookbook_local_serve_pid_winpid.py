@@ -5,11 +5,15 @@ import subprocess
 import time
 from pathlib import Path
 
+from core.platform_compat import find_bash
 from routes.cookbook_routes import _windows_local_pid_record_line
 
 
 ROOT = Path(__file__).resolve().parents[1]
 COOKBOOK_ROUTES = ROOT / "routes" / "cookbook_routes.py"
+# The prelude runs under the bash the product launches. On Windows a bare
+# "bash" can resolve to the WSL launcher in System32 instead.
+BASH = find_bash() or "bash"
 
 
 def _fake_cat(tmp_path: Path, body: str) -> Path:
@@ -35,7 +39,7 @@ def _run_pid_line(
     **extra_env: str,
 ) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["bash", "-c", _windows_local_pid_record_line(pid_path, ready_path)],
+        [BASH, "-c", _windows_local_pid_record_line(pid_path, ready_path)],
         capture_output=True,
         text=True,
         env=_env_for(fake_bin, **extra_env),
@@ -88,7 +92,7 @@ def test_windows_local_pid_line_waits_for_python_fallback_before_replacing(tmp_p
 
     proc = subprocess.Popen(
         [
-            "bash",
+            BASH,
             "-c",
             _windows_local_pid_record_line(pid_path, ready_path),
         ],

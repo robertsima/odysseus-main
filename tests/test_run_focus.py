@@ -7,6 +7,7 @@ injected fake executor so no pytest subprocess is ever spawned.
 from __future__ import annotations
 
 import argparse
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -229,8 +230,9 @@ def test_dry_run_prints_command_and_does_not_execute(capsys):
     out = capsys.readouterr().out
     assert code == 0
     assert executor.calls == []
+    # shlex.join quotes a Windows interpreter path; a POSIX one prints as is.
     assert out == (
-        f"{sys.executable} -m pytest "
+        f"{shlex.quote(sys.executable)} -m pytest "
         "-m 'area_services and sub_cookbook'\n"
     )
 
@@ -242,7 +244,7 @@ def test_dry_run_last_failed_prints_safe_flags(capsys):
     assert code == 0
     assert executor.calls == []
     assert out == (
-        f"{sys.executable} -m pytest "
+        f"{shlex.quote(sys.executable)} -m pytest "
         "--last-failed --last-failed-no-failures=none\n"
     )
 
@@ -352,7 +354,7 @@ def test_fast_durations_dry_run_prints_command(capsys):
     out = capsys.readouterr().out
     assert code == 0
     assert executor.calls == []
-    assert out == f"{sys.executable} -m pytest -m 'not slow' --durations=25\n"
+    assert out == f"{shlex.quote(sys.executable)} -m pytest -m 'not slow' --durations=25\n"
 
 
 def test_durations_alone_is_rejected_before_executor():

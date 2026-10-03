@@ -11,6 +11,9 @@ def _clear_hwfit_cache(monkeypatch):
     monkeypatch.setattr(hardware, "_remote_host", None)
     monkeypatch.setattr(hardware, "_remote_platform", None)
     monkeypatch.setattr(hardware, "_is_containerized", lambda: False)
+    # On a Windows host detect_system asks PowerShell first. A failed probe
+    # sends it down the Linux and macOS path that these tests cover.
+    monkeypatch.setattr(hardware, "_detect_windows", lambda: None)
     yield
     hardware._cache_by_host.clear()
 

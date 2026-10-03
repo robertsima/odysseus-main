@@ -13,6 +13,7 @@ That is exactly why in-process tests kept passing while the container would not
 boot.
 """
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -37,18 +38,24 @@ CLUSTER_MODULES = [
 
 
 def _import_in_fresh_interpreter(module: str) -> subprocess.CompletedProcess:
+    env = {
+        "PATH": "/usr/bin:/bin:/usr/local/bin",
+        "HOME": str(REPO_ROOT),
+        "DATABASE_URL": "sqlite:///:memory:",
+        "PYTHONPATH": str(REPO_ROOT),
+    }
+    # Windows needs SYSTEMROOT to load Winsock, which asyncio imports, and
+    # APPDATA to find packages installed in the user site. Linux sets neither.
+    for name in ("SYSTEMROOT", "APPDATA"):
+        if name in os.environ:
+            env[name] = os.environ[name]
     return subprocess.run(
         [sys.executable, "-c", f"import {module}"],
         cwd=str(REPO_ROOT),
         capture_output=True,
         text=True,
         timeout=180,
-        env={
-            "PATH": "/usr/bin:/bin:/usr/local/bin",
-            "HOME": str(REPO_ROOT),
-            "DATABASE_URL": "sqlite:///:memory:",
-            "PYTHONPATH": str(REPO_ROOT),
-        },
+        env=env,
     )
 
 
