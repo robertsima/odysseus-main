@@ -1,0 +1,11 @@
+--- a/src/agent_loop.py
++++ b/src/agent_loop.py
+@@ -8251,7 +8251,7 @@
+             and not _round_budget_hit
+             and not _force_answer
+             and round_num > 1
+-            and round_num >= wrap_up_round
++            and round_num > wrap_up_round
+         ):
+             _round_budget_hit = True
+             _force_answer = True

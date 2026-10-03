@@ -1,0 +1,11 @@
+--- a/core/session_manager.py
++++ b/core/session_manager.py
+@@ -379,7 +379,7 @@
+                 return None
+             if not inclusive:
+                 index += 1
+-            doomed = db_messages[index:]
++            doomed = db_messages[index + 1:]
+             doomed_ids = {str(m.id) for m in doomed}
+             for msg in doomed:
+                 db.delete(msg)

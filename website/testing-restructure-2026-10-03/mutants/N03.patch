@@ -1,0 +1,89 @@
+--- a/static/app.js
++++ b/static/app.js
+@@ -3392,7 +3392,7 @@
+       _startFreshChat();
+       const docBtn3 = el('overflow-doc-btn');
+       if (docBtn3) docBtn3.classList.remove('active', 'has-docs');
+-      document.querySelectorAll('.session-item.active').forEach(s => s.classList.remove('active'));
++      document.querySelectorAll('.chat-list-row.active').forEach(s => s.classList.remove('active'));
+       if (focus) {
+         const input = el('message');
+         if (input) { try { input.focus(); } catch (_) {} }
+@@ -3419,7 +3419,7 @@
+       if (_closeCompareIfActive()) return;
+       _deactivateIncognito();
+       _startFreshChat();
+-      document.querySelectorAll('.session-item.active').forEach(s => s.classList.remove('active'));
++      document.querySelectorAll('.chat-list-row.active').forEach(s => s.classList.remove('active'));
+       // Focus the composer synchronously so mobile keyboards pop open.
+       // iOS Safari only honours programmatic focus inside the original click
+       // callback — a setTimeout breaks the user-gesture chain.
+--- a/static/js/chat.js
++++ b/static/js/chat.js
+@@ -508,7 +508,7 @@
+     // Don't adopt a stale session when the user explicitly started a New Chat
+     // (pending state set) — the send path must materialize the pending session.
+     if (sessionModule.hasPendingChat && sessionModule.hasPendingChat()) return false;
+-    const activeRowId = document.querySelector('.list-item.active-session[data-session-id], .session-item.active[data-session-id]')?.dataset?.sessionId || '';
++    const activeRowId = document.querySelector('.list-item.active-session[data-session-id], .chat-list-row.active[data-session-id]')?.dataset?.sessionId || '';
+     const hashId = _hashSessionCandidate();
+     const lastSelectedId = String(window.__odysseusLastSelectedSessionId || '').trim();
+     const targetId = activeRowId || hashId || lastSelectedId;
+--- a/static/js/sessions.js
++++ b/static/js/sessions.js
+@@ -500,7 +500,7 @@
+ /** Create a single session list-item element. */
+ function createSessionItem(s) {
+   const div = document.createElement('div');
+-  div.className = 'list-item session-item';
++  div.className = 'list-item chat-list-row';
+   div.setAttribute('role', 'option');
+   div.setAttribute('tabindex', '-1');
+   div.setAttribute('data-session-id', s.id);
+@@ -1459,7 +1459,7 @@
+ 
+ function _showSwipeHint(list) {
+   if ('ontouchstart' in window && !localStorage.getItem('ody-swipe-hint-shown')) {
+-    const firstItem = list.querySelector('.session-item');
++    const firstItem = list.querySelector('.chat-list-row');
+     if (firstItem) {
+       localStorage.setItem('ody-swipe-hint-shown', '1');
+       const hint = document.createElement('div');
+@@ -2244,7 +2244,7 @@
+   try { window.__odysseusLastSelectedSessionId = ''; } catch (_) {}
+   Storage.remove('lastSessionId');
+   history.replaceState(null, '', window.location.pathname);
+-  document.querySelectorAll('.list-item.active-session, .session-item.active').forEach(el => {
++  document.querySelectorAll('.list-item.active-session, .chat-list-row.active').forEach(el => {
+     el.classList.remove('active-session', 'active');
+   });
+ 
+@@ -2431,7 +2431,7 @@
+     _suppressNextSessionLoading = true;
+     Storage.remove('lastSessionId');
+     history.replaceState(null, '', window.location.pathname);
+-    document.querySelectorAll('.list-item.active-session, .session-item.active').forEach(el => {
++    document.querySelectorAll('.list-item.active-session, .chat-list-row.active').forEach(el => {
+       el.classList.remove('active-session', 'active');
+     });
+   }
+--- a/static/style.css
++++ b/static/style.css
+@@ -8534,7 +8534,7 @@
+ }
+ 
+ /* Session items */
+-.session-item { position: relative; }
++.chat-list-row { position: relative; }
+ .text-ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+ .session-menu-btn { padding: 0 2px !important; min-width: 20px; height: 20px; display: inline-flex !important; align-items: center; justify-content: center; background: none !important; border-color: transparent !important; }
+ .session-menu-btn:hover { background: none !important; border-color: transparent !important; }
+@@ -42380,7 +42380,7 @@
+ .session-run-meta { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; margin-left: 4px; }
+ .session-agents-chip { display: inline-flex; align-items: center; justify-content: center; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 999px; font-size: 10px; line-height: 1; color: var(--fg); background: color-mix(in srgb, var(--hl-function, #61afef) 28%, transparent); font-variant-numeric: tabular-nums; }
+ .session-stop-btn { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; margin: 0; padding: 0; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--fg); opacity: 0; cursor: pointer; transition: opacity 0.12s, background 0.12s; }
+-.session-item:hover .session-stop-btn, .session-item:focus-within .session-stop-btn, .session-stop-btn:focus-visible { opacity: 0.75; }
++.chat-list-row:hover .session-stop-btn, .chat-list-row:focus-within .session-stop-btn, .session-stop-btn:focus-visible { opacity: 0.75; }
+ .session-stop-btn:hover { opacity: 1; background: color-mix(in srgb, var(--red) 22%, transparent); border-color: color-mix(in srgb, var(--red) 45%, transparent); }
+ @media (hover: none) { .session-stop-btn { opacity: 0.75; } }
+ 

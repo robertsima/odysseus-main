@@ -1,0 +1,67 @@
+--- a/src/agent_loop.py
++++ b/src/agent_loop.py
+@@ -4650,7 +4650,7 @@
+         return True
+ 
+ 
+-def _ledger_budget_for_round(route_budget: Optional[int], context_length: Optional[int]) -> int:
++def _round_ledger_budget(route_budget: Optional[int], context_length: Optional[int]) -> int:
+     """The budget the ledger's pressure gate measures against: the route's
+     effective input budget, else its context window, else 0 (no gate)."""
+     for value in (route_budget, context_length):
+@@ -4684,7 +4684,7 @@
+ 
+     `ledger_budget` is the route's input-token budget: when set, the execution
+     ledger runs only once the transcript has used a real share of it (see
+-    `_ledger_budget_for_round`). 0 runs it on its batch gate alone.
++    `_round_ledger_budget`). 0 runs it on its batch gate alone.
+ 
+     `round_reasoning` (DeepSeek / vLLM reasoning-parser deltas) is echoed
+     back via `reasoning_content` on the assistant message — DeepSeek's API
+@@ -7320,7 +7320,7 @@
+     _route_context_lengths = {}
+     # Each route's effective input budget, and the one the latest request was
+     # built for. The execution ledger runs only under pressure against it; see
+-    # _ledger_budget_for_round.
++    # _round_ledger_budget.
+     _route_input_budgets: Dict[tuple, int] = {}
+     _ledger_route: Dict[str, int] = {}
+     # Messages a route's trim removed, by identity, per (url, model), for the
+@@ -10153,7 +10153,7 @@
+                              responses_phase=round_responses_phase,
+                              round_reasoning_items=round_reasoning_items,
+                              tool_result_records=tool_result_records,
+-                             ledger_budget=_ledger_budget_for_round(
++                             ledger_budget=_round_ledger_budget(
+                                  _ledger_route.get("budget"), _last_route_context_length or context_length,
+                              ),
+                              session_id=session_id,
+--- a/src/context_compactor.py
++++ b/src/context_compactor.py
+@@ -964,7 +964,7 @@
+ #   3. A batch costs a re-prefill of everything after its first rewrite, paid
+ #      back only at the cached-token rate on the rounds that remain. The agent
+ #      loop therefore runs it only under context pressure (see
+-#      `_ledger_budget_for_round` in agent_loop): on 2026-09-27 nine batches on
++#      `_round_ledger_budget` in agent_loop): on 2026-09-27 nine batches on
+ #      prompts of 40-108k tokens in a 400k window re-sent ~165k tokens
+ #      uncached and saved ~17k, four of them on a turn's final round.
+ #
+--- a/tests/test_execution_ledger.py
++++ b/tests/test_execution_ledger.py
+@@ -477,11 +477,11 @@
+ 
+ 
+ def test_ledger_budget_prefers_the_route_budget():
+-    from src.agent_loop import _ledger_budget_for_round
++    from src.agent_loop import _round_ledger_budget
+ 
+-    assert _ledger_budget_for_round(200_000, 400_000) == 200_000
+-    assert _ledger_budget_for_round(0, 32_768) == 32_768
+-    assert _ledger_budget_for_round(None, None) == 0
++    assert _round_ledger_budget(200_000, 400_000) == 200_000
++    assert _round_ledger_budget(0, 32_768) == 32_768
++    assert _round_ledger_budget(None, None) == 0
+ 
+ 
+ # ── The measurement ─────────────────────────────────────────────────────────

@@ -1,0 +1,10 @@
+--- a/core/session_manager.py
++++ b/core/session_manager.py
+@@ -915,7 +915,6 @@
+             return self.sessions
+         return {
+             sid: s for sid, s in self.sessions.items()
+-            if s.owner == username
+         }
+ 
+     def save_sessions(self):

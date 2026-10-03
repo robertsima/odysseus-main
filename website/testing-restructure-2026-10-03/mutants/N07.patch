@@ -1,0 +1,55 @@
+--- a/static/js/markdown.js
++++ b/static/js/markdown.js
+@@ -205,7 +205,7 @@
+ ]);
+ 
+ function _compactUrlSchemeValue(value) {
+-  return String(value || '').replace(/[\u0000-\u0020\u007f-\u009f]+/g, '').toLowerCase();
++  return String(value || "").replace(/[\u0000-\u0020\u007f-\u009f]+/g, "").toLowerCase();
+ }
+ 
+ function _isDangerousUrl(value) {
+@@ -213,13 +213,15 @@
+ }
+ 
+ function _isDangerousSrcset(value) {
+-  return String(value || '').split(',').some(candidate => _isDangerousUrl(candidate));
++  return String(value || "")
++    .split(",")
++    .some((candidate) => _isDangerousUrl(candidate));
+ }
+ 
+ function _cleanAllowedHtmlOnce(htmlString) {
+-  const tpl = document.createElement('template');
++  const tpl = document.createElement("template");
+   tpl.innerHTML = htmlString;
+-  for (const el of Array.from(tpl.content.querySelectorAll('*'))) {
++  for (const el of Array.from(tpl.content.querySelectorAll("*"))) {
+     // Upper-case the tag for comparison: HTML tagNames are upper-case, but
+     // SVG/MathML elements preserve their original (lower/camel) case, so a
+     // raw `Set.has(el.tagName)` would miss e.g. a namespaced <script>.
+@@ -231,11 +233,11 @@
+       const name = attr.name.toLowerCase();
+       // Drop every inline event handler (onerror, onclick, onmouseover, ...)
+       // and srcdoc (a frame-less script vector).
+-      if (name.startsWith('on') || name === 'srcdoc') {
++      if (name.startsWith("on") || name === "srcdoc") {
+         el.removeAttribute(attr.name);
+         continue;
+       }
+-      if (name === 'style') {
++      if (name === "style") {
+         const value = _compactUrlSchemeValue(attr.value);
+         if (/javascript:|vbscript:|data:|expression\(/.test(value)) {
+           el.removeAttribute(attr.name);
+@@ -245,7 +247,9 @@
+       // Neutralize javascript:/vbscript:/data: in URL-bearing attributes.
+       // Strip control/space chars first so e.g. "java\tscript:" can't slip by.
+       if (_ALLOWED_HTML_URL_ATTRS.has(name)) {
+-        if (name === 'srcset' ? _isDangerousSrcset(attr.value) : _isDangerousUrl(attr.value)) {
++        const dangerous =
++          name === "srcset" ? _isDangerousSrcset(attr.value) : _isDangerousUrl(attr.value);
++        if (dangerous) {
+           el.removeAttribute(attr.name);
+         }
+       }

@@ -1,0 +1,11 @@
+--- a/src/approval_modes.py
++++ b/src/approval_modes.py
+@@ -115,7 +115,7 @@
+     text = content if isinstance(content, str) else json.dumps(content or "")
+     if tool in _SHELL_TOOLS:
+         for pattern, why in _RISKY_SHELL:
+-            if pattern.search(text):
++            if pattern.match(text):
+                 return why
+         return None
+     bare = tool[len("mcp__email__"):] if tool.startswith("mcp__email__") else tool

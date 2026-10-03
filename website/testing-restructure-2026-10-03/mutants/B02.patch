@@ -1,0 +1,11 @@
+--- a/routes/shell_routes.py
++++ b/routes/shell_routes.py
+@@ -65,8 +65,6 @@
+         return
+     if not user or user == "api":
+         raise HTTPException(403, "Admin only")
+-    if not auth_manager.is_admin(user):
+-        raise HTTPException(403, "Admin only")
+ 
+ 
+ def _reject_cross_site(request: Request):

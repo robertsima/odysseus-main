@@ -1,0 +1,11 @@
+--- a/static/js/sessions.js
++++ b/static/js/sessions.js
+@@ -209,7 +209,7 @@
+     if (box.scrollTop > 90) return;
+ 
+     const nextOffset = Math.max(0, _historyPager.offset - _historyPager.limit);
+-    const nextLimit = _historyPager.offset - nextOffset;
++    const nextLimit = _historyPager.offset - nextOffset + 1;
+     if (nextLimit <= 0) {
+       _historyPager.done = true;
+       return;

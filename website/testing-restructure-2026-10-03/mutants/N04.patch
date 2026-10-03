@@ -1,0 +1,52 @@
+--- a/static/index.html
++++ b/static/index.html
+@@ -870,7 +870,7 @@
+     <div class="rail-resize-handle" id="rail-resize-handle"></div>
+     <!-- Static: core actions -->
+     <button class="icon-rail-btn" id="rail-search-btn" title="Search conversations (Ctrl+K)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="10" cy="10" r="7"/><path d="M21 21l-4.35-4.35"/></svg></button>
+-    <button class="icon-rail-btn rail-new-chat" id="rail-new-session" title="New chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
++    <button class="icon-rail-btn rail-new-chat" id="rail-new-session" title="Start chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+     <button class="icon-rail-btn" id="rail-delete-session" title="Delete session">&#x2715;</button>
+     <div class="rail-separator"></div>
+     <button class="icon-rail-btn" id="rail-command" title="Command menu" aria-label="Open Command menu" aria-controls="sidebar-command-menu" aria-expanded="false">⌘</button>
+@@ -900,7 +900,7 @@
+     <div class="sidebar-resize-handle" id="sidebar-resize-handle"></div>
+     <div class="sidebar-header">
+       <button class="sidebar-hamburger" id="sidebar-toggle-btn" title="Toggle sidebar"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></button>
+-      <div class="sidebar-brand" id="sidebar-brand-btn" style="cursor:pointer;" title="New chat">
++      <div class="sidebar-brand" id="sidebar-brand-btn" style="cursor:pointer;" title="Start chat">
+         <!-- Shared product crest in both page styles; .brand-crest-icon masks
+              the licensed helmet so it takes the active brand color. -->
+         <span class="brand-crest-icon sidebar-brand-icon" aria-hidden="true"></span>
+@@ -914,11 +914,11 @@
+           <button type="button" data-command-target="rail-email">Email</button>
+           <button type="button" data-command-target="rail-agents">Phalanx</button>
+           <button type="button" data-command-target="rail-workbench">Workbench</button>
+-          <button type="button" data-command-target="rail-new-session">New chat</button>
++          <button type="button" data-command-target="rail-new-session">Start chat</button>
+           <button type="button" data-command-target="rail-search-btn">Search</button>
+         </div>
+       </div>
+-      <div class="list-item" id="sidebar-new-chat-btn" title="New chat" role="button" tabindex="0">New chat</div>
++      <div class="list-item" id="sidebar-new-chat-btn" title="Start chat" role="button" tabindex="0">Start chat</div>
+       <div class="list-item" id="sidebar-search-btn" title="Search conversations" role="button" tabindex="0">Search</div>
+       <!-- Assistant sidebar entry removed — its log + settings live inside
+            the Tasks modal (Activity + Settings tabs). The backend
+@@ -1441,7 +1441,7 @@
+             <button type="button" class="mode-toggle-btn active" id="mode-agent-btn" aria-pressed="true">Agent</button>
+             <button type="button" class="mode-toggle-btn" id="mode-chat-btn" aria-pressed="false">Chat</button>
+           </div>
+-          <button type="submit" form="chat-form" class="send-btn newchat-mode" data-mode="newchat" aria-label="New chat">
++          <button type="submit" form="chat-form" class="send-btn newchat-mode" data-mode="newchat" aria-label="Start chat">
+             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg><span class="send-btn-label">+ New</span>
+           </button>
+         </div>
+@@ -2460,7 +2460,7 @@
+               </label>
+               <label class="vis-row">
+                 <span class="vis-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></span>
+-                <span class="vis-label">New Chat</span>
++                <span class="vis-label">Start Chat</span>
+                 <input type="checkbox" checked data-ui-key="sidebar-new-chat"><span class="vis-switch"></span>
+               </label>
+               <label class="vis-row">

@@ -1,0 +1,11 @@
+--- a/src/agent_loadouts.py
++++ b/src/agent_loadouts.py
+@@ -835,7 +835,7 @@
+ 
+     Raises ValueError when nothing the profile asked for is left to grant.
+     """
+-    if not starter_session or not (force or not profile or starter_is_worker(starter_session)):
++    if not starter_session or not (force or not profile):
+         return profile, []
+     if profile and profile.get("capped_for") == starter_session:
+         return profile, []

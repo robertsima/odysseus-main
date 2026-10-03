@@ -1,0 +1,11 @@
+--- a/src/rag_vector.py
++++ b/src/rag_vector.py
+@@ -220,8 +220,6 @@
+     are missing a filtered field.
+     """
+     clauses = []
+-    if not allow_private:
+-        clauses.append({SENSITIVITY_KEY: SENSITIVITY_PUBLIC})
+     if not clauses:
+         return None
+     if len(clauses) == 1:

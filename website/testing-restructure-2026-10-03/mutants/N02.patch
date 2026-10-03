@@ -1,0 +1,70 @@
+--- a/static/js/chatRenderer.js
++++ b/static/js/chatRenderer.js
+@@ -1101,15 +1101,23 @@
+  * Pass an ISO string / Date / epoch-ms to render the message's own time
+  * (used when replaying history). Falls back to "now" when no value is given. */
+ export function roleTimestamp(when) {
+-  const ts = document.createElement('span');
+-  ts.className = 'role-timestamp';
++  const ts = document.createElement("span");
++  ts.className = "role-timestamp";
+   let d;
+-  if (when instanceof Date) d = when;
+-  else if (typeof when === 'number') d = new Date(when);
+-  else if (typeof when === 'string' && when) d = new Date(when);
+-  else d = new Date();
+-  if (isNaN(d.getTime())) d = new Date();
+-  ts.textContent = d.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
++  if (when instanceof Date) {
++    d = when;
++  } else if (typeof when === "number") {
++    d = new Date(when);
++  } else if (typeof when === "string" && when) {
++    d = new Date(when);
++  } else {
++    d = new Date();
++  }
++  if (isNaN(d.getTime())) {
++    d = new Date();
++  }
++  const timeOptions = { hour: "2-digit", minute: "2-digit" };
++  ts.textContent = d.toLocaleTimeString([], timeOptions);
+   ts.title = d.toLocaleString();
+   return ts;
+ }
+@@ -1118,19 +1126,22 @@
+  * Strip tool invocation blocks from text before rendering.
+  */
+ export function stripToolBlocks(text) {
+-  let cleaned = text.replace(TOOL_CALL_RE, '');
+-  if (EXEC_FENCE_RE) cleaned = cleaned.replace(EXEC_FENCE_RE, stripExecutedFence);
+-  cleaned = cleaned.replace(DSML_TOOL_RE, '');
+-  cleaned = cleaned.replace(DSML_INVOKE_RE, '');
+-  cleaned = cleaned.replace(DSML_STRAY_RE, '');
+-  cleaned = cleaned.replace(XML_TOOL_CALL_RE, '');
+-  cleaned = cleaned.replace(XML_INVOKE_RE, '');
+-  cleaned = cleaned.replace(RAW_OPENAI_TOOL_JSON_RE, '');
+-  cleaned = cleaned.replace(QWEN_ROLE_MARKER_RE, '');
+-  cleaned = cleaned.replace(QWEN_BARE_MARKER_RE, ' ');
+-  cleaned = cleaned.replace(TOOL_NARRATION_RE, '');
+-  cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
+-  return cleaned.trim();
++  let cleaned = text.replace(TOOL_CALL_RE, "");
++  if (EXEC_FENCE_RE) {
++    cleaned = cleaned.replace(EXEC_FENCE_RE, stripExecutedFence);
++  }
++  cleaned = cleaned
++    .replace(DSML_TOOL_RE, "")
++    .replace(DSML_INVOKE_RE, "")
++    .replace(DSML_STRAY_RE, "")
++    .replace(XML_TOOL_CALL_RE, "")
++    .replace(XML_INVOKE_RE, "")
++    .replace(RAW_OPENAI_TOOL_JSON_RE, "")
++    .replace(QWEN_ROLE_MARKER_RE, "")
++    .replace(QWEN_BARE_MARKER_RE, " ")
++    .replace(TOOL_NARRATION_RE, "");
++  const collapsed = cleaned.replace(/\n{3,}/g, "\n\n");
++  return collapsed.trim();
+ }
+ 
+ /**

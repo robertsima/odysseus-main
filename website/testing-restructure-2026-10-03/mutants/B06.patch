@@ -1,0 +1,11 @@
+--- a/src/agent_loop.py
++++ b/src/agent_loop.py
+@@ -10147,7 +10147,7 @@
+         # 2026-10-02. `messages` is only touched by this coroutine meanwhile
+         # (steers are queued, not appended, until after this returns).
+         await asyncio.to_thread(
+-                             _append_tool_results, messages, round_response, converted_calls,
++                             _append_tool_results, messages, round_response, native_tool_calls,
+                              tool_results, tool_result_texts, used_native, round_num,
+                              round_reasoning=round_reasoning,
+                              responses_phase=round_responses_phase,

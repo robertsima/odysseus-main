@@ -1,0 +1,11 @@
+--- a/static/js/markdown.js
++++ b/static/js/markdown.js
+@@ -231,7 +231,7 @@
+       const name = attr.name.toLowerCase();
+       // Drop every inline event handler (onerror, onclick, onmouseover, ...)
+       // and srcdoc (a frame-less script vector).
+-      if (name.startsWith('on') || name === 'srcdoc') {
++      if (name.startsWith('on') && name === 'srcdoc') {
+         el.removeAttribute(attr.name);
+         continue;
+       }

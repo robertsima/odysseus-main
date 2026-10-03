@@ -1,0 +1,11 @@
+--- a/src/outbound_fetch.py
++++ b/src/outbound_fetch.py
+@@ -103,8 +103,6 @@
+         raise httpx.RequestError(f"Blocked non-public hostname: {host}")
+     try:
+         ip = ipaddress.ip_address(host)
+-        if _is_private_address(ip):
+-            raise httpx.RequestError(f"Blocked non-public IP literal: {host}")
+         return [ip]
+     except httpx.RequestError:
+         raise

@@ -1,0 +1,11 @@
+--- a/src/tool_execution.py
++++ b/src/tool_execution.py
+@@ -981,7 +981,7 @@
+         # or mixed abs/rel — both mean "outside", so the except rejects them.
+         nbase = os.path.normcase(base)
+         try:
+-            if os.path.commonpath([os.path.normcase(resolved), nbase]) != nbase:
++            if not os.path.normcase(resolved).startswith(nbase):
+                 raise ValueError
+         except ValueError:
+             raise ValueError(f"path '{raw_path}' is outside the workspace ({workspace}); use a path inside it")
