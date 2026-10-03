@@ -874,13 +874,14 @@ def test_large_phalanx_card_actions_do_not_break_words(open_app):
     shot(page, 'phalanx-actions-legible')
 
 
-@pytest.mark.parametrize('width', [1440, 390])
+@pytest.mark.parametrize('width', [1440, 390, 320])
 def test_classic_soldier_picker_options_fit_the_detail_pane(open_app, width):
     page = open_app(width, LIGHT_THEME)
     open_agents(page)
     page.click(f'.ag-card-select[data-sid="{PARENT_ID}"]')
     page.wait_for("!!document.querySelector('#ag-detail .ag-appearance-options svg')")
     choices = page.eval("[...document.querySelectorAll('#ag-detail .ag-appearance-option svg')]"
+                        ".filter(svg => getComputedStyle(svg).display !== 'none')"
                         ".map(svg => {const r=svg.getBoundingClientRect(), c=svg.closest('label').getBoundingClientRect();"
                         "return {width:r.width,height:r.height,left:r.left,right:r.right,"
                         "containerLeft:c.left,containerRight:c.right};})")
@@ -889,4 +890,40 @@ def test_classic_soldier_picker_options_fit_the_detail_pane(open_app, width):
         assert 25 <= choice['width'] <= 52 and choice['height'] <= 52, choice
         assert choice['left'] >= choice['containerLeft'] - 1, choice
         assert choice['right'] <= choice['containerRight'] + 1, choice
+    # No icon/legend collisions, even for the Automatic option's seal markup.
+    assert page.eval("(() => { const l=document.querySelector('.ag-appearance-option');"
+                     "const icon=l.querySelector('.ag-bot').getBoundingClientRect();"
+                     "const label=l.querySelector(':scope > span:last-child').getBoundingClientRect();"
+                     "return icon.bottom + 3 <= label.top; })()")
+    assert_usable(page, '#close-agents-dashboard')
+    if width <= 390:
+        assert_no_sideways_scroll(page, '.agents-modal-content')
+        shot(page, 'classic-picker-top')
+        page.eval("document.querySelector('.ag-appearance-option:last-child').scrollIntoView()")
+        assert page.probe('.ag-appearance-option:last-child')['visible']
+        page.eval("document.querySelector('#close-agents-dashboard').focus()")
+        assert page.eval("document.activeElement.id") == 'close-agents-dashboard'
+        shot(page, 'classic-picker-close-focus')
     shot(page, 'classic-soldier-picker')
+
+
+@pytest.mark.parametrize('width', [390, 320])
+def test_classic_compact_controls_remain_touchable(open_app, width):
+    page = open_app(width, LIGHT_THEME)
+    open_agents(page)
+    actions = page.eval("[...document.querySelectorAll('.ag-fleet-compact .ag-card-actions .wb-icon-btn')]"
+                        ".filter(b=>b.offsetParent).map(b=>{let r=b.getBoundingClientRect();"
+                        "return {width:r.width,height:r.height,right:r.right};})")
+    assert actions
+    assert all(a['width'] >= 24 and a['height'] >= 24 and a['right'] <= width + 1 for a in actions), actions
+    shot(page, 'classic-compact-actions')
+
+
+def test_classic_picker_zoom_still_exposes_close_and_choices(open_app):
+    page = open_app(390, LIGHT_THEME)
+    page.eval("document.documentElement.style.zoom = '1.25'")
+    open_agents(page)
+    page.click(f'.ag-card-select[data-sid="{PARENT_ID}"]')
+    assert_usable(page, '#close-agents-dashboard')
+    assert_no_sideways_scroll(page, '.agents-modal-content')
+    shot(page, 'classic-picker-125-percent')

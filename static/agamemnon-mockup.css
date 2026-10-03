@@ -258,6 +258,10 @@ html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left
 html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .ag-run-control>section{padding:12px 14px}
 html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) :is(.ag-run-timeline,.ag-run-console,.ag-run-detail){overflow:visible;max-height:none}
 html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .ag-run-detail{display:block;padding:12px 14px}
+/* In the dock the Activity column already spans the available width. Let
+   Run details fill that column rather than marooning a narrow card on its
+   left; this does not increase the dock width or take space from Scribe. */
+html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .ag-run-detail{width:100%}
 html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .wb-panel[data-wb-panel="activity"]{display:flex;flex-direction:column}
 html[data-style="agamemnon"] #workbench-modal .wb-panel.hidden{display:none!important}
 

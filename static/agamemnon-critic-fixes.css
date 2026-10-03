@@ -44,15 +44,41 @@ html[data-style="classic"] .ag-appearance{box-sizing:border-box;min-width:0;max-
 html[data-style="classic"] .ag-appearance legend{padding:0 6px;color:var(--red);font-weight:700}
 html[data-style="classic"] .ag-appearance p{margin:0 0 12px;line-height:1.45}
 html[data-style="classic"] .ag-appearance-options{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,110px),1fr));gap:8px}
-html[data-style="classic"] .ag-appearance-option{display:flex;box-sizing:border-box;min-width:0;min-height:108px;flex-direction:column;align-items:center;justify-content:center;gap:5px;padding:8px;border:1px solid var(--border);background:var(--panel);text-align:center;cursor:pointer}
-html[data-style="classic"] .ag-appearance-option:has(input:checked){border-color:var(--red)}
+html[data-style="classic"] .ag-appearance-option{display:grid;box-sizing:border-box;min-width:0;min-height:142px;grid-template-rows:20px 52px auto;align-items:start;justify-items:center;gap:5px;padding:8px;border:1px solid var(--border);background:var(--panel);text-align:center;cursor:pointer}
+html[data-style="classic"] .ag-appearance-option:has(input:checked){border:2px solid var(--red);background:color-mix(in srgb,var(--red) 8%,var(--panel))}
 html[data-style="classic"] .ag-appearance-option:focus-within{outline:2px solid var(--red);outline-offset:2px}
-html[data-style="classic"] .ag-appearance-option input{align-self:flex-start;accent-color:var(--red)}
-html[data-style="classic"] .ag-appearance-option svg{display:block;width:52px;height:52px;flex:0 0 52px;color:var(--agent-model-color,var(--red))}
-html[data-style="classic"] .ag-appearance-option .ag-bot{width:52px;height:52px;flex:none;zoom:1;transform:none;margin:0}
-html[data-style="classic"] .ag-appearance-option span{font-size:12px;line-height:1.3;overflow-wrap:anywhere}
-html[data-style="classic"] .ag-appearance-option small{display:block;opacity:.75}
+html[data-style="classic"] .ag-appearance-option input{justify-self:start;margin:0;accent-color:var(--red)}
+html[data-style="classic"] .ag-appearance-option>svg{display:block;width:52px;height:52px;color:var(--agent-model-color,var(--red))}
+html[data-style="classic"] .ag-appearance-option .ag-bot{width:52px;height:52px;zoom:1;transform:none;margin:0}
+html[data-style="classic"] .ag-appearance-option .ag-bot>.ag-soldier-sprite{display:block;width:52px;height:52px}
+html[data-style="classic"] .ag-appearance-option .ag-bot>.ag-seal-mark{display:none}
+html[data-style="classic"] .ag-appearance-option>span:last-child{align-self:start;font-size:12px;line-height:1.35;overflow-wrap:anywhere}
+html[data-style="classic"] .ag-appearance-option small{display:block;margin-top:3px;color:var(--fg);font-size:11px;line-height:1.3}
 html[data-style="classic"] #ag-appearance-status{display:block;min-height:20px;padding-top:5px}
+
+/* Themes are runtime CSS variables, not an html.light class. Mix ink with
+   the active foreground so the light cream palette and dark Classic both
+   retain legible metadata without overriding the user's chosen colours. */
+html[data-style="classic"] #agents-dashboard{--wb-muted:color-mix(in srgb,var(--fg) 90%,var(--panel));--wb-faint:color-mix(in srgb,var(--fg) 85%,var(--panel));--wb-line:color-mix(in srgb,var(--border) 70%,var(--fg));color:var(--fg)}
+html[data-style="classic"] #agents-dashboard :is(.ag-window-title span,.ag-hist,.ag-row-meta-inline,.ag-row-latest,.ag-detail-meta,.ag-detail-tab,.ag-seg,.ag-live,.ag-appearance p){color:var(--wb-muted)}
+html[data-style="classic"] #agents-dashboard .ag-window-title h3 span{color:var(--fg);font-size:13px;font-weight:700;letter-spacing:.04em;text-transform:uppercase}
+html[data-style="classic"] #agents-dashboard .ag-detail-tab.active{color:var(--fg)}
+html[data-style="classic"] #agents-dashboard .ag-appearance-option:has(input:checked){border-color:color-mix(in srgb,var(--red) 55%,var(--fg));color:var(--fg)}
+html[data-style="classic"] #close-agents-dashboard{display:inline-flex;align-items:center;justify-content:center;flex:0 0 32px;width:32px;height:32px;margin:0;border:1px solid var(--border);background:var(--panel);color:var(--fg);opacity:1;font-size:23px;line-height:1;cursor:pointer}
+html[data-style="classic"] #close-agents-dashboard:focus-visible{outline:3px solid var(--fg);outline-offset:2px}
+html[data-style="classic"] .ag-fleet-compact .ag-card-actions{opacity:1;gap:3px}
+html[data-style="classic"] .ag-fleet-compact .ag-card-actions .wb-icon-btn{box-sizing:border-box;min-width:28px;min-height:28px;padding:2px;border:1px solid var(--border);background:var(--panel);color:var(--fg);font-size:11px}
+html[data-style="classic"] .ag-fleet-compact .ag-card-actions .wb-icon-btn:focus-visible{outline:2px solid var(--fg);outline-offset:1px}
+@media(max-width:600px){
+ html[data-style="classic"] #agents-dashboard .ag-window-actions .doc-action-icon-btn{display:none}
+ html[data-style="classic"] #agents-dashboard .ag-window-title{min-width:0}
+ html[data-style="classic"] #agents-dashboard .agents-window-header{position:relative;z-index:3;background:var(--panel)}
+ /* The shared swipe sheet hides all X buttons with !important. Phalanx is
+    also a keyboard-controlled dialog, so retain its explicit exit. */
+ html[data-style="classic"] #agents-dashboard #close-agents-dashboard{display:inline-flex!important;flex-basis:44px;width:44px;height:44px}
+ html[data-style="classic"] #agents-dashboard .ag-detail-tab-panel{min-height:0;overflow-y:auto;overscroll-behavior:contain}
+ html[data-style="classic"] #agents-dashboard .ag-detail-tab-panel>.ag-appearance{flex-shrink:0}
+}
 
 /* Run Control text */
 html[data-style="agamemnon"] .ag-run-control h3,html[data-style="agamemnon"] .ag-run-detail h3{margin:0 0 13px;color:var(--ag-gold);font:700 12px 'Space Grotesk';letter-spacing:.14em}
