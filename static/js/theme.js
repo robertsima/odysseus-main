@@ -467,7 +467,7 @@ export function applyUiScale(scale) {
   if (s === '125') document.documentElement.classList.add('ui-scale-125');
 }
 
-const _BG_CLASSES = ['bg-pattern-dots',
+const _BG_CLASSES = ['bg-pattern-dots', 'bg-pattern-lattice',
   'bg-pattern-synapse', 'bg-pattern-rain', 'bg-pattern-constellations',
   'bg-pattern-perlin-flow',
   'bg-pattern-petals', 'bg-pattern-sparkles', 'bg-pattern-embers'];

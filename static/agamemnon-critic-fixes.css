@@ -64,19 +64,23 @@ html[data-style="classic"] #agents-dashboard :is(.ag-window-title span,.ag-hist,
 html[data-style="classic"] #agents-dashboard .ag-window-title h3 span{color:var(--fg);font-size:13px;font-weight:700;letter-spacing:.04em;text-transform:uppercase}
 html[data-style="classic"] #agents-dashboard .ag-detail-tab.active{color:var(--fg)}
 html[data-style="classic"] #agents-dashboard .ag-appearance-option:has(input:checked){border-color:color-mix(in srgb,var(--red) 55%,var(--fg));color:var(--fg)}
-html[data-style="classic"] #close-agents-dashboard{display:inline-flex;align-items:center;justify-content:center;flex:0 0 32px;width:32px;height:32px;margin:0;border:1px solid var(--border);background:var(--panel);color:var(--fg);opacity:1;font-size:23px;line-height:1;cursor:pointer}
+html[data-style="classic"] #close-agents-dashboard{display:inline-flex;align-items:center;justify-content:center;flex:0 0 32px;width:32px;height:32px;margin:0;border:1px solid var(--border);background:var(--panel);color:var(--fg);opacity:1;font-size:0;line-height:1;cursor:pointer}
 html[data-style="classic"] #close-agents-dashboard:focus-visible{outline:3px solid var(--fg);outline-offset:2px}
 html[data-style="classic"] .ag-fleet-compact .ag-card-actions{opacity:1;gap:3px}
 html[data-style="classic"] .ag-fleet-compact .ag-card-actions .wb-icon-btn{box-sizing:border-box;min-width:28px;min-height:28px;padding:2px;border:1px solid var(--border);background:var(--panel);color:var(--fg);font-size:11px}
 html[data-style="classic"] .ag-fleet-compact .ag-card-actions .wb-icon-btn:focus-visible{outline:2px solid var(--fg);outline-offset:1px}
+/* Desktop controls should not require precision taps. Radio inputs are
+   enclosed by full-size selectable cards; the other actions need own hit areas. */
+#agents-dashboard :is(.ag-live,.ag-row-name.ag-card-select,.ag-console-actions .wb-btn,.ag-child .wb-btn){min-height:24px;height:auto}
+#agents-dashboard .ag-window-actions .modal-minimize-btn{min-width:24px;min-height:24px}
 @media(max-width:600px){
  html[data-style="classic"] #agents-dashboard .ag-window-actions .doc-action-icon-btn{display:none}
  html[data-style="classic"] #agents-dashboard .ag-window-title{min-width:0}
  html[data-style="classic"] #agents-dashboard .agents-window-header{position:relative;z-index:3;background:var(--panel)}
  /* The shared swipe sheet hides all X buttons with !important. Phalanx is
     also a keyboard-controlled dialog, so retain its explicit exit. */
- html[data-style="classic"] #agents-dashboard #close-agents-dashboard{display:inline-flex!important;flex-basis:44px;width:44px;height:44px}
- html[data-style="classic"] #agents-dashboard .ag-detail-tab-panel{min-height:0;overflow-y:auto;overscroll-behavior:contain}
+ html[data-style="classic"] #agents-dashboard #close-agents-dashboard{display:inline-flex!important;flex-basis:44px;width:44px;height:44px;font-size:0}
+ html[data-style="classic"] #agents-dashboard .ag-detail-tab-panel{flex:0 0 auto;min-height:0;overflow:visible}
  html[data-style="classic"] #agents-dashboard .ag-detail-tab-panel>.ag-appearance{flex-shrink:0}
 }
 

@@ -6,11 +6,9 @@
  * over the same boxes is what drew every Workbench tab at once and collapsed
  * the composer to a sliver.
  *
- * Scribe uses the whole available workspace, including when a tool is docked.
- *
- * Agents and Workbench fill the workspace as pages only while they are not
- * docked. A docked window keeps the shared tool-window geometry (dock
- * controller, resize handle, chat beside it) and only takes the palette.
+ * Scribe uses the available workspace, including when a tool is docked.
+ * Phalanx and Workbench keep the shared floating/resize/dock geometry;
+ * this layer changes their palette and content, not their windowing.
  */
 :root {
   --ag-bg:var(--bg,#111417);
@@ -32,18 +30,9 @@ html[data-style="agamemnon"] body{font-family:'Space Grotesk',system-ui,sans-ser
    surfaces remain dark enough to preserve contrast and the unselected theme
    stays solid. */
 html[data-style="agamemnon"] body[class*="bg-pattern-"] .chat-container{background:color-mix(in srgb,var(--ag-bg) 76%,transparent)}
-/* Animated strokes remain visible above the opaque reading cards too, at a
-   restrained strength; pointer events and the saved intensity still apply. */
-html[data-style="agamemnon"] body[class*="bg-pattern-"] :is(#synapse-canvas,#rain-canvas,#constellations-canvas,#perlin-flow-canvas,#petals-canvas,#sparkles-canvas,#embers-canvas){z-index:1002!important;opacity:calc(var(--bg-effect-intensity,1) * .6);pointer-events:none}
-/* Effects pass through the open gutters, never in front of readable cards,
-   form controls or modal text. The selected effect remains visible through
-   the translucent board backing without weakening the reading surfaces. */
-html[data-style="agamemnon"] body[class*="bg-pattern-"] :is(#workbench-modal,#agents-dashboard):not(.hidden){z-index:1003!important;background:color-mix(in srgb,var(--ag-bg) 36%,transparent)!important}
-html[data-style="agamemnon"] body[class*="bg-pattern-"] :is(.workbench-modal-content,.agents-modal-content){background:color-mix(in srgb,var(--ag-bg) 36%,transparent)!important}
-html[data-style="agamemnon"] body[class*="bg-pattern-"] #workbench-modal .ag-run-summary{background:var(--ag-bg)!important;padding:6px 8px 10px!important}
-/* An undocked board replaces Scribe. Do not let its transcript ghost through
-   the translucent effect gutters; docked boards must still show the chat. */
-html[data-style="agamemnon"] body[class*="bg-pattern-"]:has(:is(#workbench-modal,#agents-dashboard):not(.hidden):not(.modal-right-docked):not(.modal-left-docked)) .chat-container{visibility:hidden}
+/* Canvases sit behind Scribe text and all tool windows. Floating windows
+   overlap Scribe and each other, so only the chat backdrop is translucent. */
+html[data-style="agamemnon"] body[class*="bg-pattern-"] :is(#synapse-canvas,#rain-canvas,#constellations-canvas,#perlin-flow-canvas,#petals-canvas,#sparkles-canvas,#embers-canvas){z-index:1!important;pointer-events:none}
 html[data-style="agamemnon"] body[class*="bg-pattern-"] #chat-history{background:color-mix(in srgb,var(--ag-panel) 89%,transparent)}
 html[data-style="agamemnon"] .ody-brand-name,html[data-style="agamemnon"] .ody-page-title{display:none!important}
 html[data-style="agamemnon"] .sidebar{width:240px!important;min-width:240px!important;background:var(--ag-rail)!important;border-right:2px solid var(--ag-border)}
@@ -150,8 +139,12 @@ html[data-style="agamemnon"] body:has(#workbench-modal.modal-right-docked:not(.h
 html .ag-phalanx-title,html .ag-phalanx-summary,html .ag-workbench-title{display:inline}
 html[data-style="agamemnon"] .ody-agents-title,html[data-style="agamemnon"] .ody-agents-summary,html[data-style="agamemnon"] .ody-workbench-title{display:none}
 html[data-style="agamemnon"] .ag-phalanx-title,html[data-style="agamemnon"] .ag-phalanx-summary,html[data-style="agamemnon"] .ag-workbench-title{display:inline}
+html[data-style="agamemnon"] .agents-dashboard{--ag-muted:color-mix(in srgb,var(--fg) 88%,var(--panel));--ag-faint:color-mix(in srgb,var(--fg) 88%,var(--panel))}
 html[data-style="agamemnon"] .agents-dashboard,html[data-style="agamemnon"] #workbench-modal{--wb-muted:var(--ag-muted);--wb-faint:var(--ag-faint);--wb-line:var(--ag-border)}
 html[data-style="agamemnon"] .agents-modal-content,html[data-style="agamemnon"] .workbench-modal-content{font-family:'Space Grotesk';background:var(--ag-bg)!important;border-radius:0}
+/* The global Frosted Glass preference must not make these two overlapping
+   reading windows see-through. It may still style Scribe and other tools. */
+html[data-style="agamemnon"] body.theme-frosted :is(#agents-dashboard .agents-modal-content,#workbench-modal .workbench-modal-content){background:var(--ag-bg)!important;backdrop-filter:none!important;-webkit-backdrop-filter:none!important}
 html[data-style="agamemnon"] .ag-window-mark{display:none}
 html[data-style="agamemnon"] .ag-window-title h3 span{font:inherit;color:inherit;letter-spacing:inherit;text-transform:inherit}
 html[data-style="agamemnon"] .ag-window-actions .doc-action-icon-btn,html[data-style="agamemnon"] #wb-dock-right,html[data-style="agamemnon"] #close-workbench-modal,html[data-style="agamemnon"] #close-agents-dashboard{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;margin:0;padding:0;border:1px solid var(--ag-border-strong);border-radius:0;background:var(--ag-raised);color:var(--ag-text);opacity:1}
@@ -193,59 +186,26 @@ html[data-style="agamemnon"] #workbench-modal .wb-tabs .memory-tab:focus-visible
 html[data-style="agamemnon"] .wb-activity{background:var(--ag-console);border:2px solid var(--ag-border-strong);border-radius:0}
 html[data-style="agamemnon"] .wb-btn,html[data-style="agamemnon"] .wb-select,html[data-style="agamemnon"] .wb-input{border-radius:0;font-family:'Space Grotesk'}
 
-/* ── Agents / Phalanx page (undocked) ─────────────────────────────────────
- * The fleet is the board, two columns of cards; the selected agent's detail
- * follows it (select-agent scrolls it into view and focuses its name), and
- * the launch form opens above the fleet where the button that asked for it
- * is. The page scrolls as one. */
-html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked),
-html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked){inset:0 var(--ws-dock-right,0px) 0 calc(var(--icon-rail-w,0px) + var(--sidebar-w,240px) + var(--ws-dock-left,0px))!important;width:auto!important;height:auto!important;background:var(--ag-bg)!important;align-items:stretch!important;justify-content:stretch!important;padding:0!important}
-html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .agents-modal-content,
-html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-content{display:block;position:relative!important;inset:auto!important;transform:none!important;box-sizing:border-box;width:100%!important;height:100%!important;min-width:0;max-width:none!important;max-height:none!important;margin:0!important;padding:26px 36px 30px 40px!important;border:0!important;border-radius:0!important;box-shadow:none!important;overflow:auto;animation:none}
-html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .agents-modal-content::before,
-html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-content::before,
-html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .agents-modal-content::after{content:none}
-html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .agents-window-header,
-html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-content>.modal-header{display:flex;align-items:flex-start;gap:16px;height:auto;min-height:0;margin:-26px 0 0;padding:26px 0 24px!important;border:0!important;background:var(--ag-bg);cursor:default}
-/* The base modal's sticky header used to overlap the first row of Workbench
-   tabs after the page treatment shifted it upward. Keep header in flow. */
-html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-content>.modal-header{position:sticky;top:-26px;z-index:5;margin:0;padding:0 0 20px!important}
+/* Keep the shared title bar draggable and the maximize control available.
+   Interior hierarchy is Agamemnon's, but the frame is the ordinary modal. */
 html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-window-title h3,
 html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-content>.modal-header h4{margin:0 auto 0 0;font:700 30px/1.2 'Space Grotesk';letter-spacing:.02em;text-transform:none}
 html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-window-title>span{display:block;margin-top:10px;font:400 15px/1.5 'Space Grotesk';color:var(--ag-muted)}
-html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) #ag-maximize{display:none}
-html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .agents-dashboard-body{display:flex;flex-direction:column;flex:none;gap:16px;min-height:0;padding:0;overflow:visible}
-html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-head{padding:0}
-html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-body{display:flex;flex-direction:column;gap:28px;min-height:0}
-html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-pane-splitter{display:none}
-html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-launch{order:-1;position:static;inset:auto;max-height:none}
-html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet{width:auto;border:0!important;border-radius:0;background:transparent!important;box-shadow:none;overflow:visible}
-html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-tools{margin:0 0 16px;padding:0;border:0}
-html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-list{overflow:visible;padding:0;background:none}
-/* Two columns while each card keeps 360px (room for a name, its status and
-   two actions), one below that; never three. The board stops at the Penpot
-   2×510px + 30px width on very wide screens. */
-html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-list .ag-card-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,max(360px,calc((100% - 30px) / 2))),1fr));gap:28px 30px;max-width:1050px}
-html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-card-workers{display:contents}
-html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-list .ag-card{grid-template-columns:64px minmax(0,1fr) auto;gap:16px;min-height:152px;margin:0;padding:22px 24px}
+/* The fleet/detail split is the shared resizable window layout. A vertical
+   page stack here made cards overlap the detail pane in a mobile sheet. */
 html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-compact .ag-fleet-list .ag-card{grid-template-columns:34px minmax(0,1fr) auto;gap:8px;min-height:0;padding:9px 12px}
 html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-card-actions{flex-direction:row;align-self:start;gap:6px}
 /* Text actions need their own width; 32px forced Open/Stop into vertical
    fragments even on a full-size two-column board. */
 html[data-style="agamemnon"] #agents-dashboard .ag-card-actions .wb-icon-btn{width:auto;min-width:44px;min-height:44px;height:auto;padding:6px 8px;white-space:nowrap}
-html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-detail{display:flex;min-height:320px;overflow:visible;padding:24px 26px;scroll-margin-top:24px}
-html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-detail-top,
-html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-detail-tab-panel{max-height:none;overflow:visible}
-html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-history,
-html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-loadouts-view,
-html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-loadout-workspace{min-height:420px;overflow:visible}
 
-/* ── Workbench / Run Control page (undocked) ──────────────────────────────
+
+/* ── Workbench / Run Control window ───────────────────────────────────────
  * Summary, timeline and output in the primary column, run details beside
  * them, then the working tabs. Only the selected tab's panel is drawn: the
  * panels are hidden with the base `.wb-panel.hidden` rule, which nothing in
  * the Agamemnon layer overrides. */
-html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-body{display:flex;flex-direction:column;gap:18px;min-width:0;padding:0;overflow:visible}
+html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-body{display:flex;flex-direction:column;gap:12px;min-width:0;overflow:auto}
 html[data-style="agamemnon"] .wb-panel[data-wb-panel="activity"]{display:grid;grid-template-columns:minmax(0,790px) minmax(240px,306px);gap:20px 28px;align-content:start;justify-content:start}
 html[data-style="agamemnon"] .ag-run-control{display:grid;grid-column:1;grid-row:1;grid-template-rows:auto auto auto;gap:16px;min-width:0;align-self:start}
 html[data-style="agamemnon"] .ag-run-control>section{box-sizing:border-box;min-width:0;padding:22px 26px;background:var(--ag-panel);border:2px solid var(--ag-border-strong)}
@@ -265,7 +225,7 @@ html[data-style="agamemnon"] .wb-panel[data-wb-panel="activity"]>.wb-toolbar,htm
 html[data-style="agamemnon"] #workbench-modal .workbench-modal-body>.wb-tabs{display:flex;flex-wrap:wrap;gap:4px;margin:4px 0 0;border:0;border-bottom:2px solid var(--ag-border)}
 html[data-style="agamemnon"] #workbench-modal .workbench-modal-body>.wb-panel{position:relative;box-sizing:border-box;padding:20px;background:var(--ag-panel);border:2px solid var(--ag-border-strong);border-radius:0}
 html[data-style="agamemnon"] #workbench-modal .workbench-modal-body>.wb-panel[data-wb-panel="activity"]{padding:0;background:transparent;border:0}
-html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-body>.wb-panel{height:auto;min-height:380px}
+html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-body>.wb-panel{flex:1 0 auto;min-height:380px}
 html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .wb-activity{min-height:180px;max-height:500px;overflow:auto}
 html[data-style="agamemnon"] .wb-panel[data-wb-panel="activity"]::after{content:none!important}
 /* Docking rearranges the same Activity panel without turning every readout
@@ -327,10 +287,7 @@ html[data-style="agamemnon"] #agents-dashboard .ag-triage{gap:8px}
 html[data-style="agamemnon"] #agents-dashboard .ag-head-actions{gap:4px 9px}
 html[data-style="agamemnon"] #agents-dashboard .ag-head-actions .wb-btn-ghost{padding-inline:7px}
 html[data-style="agamemnon"] #agents-dashboard .ag-fleet-tools{gap:8px}
-html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-list .ag-card-grid{grid-template-columns:minmax(0,1fr);gap:12px;max-width:1050px}
-html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-list .ag-card{grid-template-columns:48px minmax(0,1fr) auto;gap:14px;min-height:100px;padding:14px 16px;border-width:1px!important}
-html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-expanded .ag-fleet-list .ag-card{grid-template-columns:64px minmax(0,1fr) auto}
-html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-expanded .ag-card-avatar .ag-bot{width:64px;height:64px}
+
 html[data-style="agamemnon"] #agents-dashboard .ag-card-actions .wb-icon-btn{min-height:40px}
 html[data-style="agamemnon"] #agents-dashboard .ag-card-copy{overflow:visible}
 html[data-style="agamemnon"] #agents-dashboard .ag-row-latest{font-family:'Space Grotesk';line-height:1.4}
@@ -339,12 +296,11 @@ html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.mod
 html[data-style="agamemnon"] #agents-dashboard .ag-appearance{border-color:var(--ag-border);margin:16px 0;padding:14px}
 html[data-style="agamemnon"] #agents-dashboard .ag-appearance-options{grid-template-columns:repeat(auto-fit,minmax(min(100%,125px),1fr));gap:8px}
 @container (min-width:800px){
- html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-list .ag-card-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+
 }
 @container (max-width:620px){
  html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-head-actions{margin-left:0}
- html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-list .ag-card{grid-template-columns:40px minmax(0,1fr) auto;gap:10px;padding:12px}
- html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-expanded .ag-card-avatar .ag-bot{width:40px;height:40px}
+
 }
 
 /* ── Narrower boards ──────────────────────────────────────────────────── */
@@ -381,14 +337,9 @@ html[data-style="agamemnon"] #agents-dashboard .ag-appearance-options{grid-templ
  html[data-style="agamemnon"] .chat-top-bar{min-height:24px}
  html[data-style="agamemnon"] #chat-history{padding:14px 12px}
  html[data-style="agamemnon"] .chat-container .chat-input-bar,html[data-style="agamemnon"] .chat-container.welcome-active .chat-input-bar{min-height:0;margin-top:10px}
- html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked),
- html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked){inset:0!important}
- html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .agents-modal-content,
- html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-content{padding:16px 14px 24px!important}
- html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .agents-window-header,
- html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-content>.modal-header{top:-16px;margin-top:0;padding-top:0!important;padding-bottom:16px!important}
- /* The shared sheet hides close buttons for swipe-to-dismiss; these pages
-    fill the screen, so keep an explicit way out. */
+
+ /* The shared sheet hides close buttons for swipe-to-dismiss; keep an
+    explicit way out of Phalanx and Workbench on mobile. */
  html[data-style="agamemnon"] #agents-dashboard #close-agents-dashboard,html[data-style="agamemnon"] #workbench-modal #close-workbench-modal{display:inline-flex!important;width:44px;height:44px}
  html[data-style="agamemnon"] .ag-head-actions{flex-wrap:wrap;margin-left:0}
 
@@ -485,6 +436,7 @@ html[data-style="agamemnon"] #agents-dashboard:is(.modal-right-docked,.modal-lef
 html[data-style="agamemnon"] #agents-dashboard :is(.ag-fleet-compact,.ag-fleet-expanded) .ag-card-avatar{min-height:0;padding:2px 0 0}
 html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-card-avatar .ag-bot,
 html[data-style="agamemnon"] #agents-dashboard:is(.modal-right-docked,.modal-left-docked) .ag-card-avatar .ag-bot{width:34px;height:34px;zoom:1}
+html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-expanded .ag-card-avatar .ag-bot{width:48px;height:48px;zoom:1}
 html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-card-copy{min-height:0;min-width:0;gap:2px;justify-content:start}
 html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-row-top{min-height:0}
 html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-row-name{line-height:1.25;white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
@@ -495,15 +447,16 @@ html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-row-latest{
 html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-card-actions,
 html[data-style="agamemnon"] #agents-dashboard:is(.modal-right-docked,.modal-left-docked) .ag-card-actions{grid-column:3;grid-row:1;display:flex;flex-direction:row;gap:4px;align-items:start;align-self:start;opacity:1}
 html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-card-actions button{min-width:44px;min-height:44px;width:auto;padding:4px 6px;font-size:11px;white-space:nowrap}
+/* At half-width the action labels otherwise consume nearly the entire name
+   column. Keep them touch-sized, but give the name its own row. */
+html[data-style="agamemnon"] #agents-dashboard:is(.modal-right-docked,.modal-left-docked) .ag-fleet-list .ag-bot-card{grid-template-columns:34px minmax(0,1fr)}
+html[data-style="agamemnon"] #agents-dashboard:is(.modal-right-docked,.modal-left-docked) .ag-fleet-list .ag-card-actions{grid-column:2;grid-row:2;justify-self:start}
 html[data-style="agamemnon"] #agents-dashboard:is(.modal-right-docked,.modal-left-docked) .ag-fleet-tools{display:flex;flex-wrap:wrap;gap:8px}
 html[data-style="agamemnon"] #agents-dashboard :is(.ag-card,.ag-detail,.ag-launch){overflow-wrap:anywhere;min-width:0}
 @media(max-width:600px){
  html[data-style="agamemnon"] #agents-dashboard .ag-head{display:flex;flex-wrap:wrap;gap:8px}
  html[data-style="agamemnon"] #agents-dashboard .ag-head-actions{width:100%;display:flex;flex-wrap:wrap;gap:6px}
- html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-list .ag-card{grid-template-columns:48px minmax(0,1fr);column-gap:12px;row-gap:4px;min-height:0;padding:16px}
- html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-expanded .ag-fleet-list .ag-card{grid-template-columns:48px minmax(0,1fr)}
- html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-expanded .ag-card-avatar .ag-bot{width:48px;height:48px}
- html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-card-actions{grid-column:2;grid-row:2;justify-content:flex-start;align-self:center}
+
  html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-card-actions .wb-icon-btn{width:44px;height:44px}
  /* At phone width names and latest activity get the full copy column. Keep
     the two labeled, touch-sized actions together underneath rather than
@@ -514,3 +467,12 @@ html[data-style="agamemnon"] #agents-dashboard :is(.ag-card,.ag-detail,.ag-launc
  html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-card-actions .wb-icon-btn:focus-visible{outline:2px solid var(--ag-gold);outline-offset:2px}
  html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-row-dur{font-size:10px}
 }
+@media(max-width:900px){
+ /* The sheet itself scrolls on phones; avoid an independent scroll pane in
+    the Overview tab and surface the sprite picker before settings. */
+ html[data-style] #agents-dashboard .ag-detail-tab-panel{flex:0 0 auto;overflow:visible}
+ html[data-style] #agents-dashboard #ag-panel-overview>.ag-soldier-context{display:block;order:-2;position:sticky;top:0;z-index:2;min-width:0;padding:9px 12px;border:1px solid var(--border);background:var(--panel);color:var(--fg);font-size:13px;line-height:1.35;overflow-wrap:anywhere}
+ html[data-style="agamemnon"] #agents-dashboard #ag-panel-overview>.ag-soldier-context{border-color:var(--ag-border-strong);background:var(--ag-panel);color:var(--ag-text)}
+ html[data-style] #agents-dashboard #ag-panel-overview>.ag-appearance{order:-1;flex-shrink:0;margin-top:0}
+}
+html[data-style] #agents-dashboard .ag-soldier-context{display:none}
