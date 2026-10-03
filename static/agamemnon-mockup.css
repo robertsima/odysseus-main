@@ -429,7 +429,20 @@ html[data-style] .sidebar.right-side .sidebar-brand{gap:10px;padding:0}
 @container wbpanel (max-width:610px){#workbench-modal .wb-branch-picker{width:100%}#workbench-modal .wb-repo-select{flex:1;max-width:100%}}
 /* Let all four views remain reachable even in a hand-resized dock. */
 #workbench-modal .workbench-modal-content{container:wbwindow / inline-size}
-@container wbwindow (max-width:660px){#workbench-modal .workbench-modal-body>.wb-tabs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}html[data-style="agamemnon"] #workbench-modal .workbench-modal-body>.wb-tabs{grid-template-columns:repeat(4,minmax(0,1fr))}#workbench-modal .wb-tabs .memory-tab{justify-content:center;min-width:0}}
+/* Agamemnon's tab strip has a more specific flex rule above: explicitly
+   switch it to grid at the actual window width, not the viewport width. */
+@container wbwindow (max-width:660px){
+ #workbench-modal .workbench-modal-body>.wb-tabs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
+ html[data-style="agamemnon"] #workbench-modal .workbench-modal-body>.wb-tabs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));overflow:visible}
+ #workbench-modal .wb-tabs .memory-tab{justify-content:center;min-width:0}
+ html[data-style="agamemnon"] #workbench-modal .wb-tabs .memory-tab{padding-inline:4px}
+}
+@container wbwindow (max-width:430px){
+ html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .workbench-modal-body>.wb-tabs{grid-template-columns:repeat(2,minmax(0,1fr))}
+ html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-body>.wb-tabs{grid-template-columns:repeat(4,minmax(0,1fr))}
+ html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .wb-pr-long{display:none}
+ html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .wb-pr-short{display:inline}
+}
 @container wbpane (max-width:460px){#workbench-modal .wb-diff-body:after{content:'↔ Scroll for long lines';display:block;position:sticky;left:0;width:max-content;padding:4px 8px;background:var(--panel);color:var(--wb-muted);font-size:11px}}
 /* Font/Layout previously required horizontal scrolling even at 1440px. */
 #theme-modal .admin-card:has(#theme-font-select) .theme-fd-row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
