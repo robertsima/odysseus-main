@@ -8,12 +8,15 @@ two regular users, ``alice`` and ``bob``.
 
     def test_bob_does_not_see_alice_sessions(api):
         alice, bob = api.as_user("alice"), api.as_user("bob")
-        alice.post("/api/session", data={"name": "plans"})
+        alice.post("/api/session", data={"name": "plans", "skip_validation": "true"})
         assert bob.get("/api/sessions").json() == []
 
 ``api.as_admin()``, ``api.as_user(name)`` and ``api.anonymous()`` each return a
-``TestClient`` carrying that user's session cookie (or none). The lifespan does
-not run, so no scheduler or background service starts.
+``TestClient`` carrying that user's session cookie (or none); keyword arguments
+go to ``TestClient``. ``api.auth`` is the AuthManager in use, ``api.module`` the
+imported app.py and ``api.session_manager`` the app's session manager. The
+lifespan does not run, so no scheduler or background service starts. Each test
+starts with an empty database and session cache.
 
 The repo's data folder is never read or written. tests/conftest.py imports
 core.database, and with it src.constants, before this plugin loads, so every
@@ -38,12 +41,13 @@ ADMIN = "admin"
 USERS = ("alice", "bob")
 PASSWORD = "test-password-123"
 
-# Audit events that touch a path, and which argument holds it.
+# Audit events that touch a path, and which arguments hold paths.
 _PATH_EVENTS = {
-    "open": 0, "os.listdir": 0, "os.scandir": 0, "os.mkdir": 0, "os.rmdir": 0,
-    "os.remove": 0, "os.rename": 0, "os.truncate": 0, "os.chmod": 0,
-    "os.utime": 0, "os.symlink": 1, "os.link": 1, "shutil.rmtree": 0,
-    "shutil.copyfile": 1, "shutil.move": 1, "sqlite3.connect": 0,
+    "open": (0,), "os.listdir": (0,), "os.scandir": (0,), "os.mkdir": (0,),
+    "os.rmdir": (0,), "os.remove": (0,), "os.rename": (0, 1), "os.truncate": (0,),
+    "os.chmod": (0,), "os.utime": (0,), "os.symlink": (0, 1), "os.link": (0, 1),
+    "shutil.rmtree": (0,), "shutil.copyfile": (0, 1), "shutil.move": (0, 1),
+    "sqlite3.connect": (0,),
 }
 
 
@@ -85,12 +89,10 @@ def _under_protected(path) -> bool:
 def _audit(event, args):
     if not _guard["active"]:
         return
-    index = _PATH_EVENTS.get(event)
-    if index is None or len(args) <= index:
-        return
-    if _under_protected(args[index]):
-        _guard["hits"].append(f"{event} {args[index]!r}")
-        raise PermissionError(f"test touched the real data folder: {event} {args[index]!r}")
+    for index in _PATH_EVENTS.get(event, ()):
+        if index < len(args) and _under_protected(args[index]):
+            _guard["hits"].append(f"{event} {args[index]!r}")
+            raise PermissionError(f"test touched the real data folder: {event} {args[index]!r}")
 
 
 def _install_guard():
