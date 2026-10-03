@@ -56,6 +56,32 @@ def _big_repo(root, files=2000, worktrees=5):
 
 
 @pytest.mark.asyncio
+async def test_listing_validates_each_commit_once(root, monkeypatch):
+    """The cache half of the check below, on a small repository so it runs
+    on every push. The timing half needs the 2,000-file one."""
+    _big_repo(root, files=40)
+    (root / "wt2" / "pkg1" / "m1.py").write_text("changed\n")
+    calls = []
+    real = rs._validate_tree_uncached
+    monkeypatch.setattr(
+        rs, "_validate_tree_uncached", lambda repo, cid: calls.append(cid) or real(repo, cid)
+    )
+
+    rows = await rs.list_repositories()
+
+    assert len(rows) == 6
+    assert all(r["ok"] and r["inspected"] for r in rows)
+    assert len({c for c in calls}) == len(calls) == 1  # six checkouts, one commit
+    by = {os.path.basename(r["repository"]): r for r in rows}
+    assert by["wt2"]["dirty"] is True and by["big"]["dirty"] is False
+    assert by["wt0"]["linked_worktree"] is True
+
+    await rs.list_repositories()
+    assert len(calls) == 1  # still cached
+
+
+@pytest.mark.nightly  # builds a 2,000-file repository with five worktrees: 12 s in WSL
+@pytest.mark.asyncio
 async def test_listing_is_fast_and_validates_each_commit_once(root, monkeypatch, capsys):
     _big_repo(root)
     (root / "wt2" / "pkg1" / "m1.py").write_text("changed\n")
