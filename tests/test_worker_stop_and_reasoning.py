@@ -19,11 +19,16 @@ def _run(coro):
 
 @pytest.fixture
 def loadout_tool(monkeypatch):
-    from src import agent_activity, agent_control, agent_loadouts
+    from src import agent_activity, agent_control, agent_loadouts, ai_interaction
     from src.agent_tools import loadout_tools
 
     # The calling chat's policy is read from the database; stop does not use it.
     monkeypatch.setattr(agent_loadouts, "caller_policy", lambda session_id, owner: {})
+    # No session manager: worker_session is matched against the runs as given.
+    # Without this the test used whatever manager the process held; after
+    # test_log_isolation imports app.py that is the app's real one, and the
+    # lookup of "w1" went to the shared test database.
+    monkeypatch.setattr(ai_interaction, "_session_manager", None)
 
     runs = [
         {"run_id": "session-a", "status": "running", "title": "Worker · Scout",
