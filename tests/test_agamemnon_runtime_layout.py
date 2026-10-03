@@ -116,6 +116,80 @@ def open_workbench(page, *, activity=True) -> None:
         page.wait_for("document.getElementById('wb-tab-activity').classList.contains('active')")
 
 
+def resize_workbench_dock(page, width: int) -> None:
+    """Drag the actual dock seam, not a test-only inline width override."""
+    page.wait_for("getComputedStyle(document.querySelector('.edge-dock-resize-handle-right')).display !== 'none'")
+    grip = page.probe('.edge-dock-resize-handle-right')
+    y = min(page.height // 2, 350)
+    for kind, x, buttons in [('mouseMoved', grip['left'] + 5, 0),
+                             ('mousePressed', grip['left'] + 5, 1),
+                             ('mouseMoved', page.width - width, 1),
+                             ('mouseReleased', page.width - width, 0)]:
+        page.send('Input.dispatchMouseEvent', {'type': kind, 'x': x, 'y': y,
+                                               'button': 'left', 'buttons': buttons,
+                                               'clickCount': int(kind == 'mousePressed')})
+    page.wait_for(f"Math.abs(document.querySelector('.workbench-modal-content').getBoundingClientRect().width - {width}) < 15")
+
+
+def assert_dock_controls_fit(page, selectors):
+    """A control must stay inside its own panel, not merely inside the viewport."""
+    for selector, parent in selectors:
+        target = f'{parent} {selector}'
+        page.eval(f"document.querySelector({json.dumps(target)}).scrollIntoView({{block:'center'}})")
+        result = page.eval(f"(() => {{const el=document.querySelector({json.dumps(target)}), p=el.closest({json.dumps(parent)});"
+                           "const a=el.getBoundingClientRect(), b=p.getBoundingClientRect();"
+                           "return {left:a.left,right:a.right,parentLeft:b.left,parentRight:b.right,width:a.width,visible:getComputedStyle(el).display!=='none'};})()")
+        assert result['visible'] and result['width'] > 0 and result['left'] >= result['parentLeft'] - 2 and result['right'] <= result['parentRight'] + 2, (selector, result)
+
+
+@pytest.mark.parametrize('style', ['agamemnon', 'classic'])
+def test_workbench_drag_resizes_side_panel_and_keeps_controls(style, open_app):
+    page = open_app(1440, style=style)
+    open_workbench(page)
+    page.click('#wb-dock-right')
+    page.wait_for("document.getElementById('workbench-modal').classList.contains('modal-right-docked')")
+    for width in (680, 480, 350, 580):
+        resize_workbench_dock(page, width)
+        shot(page, f'dock-{style}-{width}')
+        assert_dock_controls_fit(page, [('#close-workbench-modal', '.workbench-modal-content'),
+                                        ('#wb-tab-prs', '.workbench-modal-body'),
+                                        ('#wb-pause', '#wb-panel-activity')])
+        assert_no_sideways_scroll(page, '.workbench-modal-content')
+        assert_no_sideways_scroll(page, '.workbench-modal-body')
+        tabs = page.eval("(() => {const bar=document.querySelector('#workbench-modal .wb-tabs');return {scroll:bar.scrollWidth,client:bar.clientWidth,tabs:[...bar.children].map(t=>({name:t.dataset.wbTab,scroll:t.scrollWidth,client:t.clientWidth}))};})()")
+        assert tabs['scroll'] <= tabs['client'] + 2 and all(t['scroll'] <= t['client'] + 2 for t in tabs['tabs']), tabs
+        for tab, selectors in [('changes', ['.wb-repo-select', '#wb-base', '.wb-split', '#wb-diffpane']),
+                               ('commits', ['.wb-repo-select', '.wb-split']),
+                               ('prs', [])]:
+            page.click(f'#wb-tab-{tab}')
+            assert visible_panels(page) == [tab]
+            assert_dock_controls_fit(page, [(s, f'#wb-{tab}') for s in selectors])
+            if tab == 'changes':
+                split = page.eval("(() => {const a=document.querySelector('#wb-changes .wb-list').getBoundingClientRect(), b=document.querySelector('#wb-diffpane').getBoundingClientRect();return {listBottom:a.bottom,diffTop:b.top,listRight:a.right,diffLeft:b.left}})()")
+                assert split['diffTop'] >= split['listBottom'] - 2, split
+        page.click('#wb-tab-activity')
+    assert page.eval("document.querySelector('.workbench-modal-content')._userDockWidth") == 580
+
+
+def test_docked_agamemnon_editor_draft_survives_resize(open_app):
+    page = open_app(1440)
+    open_workbench(page, activity=False)
+    page.click('#wb-dock-right')
+    resize_workbench_dock(page, 480)
+    page.click('#wb-tab-changes')
+    page.wait_for("document.querySelector('#wb-diffpane .wb-diff')")
+    page.click('#wb-diffpane [data-wb-act="edit-file"]')
+    page.wait_for("document.querySelector('#wb-editor-text')?.value.includes('migrate')")
+    page.eval("document.querySelector('#wb-editor-text').value += '\\n# unsaved dock draft'; document.querySelector('#wb-editor-text').dispatchEvent(new Event('input',{bubbles:true}))")
+    for width in (350, 680, 480):
+        resize_workbench_dock(page, width)
+        assert page.eval("document.querySelector('#wb-editor-text')?.value.endsWith('# unsaved dock draft')")
+        assert_dock_controls_fit(page, [('#wb-editor-text', '#wb-diffpane'),
+                                        ('[data-wb-act="save-file"]', '#wb-diffpane'),
+                                        ('.wb-repo-select', '#wb-changes')])
+        shot(page, f'dock-editor-{width}')
+
+
 def open_agents(page) -> None:
     page.eval("window.agentsDashboard.open()")
     page.wait_for("document.querySelectorAll('#agents-dashboard .ag-card').length === 3")
@@ -599,7 +673,7 @@ def test_responsive_work_surfaces_and_run_states(open_app, server):
         server.state.run_status = 'running'
 
 
-@pytest.mark.parametrize('width', [390, 700])
+@pytest.mark.parametrize('width', [320, 390, 700])
 def test_compact_workbench_filters_keyboard_long_title_and_status(open_app, width):
     page = open_app(width)
     open_workbench(page)
@@ -609,6 +683,12 @@ def test_compact_workbench_filters_keyboard_long_title_and_status(open_app, widt
     # On mobile the default component opens as a bottom sheet, not an
     # Agamemnon full-page replacement: measure within that sheet.
     assert tabs['height'] <= 50 and feed['top'] - page.probe('.workbench-modal-content')['top'] < 390, (tabs, feed)
+    clear = page.probe('#wb-clear')
+    assert clear['right'] <= page.probe('#wb-panel-activity')['right'] + 1, clear
+    if width == 320:
+        # Feed actions belong together: a lone Clear row is hard to scan.
+        pause = page.probe('#wb-pause')
+        assert abs(pause['top'] - clear['top']) <= 2, (pause, clear)
     assert summary['bottom'] < feed['top']
     assert page.eval("document.getElementById('ag-run-state').getAttribute('role')") == 'status'
     assert page.eval("document.getElementById('wb-tab-prs').getAttribute('aria-label')") == 'Pull Requests'
@@ -616,6 +696,9 @@ def test_compact_workbench_filters_keyboard_long_title_and_status(open_app, widt
     page.eval("document.querySelector('.wb-filter-options summary').focus(); document.activeElement.click()")
     assert page.eval("document.querySelector('.wb-filter-options').open")
     assert page.probe('#wb-scope')['visible'] and page.probe('#wb-filter')['visible']
+    if width == 320:
+        assert_no_sideways_scroll(page, '.workbench-modal-content')
+        assert abs(page.probe('#wb-pause')['top'] - page.probe('#wb-clear')['top']) <= 2
     page.eval("document.getElementById('wb-scope').value='all'; document.getElementById('wb-scope').dispatchEvent(new Event('change',{bubbles:true}))")
     assert page.eval("document.getElementById('wb-scope').value") == 'all'
     page.eval("document.querySelector('.wb-filter-options summary').click()")
@@ -675,14 +758,16 @@ def test_phone_phalanx_actions_and_muted_metadata(open_app):
     assert page.eval("document.activeElement.matches('.ag-fleet-compact .ag-card-actions button')")
 
 
-def test_workbench_200_percent_zoom_equivalent_keeps_actions(open_app):
-    # At desktop width with 200% CSS zoom, the effective layout viewport is
-    # 390px: exercise the same reflow and reachable controls as browser zoom.
-    page = open_app(390)
+@pytest.mark.parametrize('width', [320, 390])
+def test_workbench_200_percent_zoom_equivalent_keeps_actions(open_app, width):
+    # At 200% browser zoom on 640/780px screens, the effective layout viewport
+    # is 320/390px: exercise the same reflow and reachable controls.
+    page = open_app(width)
     open_workbench(page)
     assert_no_sideways_scroll(page, '.workbench-modal-content')
     for selector in ('#close-workbench-modal', '#wb-pause', '#wb-clear', '.wb-filter-options summary'):
         assert_usable(page, selector)
+    assert abs(page.probe('#wb-pause')['top'] - page.probe('#wb-clear')['top']) <= 2
 
 
 @pytest.mark.parametrize('width', [1440, 700, 390])
