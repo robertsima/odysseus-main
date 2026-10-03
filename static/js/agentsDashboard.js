@@ -1191,7 +1191,7 @@ function onConfigChange(e) {
   if (e.target.matches('input[name="ag-appearance"]')) {
     const input = e.target;
     const row = state.rows.find((item) => item.session_id === state.selected);
-    if (!row || row.parent_session || document.documentElement.dataset.theme !== 'dark') return;
+    if (!row || row.parent_session) return;
     const choice = input.value || null;
     if (state.appearanceSaving) {
       const active = $('ag-appearance-' + (state.pendingAppearance || 'auto'));

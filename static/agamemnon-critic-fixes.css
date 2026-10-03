@@ -75,7 +75,7 @@ html[data-style="classic"] .ag-fleet-compact .ag-card-actions .wb-icon-btn:focus
  html[data-style="classic"] #agents-dashboard .agents-window-header{position:relative;z-index:3;background:var(--panel)}
  /* The shared swipe sheet hides all X buttons with !important. Phalanx is
     also a keyboard-controlled dialog, so retain its explicit exit. */
- html[data-style="classic"] #agents-dashboard #close-agents-dashboard{display:inline-flex!important;flex-basis:44px;width:44px;height:44px}
+ html[data-style="classic"] #agents-dashboard #close-agents-dashboard{display:inline-flex!important;flex-basis:44px;width:44px;height:44px;font-size:0}
  html[data-style="classic"] #agents-dashboard .ag-detail-tab-panel{min-height:0;overflow-y:auto;overscroll-behavior:contain}
  html[data-style="classic"] #agents-dashboard .ag-detail-tab-panel>.ag-appearance{flex-shrink:0}
 }

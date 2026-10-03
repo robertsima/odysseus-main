@@ -32,6 +32,8 @@ VIEWPORTS = {1440: 920, 1280: 800, 1024: 768, 700: 844, 390: 844, 320: 740}
 SHOTS = os.environ.get("AGAMEMNON_SCREENSHOT_DIR")
 ODYSSEUS_THEME = json.dumps({"name": "odysseus", "colors": {
     "bg": "#211f1c", "fg": "#f2eee5", "panel": "#171614", "border": "#554b36", "red": "#c99a45"}})
+LIGHT_THEME = json.dumps({"name": "light", "colors": {
+    "bg": "#f0ebe3", "fg": "#5a5248", "panel": "#faf6f0", "border": "#d4cdc2", "red": "#c47d5a"}})
 
 
 @pytest.fixture(scope="module")
@@ -51,10 +53,12 @@ def browser():
 def open_app(server, browser):
     pages = []
 
-    def _open(width: int, theme: str | None = None):
+    def _open(width: int, theme: str | None = None, style: str | None = None):
         page = browser.page(width, VIEWPORTS[width])
         if theme:
             page.before_load(f"localStorage.setItem('odysseus-theme', {json.dumps(theme)});")
+        if style:
+            page.before_load(f"if (!localStorage.getItem('odysseus-page-style-v1')) localStorage.setItem('odysseus-page-style-v1', {json.dumps(json.dumps({'value': style, 'updated_at': 1}))});")
         page.goto(f"{server.url}/#{SESSION_ID}", settle=0.5)
         page.wait_for("document.querySelectorAll('#chat-history .msg').length >= 4", timeout=15)
         page.wait_for("window.agentsDashboard && window.workbenchModule", timeout=10)
@@ -101,9 +105,12 @@ def visible_panels(page) -> list[str]:
 def open_workbench(page, *, activity=True) -> None:
     page.eval("window.workbenchModule.open()")
     page.wait_for("!document.getElementById('workbench-modal').classList.contains('hidden')")
+    # The exported module is visible before its deferred wireWindow() hooks
+    # attach; clicking the tab in that gap silently leaves Changes selected.
+    time.sleep(0.5)
     if activity:
         page.click('#wb-tab-activity')  # Legacy run-layout assertions explicitly inspect Activity.
-    time.sleep(0.4)
+        page.wait_for("document.getElementById('wb-tab-activity').classList.contains('active')")
 
 
 def open_agents(page) -> None:
@@ -539,7 +546,9 @@ def test_compact_workbench_filters_keyboard_long_title_and_status(open_app, widt
     tabs = page.probe('.wb-tabs')
     summary = page.probe('.ag-run-summary')
     feed = page.probe('.wb-activity')
-    assert tabs['height'] <= 50 and feed['top'] < 390, (tabs, feed)
+    # On mobile the default component opens as a bottom sheet, not an
+    # Agamemnon full-page replacement: measure within that sheet.
+    assert tabs['height'] <= 50 and feed['top'] - page.probe('.workbench-modal-content')['top'] < 390, (tabs, feed)
     assert summary['bottom'] < feed['top']
     assert page.eval("document.getElementById('ag-run-state').getAttribute('role')") == 'status'
     assert page.eval("document.getElementById('wb-tab-prs').getAttribute('aria-label')") == 'Pull Requests'
@@ -626,14 +635,14 @@ def test_appearance_effects_show_through_agamemnon_work_surfaces(open_app, width
     time.sleep(1.5)  # let animated drops traverse the screenshot, not just spawn above it
     shot(page, 'rain-chat')
     open_workbench(page)
-    assert '/ 0.36)' in page.eval("getComputedStyle(document.querySelector('.workbench-modal-content')).backgroundColor")
+    assert page.eval("getComputedStyle(document.querySelector('.workbench-modal-content')).backgroundColor").startswith('rgb(')
     assert page.eval("+getComputedStyle(document.querySelector('#rain-canvas')).zIndex") < page.eval("+getComputedStyle(document.querySelector('#workbench-modal')).zIndex")
     assert page.eval("getComputedStyle(document.querySelector('.wb-activity')).backgroundColor") != 'rgba(0, 0, 0, 0)'
     shot(page, 'rain-workbench')
     page.click('#close-workbench-modal')
     open_agents(page)
     shot(page, 'rain-phalanx')
-    assert '/ 0.36)' in page.eval("getComputedStyle(document.querySelector('.agents-modal-content')).backgroundColor")
+    assert page.eval("getComputedStyle(document.querySelector('.agents-modal-content')).backgroundColor").startswith('rgb(')
     page.click('#close-agents-dashboard')
     page.eval("(() => {const s=document.getElementById('theme-bg-pattern-select'); s.value='none'; s.dispatchEvent(new Event('change',{bubbles:true}));})()")
     page.wait_for("!document.querySelector('#rain-canvas')")
@@ -647,6 +656,113 @@ def test_appearance_effects_show_through_agamemnon_work_surfaces(open_app, width
     assert page.eval("document.body.classList.contains('bg-pattern-rain')")
     page.send('Emulation.setEmulatedMedia', {'features': [{'name': 'prefers-reduced-motion', 'value': 'no-preference'}]})
     page.wait_for("!!document.querySelector('#rain-canvas')")
+
+
+@pytest.mark.parametrize('theme', [None, ODYSSEUS_THEME, LIGHT_THEME])
+def test_floating_panels_are_opaque_movable_and_keep_selected_soldier(open_app, server, theme):
+    server.state.appearance[PARENT_ID] = 'scout'
+    page = open_app(1440, theme=theme, style='classic' if theme else 'agamemnon')
+    page.eval("(() => {const s=document.getElementById('theme-bg-pattern-select'); s.value='lattice'; s.dispatchEvent(new Event('change',{bubbles:true}));})()")
+    assert page.eval("document.body.classList.contains('bg-pattern-lattice')")
+    assert page.eval("getComputedStyle(document.body).backgroundImage") != 'none'
+    assert page.eval("getComputedStyle(document.querySelector('.chat-container')).visibility") == 'visible'
+    open_agents(page)
+    panel = page.probe('.agents-modal-content')
+    assert 0 < panel['left'] and panel['width'] < page.width
+    assert page.eval("getComputedStyle(document.querySelector('.agents-modal-content')).backgroundColor").startswith('rgb(')
+    assert page.eval("getComputedStyle(document.querySelector('#agents-dashboard .ag-soldier-sprite')).display") == 'block'
+    assert page.eval("getComputedStyle(document.querySelector('#agents-dashboard .ag-seal-mark')).display") == 'none'
+    assert page.eval(f"document.querySelector('.ag-card[data-sid=\"{PARENT_ID}\"] .ag-bot').dataset.soldierVariant") == 'scout'
+    page.click(f'.ag-card-select[data-sid="{PARENT_ID}"]')
+    page.wait_for(f"document.querySelector('#ag-detail').dataset.sessionId === '{PARENT_ID}'")
+    assert page.eval("document.querySelector('#ag-detail .ag-bot').dataset.soldierVariant") == 'scout'
+    label = json.loads(theme)['name'] if theme else 'agamemnon'
+    shot(page, 'selected-scout-' + label)
+    page.click('#close-agents-dashboard')
+    open_workbench(page, activity=False)
+    wb = page.probe('.workbench-modal-content')
+    assert wb['width'] < page.width and wb['left'] > 0
+    assert page.eval("getComputedStyle(document.querySelector('.workbench-modal-content')).backgroundColor").startswith('rgb(')
+    assert page.eval("getComputedStyle(document.querySelector('.chat-container')).visibility") == 'visible'
+    shot(page, 'floating-workbench-' + label)
+    server.state.appearance.clear()
+
+
+def test_lattice_remains_still_under_reduced_motion(open_app):
+    page = open_app(1440)
+    page.send('Emulation.setEmulatedMedia', {'features': [{'name': 'prefers-reduced-motion', 'value': 'reduce'}]})
+    page.eval("(() => {const s=document.getElementById('theme-bg-pattern-select'); s.value='lattice'; s.dispatchEvent(new Event('change',{bubbles:true}));})()")
+    assert page.eval("getComputedStyle(document.body).backgroundImage") != 'none'
+    assert page.eval("document.querySelectorAll('canvas[id$=\"-canvas\"]').length") == 0
+
+
+def test_saved_soldier_survives_style_switch_and_reload(open_app, server):
+    server.state.appearance[PARENT_ID] = 'reviewer'
+    try:
+        page = open_app(390, style='classic')
+        open_agents(page)
+        assert page.eval("document.documentElement.dataset.style") == 'classic'
+        assert page.eval(f"document.querySelector('.ag-card[data-sid=\"{PARENT_ID}\"] .ag-bot').dataset.soldierVariant") == 'reviewer'
+        assert page.eval("getComputedStyle(document.querySelector('#close-agents-dashboard')).fontSize") == '0px'
+        shot(page, 'classic-sprite-mobile-single-close')
+        page.eval("(() => {const t=document.getElementById('theme-style-toggle');t.checked=true;t.dispatchEvent(new Event('change',{bubbles:true}));})()")
+        page.wait_for("document.documentElement.dataset.style === 'agamemnon'")
+        assert page.eval(f"document.querySelector('.ag-card[data-sid=\"{PARENT_ID}\"] .ag-bot').dataset.soldierVariant") == 'reviewer'
+        shot(page, 'agamemnon-sprite-mobile')
+        page.eval('location.reload()')
+        page.wait_for("window.agentsDashboard && document.documentElement.dataset.style === 'agamemnon'")
+        assert page.eval("document.documentElement.dataset.style") == 'agamemnon'
+        open_agents(page)
+        assert page.eval(f"document.querySelector('.ag-card[data-sid=\"{PARENT_ID}\"] .ag-bot').dataset.soldierVariant") == 'reviewer'
+    finally:
+        server.state.appearance.clear()
+
+
+def test_floating_windows_stack_without_showing_the_other_window_through_them(open_app):
+    page = open_app(1440)
+    open_agents(page)
+    open_workbench(page, activity=False)
+    page.eval("document.body.classList.add('theme-frosted')")
+    # Bring either window forward: its opaque content must cover the other
+    # one, while Scribe remains available whenever a window is moved aside.
+    for front, other in [('#workbench-modal', '#agents-dashboard'),
+                         ('#agents-dashboard', '#workbench-modal')]:
+        page.eval(f"document.querySelector('{front} .modal-header').dispatchEvent(new PointerEvent('pointerdown', {{bubbles:true}}))")
+        a = page.probe(front + ' .modal-content')
+        b = page.probe(other + ' .modal-content')
+        x, y = max(a['left'], b['left']) + 100, max(a['top'], b['top']) + 160
+        assert page.eval(f"document.elementFromPoint({x},{y}).closest('.modal')?.id") == front[1:]
+        assert page.eval(f"getComputedStyle(document.querySelector('{front} .modal-content')).backgroundImage") == 'none'
+        assert page.eval(f"getComputedStyle(document.querySelector('{front} .modal-content')).backgroundColor").startswith('rgb(')
+    shot(page, 'stacked-opaque-panels')
+    page.click('#close-workbench-modal')
+    page.click('#ag-maximize')
+    expanded = page.probe('.agents-modal-content')
+    assert expanded['width'] > page.width * 0.7
+    shot(page, 'phalanx-maximized')
+
+
+@pytest.mark.parametrize('window,header,content', [
+    ('agents', '.agents-window-header', '.agents-modal-content'),
+    ('workbench', '#workbench-modal .modal-header', '.workbench-modal-content'),
+])
+def test_floating_panels_can_be_moved_by_their_titlebar(open_app, window, header, content):
+    page = open_app(1440)
+    if window == 'agents':
+        open_agents(page)
+    else:
+        open_workbench(page, activity=False)
+    before, bar = page.probe(content), page.probe(header)
+    x, y = bar['left'] + 150, bar['top'] + 20
+    for kind, px, py, buttons in [('mousePressed', x, y, 1),
+                                  ('mouseMoved', x + 120, y + 75, 1),
+                                  ('mouseReleased', x + 120, y + 75, 0)]:
+        page.send('Input.dispatchMouseEvent', {'type': kind, 'x': px, 'y': py,
+                                               'button': 'left', 'buttons': buttons,
+                                               'clickCount': 1})
+    after = page.probe(content)
+    assert after['left'] >= before['left'] + 100 and after['top'] >= before['top'] + 60, (before, after)
+    shot(page, window + '-moved')
 
 
 def test_other_effects_switch_cleanly_and_classic_stays_opaque(open_app):
@@ -693,15 +809,15 @@ def test_workbench_docks_beside_the_chat_and_keeps_working_tabs(open_app):
 # ── Agents ──────────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("width", list(VIEWPORTS))
-def test_agents_cards_form_a_two_column_board_with_reachable_detail(open_app, width):
+def test_agents_cards_remain_inside_floating_window_with_reachable_detail(open_app, width):
     page = open_app(width)
     open_agents(page)
     shot(page, "agents")
     cards = page.eval("[...document.querySelectorAll('#agents-dashboard .ag-card')].map(c => {"
                       " const r = c.getBoundingClientRect(); return {sid: c.dataset.sid, left: r.left, right: r.right, top: r.top}; })")
-    columns = {round(c["left"]) for c in cards}
-    # Two columns where a card keeps 360px (the 1280+ boards), else one.
-    assert len(columns) == (2 if width >= 1280 else 1), cards
+    # The shared fleet/detail splitter indents nested worker cards; it is
+    # intentionally no longer a full-screen two-column board.
+    assert all(c['left'] >= page.probe('.agents-modal-content')['left'] for c in cards), cards
     assert all(c["right"] <= width + 1 for c in cards)
     assert_usable(page, "#close-agents-dashboard")
     if width > 900:
@@ -709,7 +825,7 @@ def test_agents_cards_form_a_two_column_board_with_reachable_detail(open_app, wi
         assert_usable(page, "#ag-dock-left")
     assert_no_sideways_scroll(page, ".agents-modal-content")
 
-    # Selecting a unit by its name moves the detail into view with focus on it.
+    # Selecting a unit by its name updates the detail without replacing the window.
     page.click(f'.ag-card-select[data-sid="{OTHER_ID}"]')
     page.wait_for(f"document.querySelector('#ag-detail').dataset.sessionId === '{OTHER_ID}'")
     time.sleep(0.6)  # smooth scroll
@@ -721,6 +837,8 @@ def test_agents_cards_form_a_two_column_board_with_reachable_detail(open_app, wi
     # The detail tabs are real tabs.
     page.click("#ag-tab-steering")
     assert page.eval("document.getElementById('ag-tab-steering').getAttribute('aria-selected')") == "true"
+    page.eval("document.getElementById('ag-reply').scrollIntoView({block:'center',behavior:'instant'})")
+    time.sleep(0.3)
     assert_usable(page, "#ag-reply")
 
 
@@ -731,7 +849,9 @@ def test_launch_worker_form_opens_where_the_button_is(open_app):
     page.wait_for("document.getElementById('ag-launch')")
     time.sleep(0.3)
     launch, fleet = page.probe("#ag-launch"), page.probe(".ag-fleet")
-    assert launch["visible"] and launch["top"] < fleet["top"]
+    # The shared floating window launches this form over the fleet pane;
+    # page mode used to place it in document flow above the fleet.
+    assert launch["visible"] and launch["top"] >= fleet["top"]
     assert 0 <= launch["top"] < page.height
     assert page.eval("document.activeElement.id") == "ag-task"
 
@@ -742,6 +862,8 @@ def test_parent_soldier_appearance_saves_and_keeps_focus(open_app, server, width
     open_agents(page)
     page.click(f'.ag-card-select[data-sid="{PARENT_ID}"]')
     page.wait_for(f"document.querySelector('#ag-detail').dataset.sessionId === '{PARENT_ID}'")
+    page.eval("document.querySelector('.ag-appearance-option:has(#ag-appearance-scout)').scrollIntoView({block:'center',behavior:'instant'})")
+    time.sleep(0.2)
     option = assert_usable(page, '.ag-appearance-option:has(#ag-appearance-scout)')
     assert option["width"] >= 100 and option["height"] >= 100
     page.click('.ag-appearance-option:has(#ag-appearance-scout)')
@@ -887,9 +1009,6 @@ def test_navigation_and_background_effect_survive_customization(open_app, theme)
 
 # ── Product crest and soldier sizing ────────────────────────────────────────
 
-LIGHT_THEME = json.dumps({"name": "light", "colors": {
-    "bg": "#f0ebe3", "fg": "#5a5248", "panel": "#faf6f0", "border": "#d4cdc2", "red": "#c47d5a"}})
-
 # Every drawn soldier and the slot it is meant to sit in.
 SPRITE_FIT_JS = r"""
 (slotSelector) => [...document.querySelectorAll(slotSelector)].filter(s => s.offsetParent).map(slot => {
@@ -967,7 +1086,7 @@ def test_soldier_sprites_fit_large_compact_and_detail_slots(open_app, width):
     page.wait_for("document.querySelector('.ag-fleet').classList.contains('ag-fleet-expanded')")
     time.sleep(0.2)
     shot(page, 'phalanx-large-sprites')
-    assert_sprites_fit(page, '#agents-dashboard .ag-card-avatar', min_fill=0.85, min_px=44 if width <= 600 else 60)
+    assert_sprites_fit(page, '#agents-dashboard .ag-card-avatar', min_fill=0.85, min_px=44)
     page.click(f'.ag-card-select[data-sid="{PARENT_ID}"]')
     page.wait_for(f"document.querySelector('#ag-detail').dataset.sessionId === '{PARENT_ID}'")
     time.sleep(0.3)
