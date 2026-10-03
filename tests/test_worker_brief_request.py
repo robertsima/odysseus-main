@@ -132,4 +132,4 @@ async def test_the_rules_reach_a_chat_that_can_launch_workers():
     assert "whole user-visible outcome" in text
     assert "rendered result next to their reference" in text
     assert "resume that worker" in text and "send_to_session" in text
-    assert "Batch." in text and "in the same round" in text
+    assert "Batch." in text and "in one round" in text

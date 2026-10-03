@@ -66,9 +66,13 @@ def test_list_sessions_excludes_other_users_sessions(monkeypatch):
     sm = MagicMock()
     sm.get_sessions_for_user.return_value = {alice_id: alice_session}
     router = sr.setup_session_routes(sm, {})
-    endpoint = next(r.endpoint for r in router.routes
-                    if getattr(r, "path", "") == "/api/sessions"
-                    and "GET" in getattr(r, "methods", set()))
+    # The router is module-level and every setup call appends its routes, so
+    # an earlier test in the same process leaves an /api/sessions bound to its
+    # own session manager: take the one this call registered (the last), or
+    # the test sees that manager's chats instead (intermittent under xdist).
+    endpoint = [r.endpoint for r in router.routes
+                if getattr(r, "path", "") == "/api/sessions"
+                and "GET" in getattr(r, "methods", set())][-1]
 
     result = endpoint(request=MagicMock())
     returned_ids = {s["id"] for s in result}
