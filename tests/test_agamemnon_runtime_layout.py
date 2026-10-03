@@ -683,6 +683,8 @@ def test_compact_workbench_filters_keyboard_long_title_and_status(open_app, widt
     # On mobile the default component opens as a bottom sheet, not an
     # Agamemnon full-page replacement: measure within that sheet.
     assert tabs['height'] <= 50 and feed['top'] - page.probe('.workbench-modal-content')['top'] < 390, (tabs, feed)
+    clear = page.probe('#wb-clear')
+    assert clear['right'] <= page.probe('#wb-panel-activity')['right'] + 1, clear
     assert summary['bottom'] < feed['top']
     assert page.eval("document.getElementById('ag-run-state').getAttribute('role')") == 'status'
     assert page.eval("document.getElementById('wb-tab-prs').getAttribute('aria-label')") == 'Pull Requests'
