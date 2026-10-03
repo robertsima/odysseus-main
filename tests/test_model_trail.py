@@ -9,8 +9,6 @@ record the model (and only the model) reads after it.
 import json
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
 from core.models import ChatMessage, Session
 from src.turn_trail import TRAIL_MAX_CHARS, TRAIL_LABEL, render_model_trail
@@ -197,13 +195,10 @@ def test_offloaded_output_is_named_by_its_toolout_ref(monkeypatch):
 # --- recall_tool_output with an evt- ref -------------------------------------
 
 @pytest.fixture
-def db(monkeypatch):
+def db(monkeypatch, make_test_db):
     from core import database
 
-    engine = create_engine("sqlite://", connect_args={"check_same_thread": False},
-                           poolclass=__import__("sqlalchemy.pool", fromlist=["StaticPool"]).StaticPool)
-    database.Base.metadata.create_all(engine)
-    maker = sessionmaker(bind=engine)
+    maker = make_test_db(memory=True).SessionLocal
     monkeypatch.setattr(database, "SessionLocal", maker)
     return maker, database
 

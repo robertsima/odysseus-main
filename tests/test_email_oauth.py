@@ -152,18 +152,13 @@ def test_xoauth2_bytes_is_raw_frame_encoded():
 
 # ── Helpers for in-memory DB fixtures ────────────────────────────
 
-def _make_db():
+def _make_db(make_test_db):
     """Return (Session, SessionFactory) backed by an isolated in-memory SQLite DB.
 
     Used to test DB-touching helpers without the real database.
     The factory lets tests open a fresh session after the helper closes its own.
     """
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-    from core.database import Base
-    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
-    Base.metadata.create_all(engine)
-    Factory = sessionmaker(bind=engine)
+    Factory = make_test_db(memory=True).SessionLocal
     return Factory(), Factory
 
 
@@ -192,7 +187,7 @@ def _make_account(session, account_id="acct-1", owner="alice", **kwargs):
 
 # ── Token encryption at rest ─────────────────────────────────────
 
-def test_refresh_token_stored_encrypted_not_raw():
+def test_refresh_token_stored_encrypted_not_raw(make_test_db):
     """_refresh_google_token must encrypt the new access token before writing it
     to the DB — storing the raw token string would expose credentials at rest."""
     from src.secret_storage import encrypt as _enc, decrypt as _dec
@@ -200,7 +195,7 @@ def test_refresh_token_stored_encrypted_not_raw():
 
     raw_token = "ya29.test_access_token_raw"
 
-    db, Factory = _make_db()
+    db, Factory = _make_db(make_test_db)
     _make_account(db, account_id="acct-r", owner="bob",
                   oauth_refresh_token=_enc("refresh-tok-xyz"))
     db.close()
@@ -227,12 +222,12 @@ def test_refresh_token_stored_encrypted_not_raw():
     assert _dec(stored) == raw_token, "stored value must decrypt back to the raw token"
 
 
-def test_refresh_stores_encrypted_expiry_not_token():
+def test_refresh_stores_encrypted_expiry_not_token(make_test_db):
     """oauth_token_expiry stores only a timestamp, never the token value."""
     from src.secret_storage import encrypt as _enc
     from core.database import EmailAccount
 
-    db, Factory = _make_db()
+    db, Factory = _make_db(make_test_db)
     _make_account(db, account_id="acct-e", owner="bob",
                   oauth_refresh_token=_enc("ref-tok"))
     db.close()
@@ -332,7 +327,7 @@ async def test_callback_tampered_state_returns_generic_error_no_leak():
 
 
 @pytest.mark.asyncio
-async def test_callback_owner_mismatch_does_not_write_tokens():
+async def test_callback_owner_mismatch_does_not_write_tokens(make_test_db):
     """A signed, valid state whose owner does not match the target account's
     owner must NOT write tokens — this blocks one authenticated user from
     binding their Google account onto another user's mailbox row.
@@ -340,7 +335,7 @@ async def test_callback_owner_mismatch_does_not_write_tokens():
     from routes.email_helpers import make_oauth_state
     from core.database import EmailAccount
 
-    db, Factory = _make_db()
+    db, Factory = _make_db(make_test_db)
     _make_account(db, account_id="acct-x", owner="alice")
     db.close()
 
@@ -373,14 +368,14 @@ async def test_callback_owner_mismatch_does_not_write_tokens():
 
 
 @pytest.mark.asyncio
-async def test_callback_valid_owner_writes_encrypted_tokens_to_intended_account():
+async def test_callback_valid_owner_writes_encrypted_tokens_to_intended_account(make_test_db):
     """A signed state whose owner matches the target account writes the tokens —
     and only to that account, stored encrypted (raw token never persisted)."""
     from routes.email_helpers import make_oauth_state
     from src.secret_storage import decrypt as _dec
     from core.database import EmailAccount
 
-    db, Factory = _make_db()
+    db, Factory = _make_db(make_test_db)
     _make_account(
         db,
         account_id="acct-v",
@@ -449,14 +444,14 @@ def _posted_redirect_uri(mock_post):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scheme", ("http", "https"))
-async def test_callback_redirect_uri_follows_the_request_scheme(scheme, monkeypatch):
+async def test_callback_redirect_uri_follows_the_request_scheme(scheme, monkeypatch, make_test_db):
     """The token exchange must echo the scheme the request actually arrived on —
     `https` behind a TLS terminator, `http` on a plain origin."""
     from routes.email_helpers import make_oauth_state
 
     monkeypatch.delenv("GOOGLE_OAUTH_REDIRECT_URI", raising=False)
 
-    db, Factory = _make_db()
+    db, Factory = _make_db(make_test_db)
     _make_account(db, account_id="acct-s", owner="alice", imap_user="alice@example.com")
     db.close()
 
@@ -484,7 +479,7 @@ async def test_callback_redirect_uri_follows_the_request_scheme(scheme, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_callback_redirect_uri_env_override_still_wins(monkeypatch):
+async def test_callback_redirect_uri_env_override_still_wins(monkeypatch, make_test_db):
     """An explicit GOOGLE_OAUTH_REDIRECT_URI is used verbatim — deriving the
     scheme must not override a value the operator pinned by hand."""
     from routes.email_helpers import make_oauth_state
@@ -492,7 +487,7 @@ async def test_callback_redirect_uri_env_override_still_wins(monkeypatch):
     pinned = "https://mail.example.com/api/email/oauth/google/callback"
     monkeypatch.setenv("GOOGLE_OAUTH_REDIRECT_URI", pinned)
 
-    db, Factory = _make_db()
+    db, Factory = _make_db(make_test_db)
     _make_account(db, account_id="acct-p", owner="alice", imap_user="alice@example.com")
     db.close()
 
@@ -538,14 +533,14 @@ async def test_authorize_redirect_uri_follows_the_request_scheme(scheme, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_callback_rejects_token_for_a_different_mailbox_identity():
+async def test_callback_rejects_token_for_a_different_mailbox_identity(make_test_db):
     """Reconnecting with another Google identity must not replace the token
     while retaining the original IMAP/SMTP login names."""
     from routes.email_helpers import make_oauth_state
     from src.secret_storage import encrypt as _enc, decrypt as _dec
     from core.database import EmailAccount
 
-    db, Factory = _make_db()
+    db, Factory = _make_db(make_test_db)
     _make_account(
         db,
         account_id="acct-reconnect",
@@ -594,14 +589,14 @@ async def test_callback_rejects_token_for_a_different_mailbox_identity():
 
 
 @pytest.mark.asyncio
-async def test_callback_rejects_reconnect_without_a_fresh_refresh_token():
+async def test_callback_rejects_reconnect_without_a_fresh_refresh_token(make_test_db):
     """A same-identity access token cannot be paired with an unproven refresh
     token retained from a previously mixed row."""
     from routes.email_helpers import make_oauth_state
     from src.secret_storage import encrypt as _enc, decrypt as _dec
     from core.database import EmailAccount
 
-    db, Factory = _make_db()
+    db, Factory = _make_db(make_test_db)
     _make_account(
         db,
         account_id="acct-refresh-proof",
@@ -645,12 +640,12 @@ async def test_callback_rejects_reconnect_without_a_fresh_refresh_token():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("userinfo_result", [None, {}, {"email": None}])
-async def test_callback_requires_verified_mailbox_identity(userinfo_result):
+async def test_callback_requires_verified_mailbox_identity(userinfo_result, make_test_db):
     """A failed or incomplete userinfo lookup must not persist fresh tokens."""
     from routes.email_helpers import make_oauth_state
     from core.database import EmailAccount
 
-    db, Factory = _make_db()
+    db, Factory = _make_db(make_test_db)
     _make_account(
         db,
         account_id="acct-no-identity",
@@ -739,12 +734,12 @@ def test_get_valid_google_token_refreshes_when_expired():
     assert result == "ya29.new_token"
 
 
-def test_refresh_failure_returns_none_no_secret_raised():
+def test_refresh_failure_returns_none_no_secret_raised(make_test_db):
     """When the refresh HTTP call fails, _refresh_google_token must return None
     silently. It must not raise an exception or surface token/secret details."""
     from src.secret_storage import encrypt as _enc
 
-    db, Factory = _make_db()
+    db, Factory = _make_db(make_test_db)
     _make_account(db, account_id="acct-fail", owner="dave",
                   oauth_refresh_token=_enc("ref-tok"))
     db.close()
@@ -830,7 +825,7 @@ def test_imap_connect_uses_xoauth2_for_oauth_accounts():
 
 
 @pytest.mark.asyncio
-async def test_account_list_response_does_not_expose_token_values():
+async def test_account_list_response_does_not_expose_token_values(make_test_db):
     """The /accounts list route is the client-facing account inventory. It must
     expose `oauth_provider` (so the UI can show OAuth status) but never the
     access/refresh token values, encrypted or otherwise — only boolean
@@ -841,7 +836,7 @@ async def test_account_list_response_does_not_expose_token_values():
     raw_access = "ya29.super_secret_access_token"
     raw_refresh = "1//super_secret_refresh_token"
 
-    db, Factory = _make_db()
+    db, Factory = _make_db(make_test_db)
     _make_account(db, account_id="acct-list", owner="alice",
                   oauth_provider="google",
                   oauth_access_token=_enc(raw_access),
@@ -974,11 +969,11 @@ def test_unparseable_body_falls_back_to_status():
     assert _classify_google_token_failure(broken) == TOKEN_TRANSIENT
 
 
-def test_refresh_status_reports_terminal_for_revoked_refresh_token():
+def test_refresh_status_reports_terminal_for_revoked_refresh_token(make_test_db):
     from src.secret_storage import encrypt as _enc
     from routes.email_helpers import TOKEN_TERMINAL
 
-    db, Factory = _make_db()
+    db, Factory = _make_db(make_test_db)
     _make_account(db, account_id="acct-revoked", owner="dave",
                   oauth_refresh_token=_enc("ref-tok"))
     db.close()
@@ -995,11 +990,11 @@ def test_refresh_status_reports_terminal_for_revoked_refresh_token():
     assert kind == TOKEN_TERMINAL
 
 
-def test_refresh_status_reports_transient_when_google_is_unreachable():
+def test_refresh_status_reports_transient_when_google_is_unreachable(make_test_db):
     from src.secret_storage import encrypt as _enc
     from routes.email_helpers import TOKEN_TRANSIENT
 
-    db, Factory = _make_db()
+    db, Factory = _make_db(make_test_db)
     _make_account(db, account_id="acct-blip", owner="dave",
                   oauth_refresh_token=_enc("ref-tok"))
     db.close()

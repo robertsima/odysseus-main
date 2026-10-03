@@ -13,16 +13,9 @@ This test pins three things:
   3. ``routes/history_routes.py`` never orders a ChatMessage query by the
      non-existent ``created_at`` column again.
 """
-import os
 from pathlib import Path
 
-# Keep the import-time engine hermetic — no on-disk app.db.
-os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
-
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-
-from core.database import Base, ChatMessage as DbChatMessage, Session as DbSession
+from core.database import ChatMessage as DbChatMessage, Session as DbSession
 
 
 HISTORY_ROUTES = Path(__file__).resolve().parent.parent / "routes" / "history" / "history_routes.py"
@@ -36,10 +29,8 @@ def test_chatmessage_model_has_timestamp_not_created_at():
     )
 
 
-def test_order_by_timestamp_query_executes():
-    engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    db = sessionmaker(bind=engine)()
+def test_order_by_timestamp_query_executes(make_test_db):
+    db = make_test_db(memory=True).SessionLocal()
     try:
         sid = "sess1234"
         # FK enforcement is on (PRAGMA foreign_keys), so seed the parent session.

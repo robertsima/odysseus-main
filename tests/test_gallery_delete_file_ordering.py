@@ -11,10 +11,8 @@ import asyncio
 
 import pytest
 from fastapi import HTTPException, Request
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
-from core.database import Base, GalleryImage
+from core.database import GalleryImage
 import routes.gallery_routes as gallery_routes
 
 
@@ -26,10 +24,8 @@ def _delete_endpoint():
     raise AssertionError("DELETE /api/gallery/{image_id} endpoint not found")
 
 
-def _seed(tmp_path):
-    engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(bind=engine)
-    SessionLocal = sessionmaker(bind=engine)
+def _seed(tmp_path, make_test_db):
+    SessionLocal = make_test_db(memory=True).SessionLocal
     db = SessionLocal()
     db.add(GalleryImage(id="img-1", filename="x.png", owner="alice", is_active=True))
     db.commit()
@@ -40,8 +36,8 @@ def _seed(tmp_path):
     return SessionLocal
 
 
-def test_file_kept_when_commit_fails(tmp_path, monkeypatch):
-    SessionLocal = _seed(tmp_path)
+def test_file_kept_when_commit_fails(tmp_path, monkeypatch, make_test_db):
+    SessionLocal = _seed(tmp_path, make_test_db)
     # GALLERY_IMAGE_DIR is an absolute path fixed at import, so a chdir can't
     # redirect the delete; point the resolver at the seeded tmp dir directly.
     monkeypatch.setattr(gallery_routes, "GALLERY_IMAGE_DIR", tmp_path / "data" / "generated_images")
@@ -68,8 +64,8 @@ def test_file_kept_when_commit_fails(tmp_path, monkeypatch):
     check.close()
 
 
-def test_file_removed_on_successful_delete(tmp_path, monkeypatch):
-    SessionLocal = _seed(tmp_path)
+def test_file_removed_on_successful_delete(tmp_path, monkeypatch, make_test_db):
+    SessionLocal = _seed(tmp_path, make_test_db)
     monkeypatch.setattr(gallery_routes, "GALLERY_IMAGE_DIR", tmp_path / "data" / "generated_images")
     monkeypatch.setattr(gallery_routes, "get_current_user", lambda r: "alice")
     monkeypatch.setattr(gallery_routes, "SessionLocal", SessionLocal)

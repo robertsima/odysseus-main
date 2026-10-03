@@ -18,14 +18,9 @@ import pytest
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _make_orm_db():
+def _make_orm_db(make_test_db):
     """Return (Session, SessionFactory) backed by an isolated in-memory SQLite DB."""
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-    from core.database import Base
-    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
-    Base.metadata.create_all(engine)
-    Factory = sessionmaker(bind=engine)
+    Factory = make_test_db(memory=True).SessionLocal
     return Factory(), Factory
 
 
@@ -56,13 +51,13 @@ def _make_orm_account(session, account_id="acct-1", owner="alice", **kwargs):
 # ── test_connection route: OAuth awareness ────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_test_connection_oauth_account_uses_xoauth2_for_imap_and_smtp():
+async def test_test_connection_oauth_account_uses_xoauth2_for_imap_and_smtp(make_test_db):
     """The saved-account test must use XOAUTH2 for both mail protocols."""
     from src.secret_storage import encrypt as _enc
     from routes.email_routes import setup_email_routes
 
     future_expiry = str(int(time.time()) + 7200)
-    db, Factory = _make_orm_db()
+    db, Factory = _make_orm_db(make_test_db)
     _make_orm_account(
         db, account_id="acct-oauth", owner="alice",
         oauth_provider="google",
@@ -109,12 +104,12 @@ async def test_test_connection_oauth_account_uses_xoauth2_for_imap_and_smtp():
 
 
 @pytest.mark.asyncio
-async def test_test_connection_password_account_still_uses_login():
+async def test_test_connection_password_account_still_uses_login(make_test_db):
     """Existing password accounts must still go through the login() path."""
     from src.secret_storage import encrypt as _enc
     from routes.email_routes import setup_email_routes
 
-    db, Factory = _make_orm_db()
+    db, Factory = _make_orm_db(make_test_db)
     _make_orm_account(
         db, account_id="acct-pw", owner="alice",
         imap_host="imap.example.com",
@@ -153,12 +148,12 @@ async def test_test_connection_password_account_still_uses_login():
 
 
 @pytest.mark.asyncio
-async def test_test_connection_rejects_non_google_hosts_before_oauth_auth():
+async def test_test_connection_rejects_non_google_hosts_before_oauth_auth(make_test_db):
     """Saved Google tokens must never be routed to edited custom hosts."""
     from src.secret_storage import encrypt as _enc
     from routes.email_routes import setup_email_routes
 
-    db, Factory = _make_orm_db()
+    db, Factory = _make_orm_db(make_test_db)
     _make_orm_account(
         db,
         account_id="acct-oauth",
@@ -202,12 +197,12 @@ async def test_test_connection_rejects_non_google_hosts_before_oauth_auth():
 
 
 @pytest.mark.asyncio
-async def test_test_connection_rejects_insecure_oauth_transports_before_auth():
+async def test_test_connection_rejects_insecure_oauth_transports_before_auth(make_test_db):
     """Google OAuth credentials must not be tested over plaintext transports."""
     from src.secret_storage import encrypt as _enc
     from routes.email_routes import setup_email_routes
 
-    db, Factory = _make_orm_db()
+    db, Factory = _make_orm_db(make_test_db)
     _make_orm_account(
         db,
         account_id="acct-oauth",
@@ -290,7 +285,7 @@ async def test_test_connection_does_not_accept_inline_oauth_state():
 )
 async def test_test_connection_verifies_imap_tls_before_loading_oauth_token(
     imap_starttls,
-    imap_port,
+    imap_port, make_test_db
 ):
     """Both Google IMAP TLS modes receive a certificate-verifying context;
     certificate rejection happens before the bearer token is loaded."""
@@ -299,7 +294,7 @@ async def test_test_connection_verifies_imap_tls_before_loading_oauth_token(
     from routes.email_routes import setup_email_routes
     from src.secret_storage import encrypt as _enc
 
-    db, Factory = _make_orm_db()
+    db, Factory = _make_orm_db(make_test_db)
     _make_orm_account(
         db,
         account_id="acct-imap-tls",
@@ -366,7 +361,7 @@ async def test_test_connection_verifies_imap_tls_before_loading_oauth_token(
 )
 async def test_test_connection_verifies_smtp_tls_before_loading_oauth_token(
     smtp_security,
-    smtp_port,
+    smtp_port, make_test_db
 ):
     """Both Google SMTP TLS modes reject an invalid certificate before any
     XOAUTH2 credential is obtained or sent."""
@@ -375,7 +370,7 @@ async def test_test_connection_verifies_smtp_tls_before_loading_oauth_token(
     from routes.email_routes import setup_email_routes
     from src.secret_storage import encrypt as _enc
 
-    db, Factory = _make_orm_db()
+    db, Factory = _make_orm_db(make_test_db)
     _make_orm_account(
         db,
         account_id="acct-smtp-tls",

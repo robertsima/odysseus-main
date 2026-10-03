@@ -61,7 +61,6 @@
     "tests/test_email_send_only_no_inbox.py": "writes os.environ outside monkeypatch (D12)",
     "tests/test_email_smtp_security.py": "writes os.environ outside monkeypatch (D12)",
     "tests/test_email_summary_llm.py": "writes os.environ outside monkeypatch (D12)",
-    "tests/test_history_order_by_timestamp_regression.py": "writes os.environ outside monkeypatch (D12)",
     "tests/test_imap_leak_fixes.py": "writes os.environ outside monkeypatch (D12)",
     "tests/test_llm_core_anthropic_temp_clamp.py": "writes os.environ outside monkeypatch (D12)",
     "tests/test_llm_core_anthropic_temp_omit.py": "writes os.environ outside monkeypatch (D12)",

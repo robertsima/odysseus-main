@@ -1,19 +1,17 @@
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
 from tests.helpers.import_state import clear_fake_database_modules
 
 clear_fake_database_modules()
 
-from core.database import Base, Session, ChatMessage
+from core.database import Session, ChatMessage
 from datetime import datetime
 
-def test_sqlite_foreign_keys_cascade():
-    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
-    Base.metadata.create_all(bind=engine)
-    
-    TestSessionLocal = sessionmaker(bind=engine)
+def test_sqlite_foreign_keys_cascade(make_test_db):
+    # A fresh SQLite connection has foreign keys off; the copy's engine opens
+    # one, so the cascade below only happens if core.database's connect
+    # listener turns them on.
+    TestSessionLocal = make_test_db(memory=True).SessionLocal
     db = TestSessionLocal()
     
     session_id = "test-session-123"

@@ -10,27 +10,23 @@ ProviderAuthSession is allowed to persist.
 
 import types
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-
 import routes.chat_helpers as chat_helpers
 import src.endpoint_resolver as endpoint_resolver
-from core.database import Base, ModelEndpoint, Session as DbSession
+from core.database import ModelEndpoint, Session as DbSession
 
 _CODEX_BASE = "https://chatgpt.com/backend-api/codex"
 
 
-def _mem_db(monkeypatch):
-    engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(bind=engine)
-    # Match production SessionLocal (core.database) which is autoflush=False.
-    TestSessionLocal = sessionmaker(bind=engine, autoflush=False)
+def _mem_db(monkeypatch, make_test_db):
+    # make_test_db's SessionLocal matches production SessionLocal
+    # (core.database), which is autoflush=False.
+    TestSessionLocal = make_test_db(memory=True).SessionLocal
     monkeypatch.setattr(chat_helpers, "SessionLocal", TestSessionLocal)
     return TestSessionLocal
 
 
-def test_chatgpt_subscription_auth_is_not_written_to_sessions_table(monkeypatch):
-    TestSessionLocal = _mem_db(monkeypatch)
+def test_chatgpt_subscription_auth_is_not_written_to_sessions_table(monkeypatch, make_test_db):
+    TestSessionLocal = _mem_db(monkeypatch, make_test_db)
     db = TestSessionLocal()
     try:
         db.add(ModelEndpoint(
@@ -73,7 +69,7 @@ def test_chatgpt_subscription_auth_is_not_written_to_sessions_table(monkeypatch)
         db.close()
 
 
-def test_non_subscription_auth_is_still_persisted_to_sessions_table(monkeypatch):
+def test_non_subscription_auth_is_still_persisted_to_sessions_table(monkeypatch, make_test_db):
     """The early-return must be scoped to ChatGPT Subscription only.
 
     Ordinary endpoints rely on resolve_session_auth() persisting the resolved
@@ -82,7 +78,7 @@ def test_non_subscription_auth_is_still_persisted_to_sessions_table(monkeypatch)
     this test pins the persistence path as still reached for normal endpoints.
     """
     base = "https://api.example.com/v1"
-    TestSessionLocal = _mem_db(monkeypatch)
+    TestSessionLocal = _mem_db(monkeypatch, make_test_db)
     db = TestSessionLocal()
     try:
         db.add(ModelEndpoint(
@@ -122,9 +118,9 @@ def test_non_subscription_auth_is_still_persisted_to_sessions_table(monkeypatch)
         db.close()
 
 
-def test_chatgpt_subscription_clears_previously_persisted_bearer(monkeypatch):
+def test_chatgpt_subscription_clears_previously_persisted_bearer(monkeypatch, make_test_db):
     """A bearer left at rest by an older code path is stripped on next resolve."""
-    TestSessionLocal = _mem_db(monkeypatch)
+    TestSessionLocal = _mem_db(monkeypatch, make_test_db)
     db = TestSessionLocal()
     try:
         db.add(ModelEndpoint(
