@@ -718,6 +718,44 @@ def test_saved_soldier_survives_style_switch_and_reload(open_app, server):
         server.state.appearance.clear()
 
 
+def test_classic_close_has_one_glyph_at_desktop_size(open_app):
+    page = open_app(1440, style='classic')
+    open_agents(page)
+    close = page.eval("(() => {const b=document.getElementById('close-agents-dashboard');return {text:b.textContent.trim(),font:getComputedStyle(b).fontSize,pseudo:getComputedStyle(b,'::before').content};})()")
+    assert close['text'] == '×' and close['font'] == '0px' and close['pseudo'] != 'none', close
+    shot(page, 'classic-single-close')
+
+
+def test_narrow_docked_phalanx_keeps_name_and_actions(open_app):
+    page = open_app(1440)
+    open_agents(page)
+    page.click('#ag-dock-right')
+    page.wait_for("document.getElementById('agents-dashboard').classList.contains('modal-right-docked')")
+    first = page.eval(f"""(() => {{const c=document.querySelector('.ag-card[data-sid="{PARENT_ID}"]');
+      const name=c.querySelector('.ag-row-name'), action=c.querySelector('.ag-card-actions');
+      const n=name.getBoundingClientRect(), a=action.getBoundingClientRect();
+      return {{nameWidth:n.width, nameScroll:name.scrollWidth, nameBottom:n.bottom,
+        actionTop:a.top, actions:[...action.children].map(b=>({{width:b.getBoundingClientRect().width,height:b.getBoundingClientRect().height}}))}};}})()""")
+    assert first['nameWidth'] >= 100 and first['nameScroll'] <= first['nameWidth'] + 2, first
+    assert first['actionTop'] >= first['nameBottom'] - 1, first
+    assert all(a['width'] >= 44 and a['height'] >= 40 for a in first['actions']), first
+    shot(page, 'narrow-dock-name-and-actions')
+
+
+@pytest.mark.parametrize('style', ['classic', 'agamemnon'])
+def test_phone_soldier_chooser_precedes_settings_and_uses_sheet_scroll(open_app, style):
+    page = open_app(390, style=style)
+    open_agents(page)
+    page.click(f'.ag-card-select[data-sid="{PARENT_ID}"]')
+    page.wait_for(f"document.querySelector('#ag-detail').dataset.sessionId === '{PARENT_ID}'")
+    positions = page.eval("(() => {const p=document.querySelector('#ag-panel-overview'), a=p.querySelector('.ag-appearance'), s=p.querySelector('.ag-loadout-summary');return {appearance:a.getBoundingClientRect().top,settings:s.getBoundingClientRect().top,overflow:getComputedStyle(p).overflowY,detail:getComputedStyle(document.querySelector('#ag-detail')).overflowY};})()")
+    assert positions['appearance'] < positions['settings'], positions
+    assert positions['overflow'] == 'visible' and positions['detail'] == 'auto', positions
+    page.eval("document.querySelector('#ag-appearance-scout').scrollIntoView({block:'center'})")
+    assert_usable(page, 'label:has(#ag-appearance-scout)')
+    shot(page, 'phone-chooser-first-' + style)
+
+
 def test_floating_windows_stack_without_showing_the_other_window_through_them(open_app):
     page = open_app(1440)
     open_agents(page)

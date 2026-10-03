@@ -446,6 +446,10 @@ html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-row-latest{
 html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-card-actions,
 html[data-style="agamemnon"] #agents-dashboard:is(.modal-right-docked,.modal-left-docked) .ag-card-actions{grid-column:3;grid-row:1;display:flex;flex-direction:row;gap:4px;align-items:start;align-self:start;opacity:1}
 html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-card-actions button{min-width:44px;min-height:44px;width:auto;padding:4px 6px;font-size:11px;white-space:nowrap}
+/* At half-width the action labels otherwise consume nearly the entire name
+   column. Keep them touch-sized, but give the name its own row. */
+html[data-style="agamemnon"] #agents-dashboard:is(.modal-right-docked,.modal-left-docked) .ag-fleet-list .ag-bot-card{grid-template-columns:34px minmax(0,1fr)}
+html[data-style="agamemnon"] #agents-dashboard:is(.modal-right-docked,.modal-left-docked) .ag-fleet-list .ag-card-actions{grid-column:2;grid-row:2;justify-self:start}
 html[data-style="agamemnon"] #agents-dashboard:is(.modal-right-docked,.modal-left-docked) .ag-fleet-tools{display:flex;flex-wrap:wrap;gap:8px}
 html[data-style="agamemnon"] #agents-dashboard :is(.ag-card,.ag-detail,.ag-launch){overflow-wrap:anywhere;min-width:0}
 @media(max-width:600px){
@@ -461,4 +465,10 @@ html[data-style="agamemnon"] #agents-dashboard :is(.ag-card,.ag-detail,.ag-launc
  html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-card-actions .wb-icon-btn{color:var(--ag-text);background:var(--ag-raised);border:1px solid var(--ag-border-strong);padding-inline:10px}
  html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-card-actions .wb-icon-btn:focus-visible{outline:2px solid var(--ag-gold);outline-offset:2px}
  html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-row-dur{font-size:10px}
+}
+@media(max-width:900px){
+ /* The sheet itself scrolls on phones; avoid an independent scroll pane in
+    the Overview tab and surface the sprite picker before settings. */
+ html[data-style] #agents-dashboard .ag-detail-tab-panel{flex:0 0 auto;overflow:visible}
+ html[data-style] #agents-dashboard #ag-panel-overview>.ag-appearance{order:-1;flex-shrink:0;margin-top:0}
 }
