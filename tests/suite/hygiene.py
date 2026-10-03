@@ -14,6 +14,10 @@ Rules (website/testing-restructure-2026-10-03.md, D5 and D12):
 - source_text_read: a test reads production source as text (``read_text`` or
   ``open`` on a production path, ``inspect.getsource``, ``ast.parse`` of a file).
   Such tests break on harmless reformatting and pass when behavior breaks.
+- sys_path_write: a test edits ``sys.path``. tests/conftest.py already puts the
+  repo root there, and a wrong entry (``tests/`` itself) makes the mirrored
+  ``tests/scripts`` or ``tests/src`` package shadow production ``scripts`` or
+  ``src``, which are namespace packages.
 
 Run ``python -m tests.suite.hygiene`` to list offenders, or
 ``python -m tests.suite.hygiene --prune`` to drop allowlist entries that no
@@ -31,7 +35,8 @@ ROOT = Path(__file__).resolve().parents[2]
 TESTS = ROOT / "tests"
 ALLOWLIST = Path(__file__).with_name("hygiene_allowlist.json")
 
-RULES = ("sys_modules_module_scope", "importlib_reload", "raw_environ_write", "source_text_read")
+RULES = ("sys_modules_module_scope", "importlib_reload", "raw_environ_write", "source_text_read", "sys_path_write")
+_LIST_WRITES = {"insert", "append", "extend", "remove", "pop", "clear", "__setitem__"}
 
 _PROD_SEGMENTS = {
     "static", "src", "routes", "core", "services", "scripts", "integrations",
@@ -105,6 +110,8 @@ class _Scanner(ast.NodeVisitor):
                     self.hits.add("sys_modules_module_scope")
                 if self._subscript_of(node, self.environ_names):
                     self.hits.add("raw_environ_write")
+                if _dotted(node) == "sys.path" or self._subscript_of(node, {"sys.path"}):
+                    self.hits.add("sys_path_write")
 
     def visit_Assign(self, node):
         self._check_targets(node.targets)
@@ -131,6 +138,8 @@ class _Scanner(ast.NodeVisitor):
                 self.hits.add("sys_modules_module_scope")
             if owner in self.environ_names and node.func.attr in _MAPPING_WRITES:
                 self.hits.add("raw_environ_write")
+            if owner == "sys.path" and node.func.attr in _LIST_WRITES:
+                self.hits.add("sys_path_write")
             if node.func.attr in _READS and self._names_production(node.func.value):
                 self.hits.add("source_text_read")
         if name in self.reload_names:

@@ -6,14 +6,9 @@ sensitive change without the explicit acknowledgement, and the code it prints is
 one-time.
 """
 
-import os
-import sys
-
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
-from tests.helpers.cli_loader import load_script  # noqa: E402
+from tests.helpers.cli_loader import load_script
 
 pytestmark = [pytest.mark.area_cli, pytest.mark.area_security]
 

@@ -294,5 +294,22 @@
     "tests/test_workbench_js.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_worker_stop_and_reasoning.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_worktree_dependency_note.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)"
+  },
+  "sys_path_write": {
+    "tests/test_app.py": "edits sys.path; tests/conftest.py already puts the repo root there (D12)",
+    "tests/test_companion_pairing.py": "edits sys.path; tests/conftest.py already puts the repo root there (D12)",
+    "tests/test_companion_readonly.py": "edits sys.path; tests/conftest.py already puts the repo root there (D12)",
+    "tests/test_cors_preflight.py": "edits sys.path; tests/conftest.py already puts the repo root there (D12)",
+    "tests/test_email_audit_digest.py": "edits sys.path; tests/conftest.py already puts the repo root there (D12)",
+    "tests/test_email_polly_imap_leak.py": "edits sys.path; tests/conftest.py already puts the repo root there (D12)",
+    "tests/test_email_prompt_untrusted.py": "edits sys.path; tests/conftest.py already puts the repo root there (D12)",
+    "tests/test_email_summary_llm.py": "edits sys.path; tests/conftest.py already puts the repo root there (D12)",
+    "tests/test_imap_leak_fixes.py": "edits sys.path; tests/conftest.py already puts the repo root there (D12)",
+    "tests/test_session_concurrent.py": "edits sys.path; tests/conftest.py already puts the repo root there (D12)",
+    "tests/test_session_manager.py": "edits sys.path; tests/conftest.py already puts the repo root there (D12)",
+    "tests/test_session_owner_attribution.py": "edits sys.path; tests/conftest.py already puts the repo root there (D12)",
+    "tests/test_settings_error_paths.py": "edits sys.path; tests/conftest.py already puts the repo root there (D12)",
+    "tests/test_upload_handler_atomicity.py": "edits sys.path; tests/conftest.py already puts the repo root there (D12)",
+    "tests/test_vault_password_not_in_argv.py": "edits sys.path; tests/conftest.py already puts the repo root there (D12)"
   }
 }
