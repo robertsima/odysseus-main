@@ -116,19 +116,34 @@ def open_workbench(page, *, activity=True) -> None:
         page.wait_for("document.getElementById('wb-tab-activity').classList.contains('active')")
 
 
-def resize_workbench_dock(page, width: int) -> None:
+def resize_workbench_dock(page, width: int, side: str = 'right') -> None:
     """Drag the actual dock seam, not a test-only inline width override."""
-    page.wait_for("getComputedStyle(document.querySelector('.edge-dock-resize-handle-right')).display !== 'none'")
-    grip = page.probe('.edge-dock-resize-handle-right')
+    page.wait_for(f"getComputedStyle(document.querySelector('.edge-dock-resize-handle-{side}')).display !== 'none'")
+    grip = page.probe(f'.edge-dock-resize-handle-{side}')
     y = min(page.height // 2, 350)
+    target = (page.eval("Math.max(document.querySelector('#sidebar').classList.contains('hidden') ? 0 : document.querySelector('#sidebar').getBoundingClientRect().right, document.querySelector('#icon-rail').getBoundingClientRect().right)") + width) if side == 'left' else page.width - width
     for kind, x, buttons in [('mouseMoved', grip['left'] + 5, 0),
                              ('mousePressed', grip['left'] + 5, 1),
-                             ('mouseMoved', page.width - width, 1),
-                             ('mouseReleased', page.width - width, 0)]:
+                             ('mouseMoved', target, 1),
+                             ('mouseReleased', target, 0)]:
         page.send('Input.dispatchMouseEvent', {'type': kind, 'x': x, 'y': y,
                                                'button': 'left', 'buttons': buttons,
                                                'clickCount': int(kind == 'mousePressed')})
     page.wait_for(f"Math.abs(document.querySelector('.workbench-modal-content').getBoundingClientRect().width - {width}) < 15")
+
+
+def attach_workbench_left(page):
+    """Use the real title-bar snap gesture (there is no left-dock button)."""
+    header = page.probe('#workbench-modal .modal-header h4')
+    edge = page.eval("document.querySelector('#sidebar').getBoundingClientRect().right")
+    y = header['top'] + min(header['bottom'] - header['top'], 24) / 2
+    start = header['left'] + 25
+    for kind, x, buttons in [('mouseMoved', start, 0), ('mousePressed', start, 1),
+                             ('mouseMoved', edge + 2, 1), ('mouseReleased', edge + 2, 0)]:
+        page.send('Input.dispatchMouseEvent', {'type': kind, 'x': x, 'y': y,
+                                               'button': 'left', 'buttons': buttons,
+                                               'clickCount': int(kind == 'mousePressed')})
+    page.wait_for("document.getElementById('workbench-modal').classList.contains('modal-left-docked')")
 
 
 def assert_dock_controls_fit(page, selectors):
@@ -171,23 +186,81 @@ def test_workbench_drag_resizes_side_panel_and_keeps_controls(style, open_app):
     assert page.eval("document.querySelector('.workbench-modal-content')._userDockWidth") == 580
 
 
-def test_docked_agamemnon_editor_draft_survives_resize(open_app):
+@pytest.mark.parametrize('side', ['left', 'right'])
+def test_docked_agamemnon_editor_draft_survives_resize(open_app, side):
     page = open_app(1440)
     open_workbench(page, activity=False)
-    page.click('#wb-dock-right')
-    resize_workbench_dock(page, 480)
+    if side == 'left':
+        attach_workbench_left(page)
+    else:
+        page.click('#wb-dock-right')
+    resize_workbench_dock(page, 480, side)
     page.click('#wb-tab-changes')
     page.wait_for("document.querySelector('#wb-diffpane .wb-diff')")
     page.click('#wb-diffpane [data-wb-act="edit-file"]')
     page.wait_for("document.querySelector('#wb-editor-text')?.value.includes('migrate')")
     page.eval("document.querySelector('#wb-editor-text').value += '\\n# unsaved dock draft'; document.querySelector('#wb-editor-text').dispatchEvent(new Event('input',{bubbles:true}))")
     for width in (350, 680, 480):
-        resize_workbench_dock(page, width)
+        resize_workbench_dock(page, width, side)
         assert page.eval("document.querySelector('#wb-editor-text')?.value.endsWith('# unsaved dock draft')")
         assert_dock_controls_fit(page, [('#wb-editor-text', '#wb-diffpane'),
                                         ('[data-wb-act="save-file"]', '#wb-diffpane'),
                                         ('.wb-repo-select', '#wb-changes')])
-        shot(page, f'dock-editor-{width}')
+        shot(page, f'dock-editor-{side}-{width}')
+
+
+@pytest.mark.parametrize('side', ['left', 'right'])
+@pytest.mark.parametrize('style', ['agamemnon', 'classic'])
+def test_attached_workbench_side_is_operable_during_resize(open_app, side, style):
+    page = open_app(1440, style=style)
+    open_workbench(page)
+    if side == 'left':
+        attach_workbench_left(page)
+    else:
+        page.click('#wb-dock-right')
+    page.wait_for(f"document.getElementById('workbench-modal').classList.contains('modal-{side}-docked')")
+    for width in (680, 480, 350, 580):
+        resize_workbench_dock(page, width, side)
+        shot(page, f'attached-{style}-{side}-{width}')
+        assert_usable(page, '#close-workbench-modal')
+        for tab in ('activity', 'changes', 'commits', 'prs'):
+            assert_usable(page, f'#wb-tab-{tab}')
+            page.click(f'#wb-tab-{tab}')
+            assert visible_panels(page) == [tab]
+            assert_no_sideways_scroll(page, '.workbench-modal-body')
+            assert_dock_controls_fit(page, [('.wb-repo-select', f'#wb-{tab}')] if tab in ('changes', 'commits') else [])
+        page.click('#wb-tab-activity')
+        assert_usable(page, '#wb-pause')
+        if style == 'agamemnon':
+            order = page.eval("(() => {const s=x=>document.querySelector(x).getBoundingClientRect().top; return [s('.ag-run-summary'), s('#wb-panel-activity .wb-toolbar'), s('#wb-activity'), s('.ag-run-timeline')];})()")
+            assert order == sorted(order), f'docked feed must precede secondary run details: {order}'
+    assert page.eval("document.querySelector('.workbench-modal-content')._userDockWidth") == 580
+
+
+@pytest.mark.parametrize('side', ['left', 'right'])
+def test_attached_workbench_theme_switch_keeps_feed_and_draft(open_app, side):
+    page = open_app(1440, style='classic')
+    open_workbench(page, activity=False)
+    if side == 'left':
+        attach_workbench_left(page)
+    else:
+        page.click('#wb-dock-right')
+    resize_workbench_dock(page, 350, side)
+    page.click('#wb-tab-activity')
+    assert_usable(page, '#wb-pause')
+    page.click('#wb-tab-changes')
+    page.wait_for("document.querySelector('#wb-diffpane .wb-diff')")
+    page.click('#wb-diffpane [data-wb-act="edit-file"]')
+    page.wait_for("!!document.querySelector('#wb-editor-text')")
+    page.eval("document.querySelector('#wb-editor-text').value += '\\n# retained on toggle'; document.querySelector('#wb-editor-text').dispatchEvent(new Event('input',{bubbles:true}))")
+    for style in ('agamemnon', 'classic', 'agamemnon'):
+        page.eval(f"(() => {{const t=document.getElementById('theme-style-toggle');t.checked={str(style == 'agamemnon').lower()};t.dispatchEvent(new Event('change',{{bubbles:true}}));}})()")
+        page.wait_for(f"document.documentElement.dataset.style === '{style}'")
+        assert page.eval("document.querySelector('#wb-editor-text')?.value.endsWith('# retained on toggle')")
+        assert page.eval(f"document.getElementById('workbench-modal').classList.contains('modal-{side}-docked')")
+        assert_dock_controls_fit(page, [('#wb-editor-text', '#wb-diffpane'), ('[data-wb-act="save-file"]', '#wb-diffpane')])
+        assert_usable(page, '#wb-tab-activity')
+        shot(page, f'attached-toggle-{side}-{style}')
 
 
 def open_agents(page) -> None:

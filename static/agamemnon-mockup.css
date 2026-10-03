@@ -283,6 +283,18 @@ html[data-style="agamemnon"] #workbench-modal .wb-activity{border-width:1px}
 /* Docked panels always take the narrow path, independent of viewport width. */
 html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .wb-panel[data-wb-panel="activity"]{display:grid;grid-template-columns:minmax(0,1fr)}
 html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .ag-run-summary{grid-column:1}
+/* In an attached window the primary feed must follow the run masthead.
+   The wide window's grid rows leak onto display:contents children and put
+   timeline/output before the feed; an explicit dock-only flex stack keeps
+   all sections reachable in reading order at every hand-resized width. */
+html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .wb-panel[data-wb-panel="activity"]{display:flex;flex-direction:column;gap:14px;min-width:0}
+html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .ag-run-control{display:contents}
+html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .ag-run-summary{order:0}
+html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .wb-toolbar{order:1;flex-shrink:0}
+html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .wb-activity{order:2;flex-shrink:0}
+html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .ag-run-timeline{order:3}
+html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .ag-run-console{order:4}
+html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .ag-run-detail{order:5}
 
 /* Phalanx: compact but legible command hierarchy, with one adaptable card
    column in half-screen instead of desktop-sized cards squeezed together. */
