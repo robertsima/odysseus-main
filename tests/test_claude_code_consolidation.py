@@ -10,6 +10,7 @@ gaps without depending on the container's real paths or binary.
 import asyncio
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,11 @@ from src.agent_tools import claude_code_tools as cct
 from src.agent_tools.claude_code_tools import ClaudeCodeTool, ClaudeCodeTaskRunner
 
 pytestmark = pytest.mark.area_security
+
+_SH_STUB = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="runs a #!/bin/sh stub as the claude binary, which Windows cannot execute",
+)
 
 
 @pytest.fixture
@@ -271,7 +277,7 @@ def test_build_argv_adapts_to_binary_flags(settings):
     binary = Path("/x/claude")
     tools = ["Read", "Bash(git status:*)", "Bash(pytest:*)"]
     argv = cct._build_argv(binary, "fix it", tools, list(cct._OPTIONAL_FLAGS), model="sonnet")
-    assert argv[:3] == ["/x/claude", "-p", "fix it"]
+    assert argv[:3] == [str(binary), "-p", "fix it"]
     assert "--permission-prompts" in argv and argv[argv.index("--permission-prompts") + 1] == "none"
     assert "--restricted" in argv
     assert argv[argv.index("--model") + 1] == "sonnet"
@@ -318,6 +324,7 @@ def test_summarize_envelope_lifts_result_and_denials():
     assert failed["error"] == "Not logged in"
 
 
+@_SH_STUB
 async def test_run_claude_reports_cli_failure_without_envelope(roots, monkeypatch, tmp_path):
     binary = tmp_path / "claude"
     binary.write_text("#!/bin/sh\necho 'error: unknown option' >&2\nexit 1\n", encoding="utf-8")
@@ -335,6 +342,7 @@ async def test_run_claude_reports_cli_failure_without_envelope(roots, monkeypatc
     assert "result" not in out
 
 
+@_SH_STUB
 async def test_run_claude_parses_real_envelope_from_stub_binary(roots, monkeypatch, tmp_path):
     binary = tmp_path / "claude"
     envelope = json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": "PONG",
@@ -361,6 +369,7 @@ def _async(value):
 
 # ── Binary probing ──
 
+@_SH_STUB
 async def test_binary_info_reads_version_and_flags(tmp_path):
     binary = tmp_path / "claude"
     binary.write_text(
@@ -380,6 +389,7 @@ async def test_binary_info_reads_version_and_flags(tmp_path):
     assert (await cct.binary_info(binary))["version"] == "2.1.267 (Claude Code)" or True
 
 
+@_SH_STUB
 async def test_binary_info_flags_missing_required_flags(tmp_path):
     binary = tmp_path / "claude"
     binary.write_text("#!/bin/sh\necho 'ancient --print only'\n", encoding="utf-8")
@@ -389,6 +399,7 @@ async def test_binary_info_flags_missing_required_flags(tmp_path):
     assert "required flags" in info["error"]
 
 
+@_SH_STUB
 async def test_auth_status_parses_json_without_exposing_tokens(tmp_path, monkeypatch):
     binary = tmp_path / "claude"
     binary.write_text(
@@ -571,10 +582,10 @@ def test_bundled_source_prefers_category_directory(tmp_path):
 
     (tmp_path / "skills" / "dev" / "claude-code-delegation").mkdir(parents=True)
     (tmp_path / "skills" / "dev" / "claude-code-delegation" / "SKILL.md").write_text("---\nname: x\n---\n", encoding="utf-8")
-    assert _bundled_source(str(tmp_path), "dev", "claude-code-delegation").endswith("skills/dev/claude-code-delegation")
+    assert _bundled_source(str(tmp_path), "dev", "claude-code-delegation").endswith(os.path.join("skills", "dev", "claude-code-delegation"))
     (tmp_path / "skills" / "flat").mkdir()
     (tmp_path / "skills" / "flat" / "SKILL.md").write_text("---\nname: flat\n---\n", encoding="utf-8")
-    assert _bundled_source(str(tmp_path), "dev", "flat").endswith("skills/flat")
+    assert _bundled_source(str(tmp_path), "dev", "flat").endswith(os.path.join("skills", "flat"))
 
 
 def test_claude_code_delegation_skill_is_shipped_and_parseable():

@@ -5,10 +5,17 @@ name, and anything credential-shaped is redacted before it reaches the model.
 """
 
 import os
+import sys
 
 import pytest
 
 from src import agent_logs
+
+_NEEDS_SYMLINKS = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Creating a symlink on Windows needs a privilege test runners usually lack (WinError 1314).",
+)
+
 
 pytestmark = pytest.mark.area_security
 
@@ -120,6 +127,7 @@ def test_redaction_keeps_the_line_useful(log_dir):
     assert "zzzz9999" not in out
 
 
+@_NEEDS_SYMLINKS
 def test_symlinked_log_is_ignored(log_dir, tmp_path):
     secret = tmp_path / "outside.log"
     secret.write_text("private\n")

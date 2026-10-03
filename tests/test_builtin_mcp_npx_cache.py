@@ -28,6 +28,18 @@ def _load_builtin_mcp(monkeypatch):
     return module
 
 
+def _isolate_npm_cache(monkeypatch, home):
+    """Point every npm cache root the module checks at ``home``.
+
+    On Windows ``~`` comes from USERPROFILE, not HOME, and LOCALAPPDATA adds a
+    second root, so setting HOME alone would let the real user cache answer.
+    """
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.delenv("npm_config_cache", raising=False)
+
+
 def test_npx_package_from_args_prefers_package_after_y_flag(monkeypatch):
     builtin_mcp = _load_builtin_mcp(monkeypatch)
 
@@ -114,8 +126,7 @@ def test_npx_cache_check_detects_scoped_package_in_npx_cache(monkeypatch, tmp_pa
     async def unexpected_exec(*args, **kwargs):
         raise AssertionError("cache hit should not shell out to npx")
 
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.delenv("npm_config_cache", raising=False)
+    _isolate_npm_cache(monkeypatch, tmp_path)
     monkeypatch.setattr(builtin_mcp.asyncio, "create_subprocess_exec", unexpected_exec)
 
     assert asyncio.run(
@@ -142,8 +153,7 @@ def test_npx_cache_check_falls_back_when_async_subprocess_is_unsupported(monkeyp
 
     monkeypatch.setattr(builtin_mcp.asyncio, "create_subprocess_exec", unsupported_exec)
     monkeypatch.setattr(builtin_mcp.subprocess, "run", fake_run)
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.delenv("npm_config_cache", raising=False)
+    _isolate_npm_cache(monkeypatch, tmp_path)
 
     assert asyncio.run(
         builtin_mcp._is_npx_package_cached(
@@ -173,8 +183,7 @@ def test_npx_cache_check_fallback_treats_timeout_as_cache_miss(monkeypatch, tmp_
 
     monkeypatch.setattr(builtin_mcp.asyncio, "create_subprocess_exec", unsupported_exec)
     monkeypatch.setattr(builtin_mcp.subprocess, "run", fake_run)
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.delenv("npm_config_cache", raising=False)
+    _isolate_npm_cache(monkeypatch, tmp_path)
 
     assert asyncio.run(
         builtin_mcp._is_npx_package_cached(

@@ -319,7 +319,9 @@ def test_failed_checkout_rolls_back_files_index_and_branch(repo_scope, monkeypat
     repo_path = _make_repo(repo_scope / "project")
     repo = porcelain.open_repo(str(repo_path))
     before = repo.refs[b"HEAD"]
-    (repo_path / "README.md").write_text("two\n", encoding="utf-8")
+    # Bytes, not text: write_text would commit "two\r\n" on Windows, and the
+    # partial write below must match the fetched blob exactly.
+    (repo_path / "README.md").write_bytes(b"two\n")
     porcelain.add(repo, ["README.md"])
     after = porcelain.commit(
         repo,

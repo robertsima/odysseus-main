@@ -6,6 +6,7 @@ file set, or sensitive-path set.
 """
 
 import dataclasses
+import sys
 import time
 
 import pytest
@@ -199,6 +200,7 @@ def test_a_grant_missing_one_binding_is_rejected(cfg):
         approval_mod._verified_grant(cfg, approval_mod._load(cfg, record["id"]))
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows files have no POSIX group or other read bits")
 def test_the_mac_key_is_not_world_readable(cfg):
     import os
     import stat

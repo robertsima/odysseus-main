@@ -137,15 +137,16 @@ def test_sqlite_db_path_handles_file_uri_forms(tmp_path):
         == str(db_file)
     )
 
-    localhost_db = tmp_path / "localhost-uri.db"
+    # A literal POSIX path: an authority URI needs a path that starts with "/",
+    # which a Windows tmp_path ("C:\...") does not.
     assert (
         _sqlite_db_path(
             make_url(
-                f"sqlite+pysqlite:///file://localhost{localhost_db}"
+                "sqlite+pysqlite:///file://localhost/srv/odysseus/localhost-uri.db"
                 "?mode=rwc&uri=true"
             )
         )
-        == str(localhost_db)
+        == "/srv/odysseus/localhost-uri.db"
     )
 
     non_uri_mode_db = tmp_path / "mode-query-file.db"

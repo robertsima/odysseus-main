@@ -5,6 +5,7 @@ needs, and asserts that no credential value is ever echoed back.
 """
 
 import os
+import sys
 
 import pytest
 
@@ -84,6 +85,10 @@ async def test_a_public_key_file_is_diagnosed(env, tmp_path):
     assert "public key" in check["detail"]
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="chmod 0600 cannot clear the group and other bits on Windows, so the key check always warns there",
+)
 async def test_a_real_rsa_key_passes_and_reports_its_size(env, tmp_path):
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import rsa

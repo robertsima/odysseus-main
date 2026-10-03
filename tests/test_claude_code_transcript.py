@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -73,6 +74,10 @@ def test_build_argv_streams_only_when_asked():
     assert "json" in argv and "stream-json" not in argv and "--verbose" not in argv
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="runs a #!/bin/sh stub as the claude binary, which Windows cannot execute",
+)
 async def test_binary_info_detects_stream_json(tmp_path):
     binary = tmp_path / "claude"
     binary.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 9.9.9; else echo '--tools --allowedTools --output-format json|stream-json --verbose --no-session-persistence'; fi\n", encoding="utf-8")
@@ -81,6 +86,10 @@ async def test_binary_info_detects_stream_json(tmp_path):
     assert info["stream_json"] is True and "--verbose" in info["flags"]
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="runs a #!/bin/sh stub as the claude binary, which Windows cannot execute",
+)
 async def test_streamed_run_records_transcript_activity_and_changes(data_dir, tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -138,6 +147,10 @@ async def test_streamed_run_records_transcript_activity_and_changes(data_dir, tm
     assert run["status"] == "completed" and run["session_id"] == "chat-7" and run["owner"] == "alice"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="runs a #!/bin/sh stub as the claude binary, which Windows cannot execute",
+)
 async def test_batch_binary_still_works_and_reports_a_run(data_dir, tmp_path, monkeypatch):
     envelope = json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": "PONG", "num_turns": 1})
     binary = tmp_path / "claude"

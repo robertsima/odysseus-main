@@ -13,6 +13,7 @@ writers to the same path don't collide on the same temp file.
 """
 import importlib.util
 import json
+import sys
 import threading
 from pathlib import Path
 
@@ -246,6 +247,7 @@ def test_cleanup_error_swallows_and_preserves_original_exception(tmp_path, monke
         atomic_write_text(str(target), "new content")
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows files have no POSIX mode bits to check")
 def test_atomic_write_json_supports_private_mode(tmp_path):
     path = tmp_path / "private.json"
     atomic_write_json(str(path), {"private": True}, mode=0o600)

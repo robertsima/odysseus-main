@@ -6,6 +6,7 @@ GitHub credential was public-host only, so on an Enterprise install (the host
 the GitHub MCP server already used) every clone and fetch went anonymous.
 """
 import base64
+import sys
 from contextlib import contextmanager
 
 import pytest
@@ -102,7 +103,11 @@ def test_a_workspace_that_is_not_a_checkout_is_still_refused(roots):
         assert excinfo.value.code == "unsupported_checkout"
 
 
-def test_paths_escaping_the_workspace_are_refused(roots):
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Creating a symlink on Windows needs a privilege test runners usually lack (WinError 1314).",
+)
+def test_a_symlink_escaping_the_workspace_is_refused(roots):
     project = _checkout(roots / "project")
     outside = _checkout(roots / "outside")
     (project / "link").symlink_to(outside, target_is_directory=True)
@@ -110,6 +115,12 @@ def test_paths_escaping_the_workspace_are_refused(roots):
         with pytest.raises(rs.RepositorySyncError) as excinfo:
             rs._validate_path(str(project / "link"))
         assert excinfo.value.code == "symlink_path"
+
+
+def test_a_parent_traversal_escaping_the_workspace_is_refused(roots):
+    project = _checkout(roots / "project")
+    _checkout(roots / "outside")
+    with _workspace(project):
         with pytest.raises(rs.RepositorySyncError) as excinfo:
             rs._validate_path(str(project / ".." / "outside"))
         assert excinfo.value.code == "outside_roots"

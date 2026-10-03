@@ -3,9 +3,16 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = ROOT / "scripts" / "agent_migration_manifest.py"
+
+_NEEDS_SYMLINKS = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Creating a symlink on Windows needs a privilege test runners usually lack (WinError 1314).",
+)
 
 
 def load_module():
@@ -77,6 +84,7 @@ Use for focused git checks.
     assert "## When to Use" in items[0]["content"]
 
 
+@_NEEDS_SYMLINKS
 def test_collect_skill_dir_skips_symlinked_skill_markdown(tmp_path):
     migration = load_module()
     outside = tmp_path / "outside.md"
@@ -91,6 +99,7 @@ def test_collect_skill_dir_skips_symlinked_skill_markdown(tmp_path):
     assert warnings[0].message == "skipped symlinked skill file"
 
 
+@_NEEDS_SYMLINKS
 def test_collect_skill_dir_skips_symlinked_root(tmp_path):
     migration = load_module()
     real_skills = tmp_path / "real-skills"
@@ -117,6 +126,7 @@ def test_archive_content_is_optional(tmp_path):
     assert with_content[0]["content"].startswith("# Notes")
 
 
+@_NEEDS_SYMLINKS
 def test_archive_skips_symlinked_file(tmp_path):
     migration = load_module()
     outside = tmp_path / "outside.md"
@@ -132,6 +142,7 @@ def test_archive_skips_symlinked_file(tmp_path):
     assert warnings[0].message == "skipped symlinked archive path"
 
 
+@_NEEDS_SYMLINKS
 def test_archive_skips_symlinked_root(tmp_path):
     migration = load_module()
     archive = tmp_path / "notes.md"
