@@ -1,14 +1,14 @@
 export function syncAgamemnonChatIdentity() {
   const sid = window.sessionModule?.getCurrentSessionId?.();
   const session = window.sessionModule?.getSessions?.()?.find((item) => item.id === sid);
-  const number = document.getElementById('ag-session-number');
   const title = document.getElementById('ag-session-label');
-  if (number) number.textContent = sid ? 'SESSION' : 'NEW CHAT';
-  if (title) title.textContent = session?.name || (sid ? 'Untitled session' : 'New operation');
+  // The empty-chat welcome already says it is a new chat; only name an
+  // existing session here so the heading does not repeat that subtitle.
+  if (title) title.textContent = session?.name || (sid ? 'Untitled session' : '');
 }
 
 function syncResponseStatus(event) {
-  const status = event?.detail?.active ? 'Responding' : 'Ready to send';
+  const status = event?.detail?.active ? 'Responding' : '';
   const node = document.getElementById('ag-chat-status');
   if (node) node.textContent = status;
 }

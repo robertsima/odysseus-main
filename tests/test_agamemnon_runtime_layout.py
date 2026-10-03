@@ -277,11 +277,48 @@ def test_chat_heading_uses_the_selected_session_and_response_state(open_app):
     page = open_app(1440)
     page.wait_for("document.getElementById('ag-session-label').textContent === 'Orders migration'")
     assert page.eval("document.getElementById('model-picker-label').textContent.trim()") == 'claude-sonnet-5'
-    assert page.eval("document.getElementById('ag-chat-status').textContent") == 'Ready to send'
+    assert page.eval("document.getElementById('ag-chat-status').textContent") == ''
     page.eval("window.dispatchEvent(new CustomEvent('odysseus:chat-busy-change', { detail: { active: true } }))")
     assert page.eval("document.getElementById('ag-chat-status').textContent") == 'Responding'
     page.eval("window.dispatchEvent(new CustomEvent('odysseus:chat-busy-change', { detail: { active: false } }))")
-    assert page.eval("document.getElementById('ag-chat-status').textContent") == 'Ready to send'
+    assert page.eval("document.getElementById('ag-chat-status').textContent") == ''
+
+
+def test_library_chat_tidy_posts_to_registered_route(open_app, server):
+    page = open_app(1440)
+    before = server.state.chat_tidy_requests
+    page.click('#chats-library-btn')
+    page.wait_for("!!document.getElementById('doclib-chats-tidy-btn')")
+    page.click('#doclib-chats-tidy-btn')
+    page.wait_for("!document.getElementById('doclib-chats-tidy-btn').disabled")
+    assert server.state.chat_tidy_requests == before + 1
+    assert ('/api/chats/tidy', {}) in server.state.posts
+
+
+@pytest.mark.parametrize('style', ['classic', 'agamemnon'])
+@pytest.mark.parametrize('width', [1440, 700, 390])
+def test_phalanx_nav_matches_workbench_type(open_app, style, width):
+    page = open_app(width, style=style)
+    assert page.eval("(() => { const a = document.querySelector('#tool-agents-btn .ag-nav-label');"
+                     " const b = document.querySelector('#tool-agents-btn .ody-nav-label');"
+                     " const target = getComputedStyle(document.querySelector('#tool-workbench-btn .grow'));"
+                     " const label = getComputedStyle(getComputedStyle(a).display === 'none' ? b : a);"
+                     " return label.fontSize === target.fontSize && label.fontWeight === target.fontWeight; })()")
+
+
+def test_workbench_suggests_latest_activity_without_overriding_selection(open_app, server):
+    server.state.repo_activity = (100, 200)
+    try:
+        page = open_app(1440)
+        open_workbench(page, activity=False)
+        page.click('[data-wb-tab="changes"]')
+        page.wait_for("document.querySelector('.wb-repo-select')?.value === '/repo/main'")
+        assert page.eval("document.querySelector('.wb-repo-select option').textContent.includes('Recent activity')")
+        page.eval("document.querySelector('.wb-repo-select').value = '/repo/workbench'; document.querySelector('.wb-repo-select').dispatchEvent(new Event('change', {bubbles:true}))")
+        page.wait_for("document.querySelector('.wb-repo-select')?.value === '/repo/workbench'")
+        assert page.eval("JSON.parse(localStorage.getItem('odysseus-workbench-prefs')).repo") == '/repo/workbench'
+    finally:
+        server.state.repo_activity = (200, 100)
 
 
 def test_chat_send_button_reaches_the_existing_submit_flow(open_app, server):

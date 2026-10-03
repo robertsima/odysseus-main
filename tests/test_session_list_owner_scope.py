@@ -122,6 +122,8 @@ def test_auto_sort_skip_llm_cleans_owner_stamped_sessions_when_auth_disabled(mon
     endpoint = next(r.endpoint for r in router.routes
                     if getattr(r, "path", "") == "/api/sessions/auto-sort"
                     and "POST" in getattr(r, "methods", set()))
+    assert any(r.endpoint is endpoint and r.path == "/api/chats/tidy" and "POST" in r.methods
+               for r in router.routes)
 
     result = endpoint(request=MagicMock(), skip_llm=True)
 

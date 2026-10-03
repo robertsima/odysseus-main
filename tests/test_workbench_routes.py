@@ -79,6 +79,9 @@ async def test_repo_endpoints_confine_and_answer(env, monkeypatch):
     (repo / "f.txt").write_text("one\ntwo\n")
     monkeypatch.setattr(repo_inspect, "allowed_roots", lambda: [str(env / "roots")])
     ep = _endpoints()
+    from time import time
+    os.utime(repo / "f.txt", (time(), time()))
+    assert wr._checkout_activity(str(repo)) >= (repo / "f.txt").stat().st_mtime
 
     st = await ep[("GET", "/api/workbench/repo/status")](_req(), path=str(repo))
     assert st["branch"] == "main" and st["dirty"] is True

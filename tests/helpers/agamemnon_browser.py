@@ -87,11 +87,16 @@ class StubState:
 
     def __init__(self) -> None:
         self.posts: list[tuple[str, dict]] = []
+        self.chat_tidy_requests = 0
+        self.repo_activity = (200, 100)
         self.appearance: dict[str, str | None] = {}
         self.run_status = 'running'
 
 
 def _api_response(state: StubState, method: str, path: str, body: dict) -> tuple[int, object]:
+    if method == "POST" and path == "/api/chats/tidy":
+        state.chat_tidy_requests += 1
+        return 200, {"status": "ok", "updated": 0, "folders": []}
     if method == "PUT" and path == "/api/workbench/repo/file":
         return 200, {"file": body.get("file"), "version": "b" * 64}
     if method == "POST" and path.startswith("/api/agents/sessions/") and path.endswith("/appearance"):
@@ -134,8 +139,8 @@ def _api_response(state: StubState, method: str, path: str, body: dict) -> tuple
                                 "started_at": NOW - 60, "detail": "Checking migration safety"}]}
     if path == "/api/workbench/repo/roots":
         return 200, {"roots": ["/repo"], "workspace": "/repo/workbench",
-                     "repositories": [{"path": "/repo/workbench", "branch": "agent/review", "kind": "worktree"},
-                                      {"path": "/repo/main", "branch": "dev", "kind": "checkout"}]}
+                     "repositories": [{"path": "/repo/workbench", "branch": "agent/review", "kind": "worktree", "activity_at": state.repo_activity[0]},
+                                      {"path": "/repo/main", "branch": "dev", "kind": "checkout", "activity_at": state.repo_activity[1]}]}
     if path == "/api/workbench/repo/changes":
         return 200, {"files": [{"path": "src/orders.py", "status": "modified", "additions": 2, "deletions": 1},
                                {"path": "tests/test_orders.py", "status": "added", "additions": 18, "deletions": 0}]}

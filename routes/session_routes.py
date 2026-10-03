@@ -1169,6 +1169,7 @@ def setup_session_routes(
             "message_count": len(new_history),
         }
 
+    @router.post("/chats/tidy")
     @router.post("/sessions/auto-sort")
     def auto_sort_sessions(request: Request, skip_llm: bool = False):
         """Use AI to categorize all sessions into folders.

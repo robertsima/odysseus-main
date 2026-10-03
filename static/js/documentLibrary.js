@@ -2288,7 +2288,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
       tidyBtn.appendChild(el);
       sp.start();
       try {
-        const res = await fetch(API_BASE + '/api/sessions/auto-sort', { method: 'POST', credentials: 'same-origin' });
+        const res = await fetch(API_BASE + '/api/chats/tidy', { method: 'POST', credentials: 'same-origin' });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || 'Tidy failed');
         if (data.status === 'ok') {

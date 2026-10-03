@@ -44,6 +44,9 @@ html[data-style="agamemnon"] .sidebar-inner{padding:20px 24px}
 html[data-style="agamemnon"] .sidebar-inner::before{content:'COMMAND';display:block;margin:0 0 10px;color:var(--ag-gold);font:700 11px/1 'Space Grotesk';letter-spacing:.18em}
 html[data-style="agamemnon"] .sidebar .list-item,html[data-style="agamemnon"] .sidebar .section-title{font-family:'Space Grotesk',sans-serif;border-radius:0}
 html[data-style="agamemnon"] .sidebar .list-item:hover{background:var(--ag-raised);color:var(--ag-gold)}
+/* Base `.list-item span` makes nested label spans 9.75px; Phalanx must
+   inherit exactly the same type as its single-span Workbench peer. */
+html[data-style] #tool-agents-btn .grow :is(.ag-nav-label,.ody-nav-label){font-size:inherit;color:inherit;font-weight:inherit;letter-spacing:inherit}
 /* Command links belong in the same scrollable navigation as the existing
    session list. The rail and mobile off-canvas modes remain owned by the app. */
 .ag-command-link,.ag-nav-label{display:none}
@@ -73,8 +76,10 @@ html[data-style="agamemnon"] .chat-container{background:var(--ag-bg);margin-top:
 html[data-style="agamemnon"] .ag-page-heading{display:flex;align-items:baseline;flex-wrap:wrap;column-gap:18px;flex:0 0 auto;box-sizing:border-box;margin:0 0 10px;min-width:0}
 html[data-style="agamemnon"] .ag-page-heading h1{margin:0;font:700 26px/1.2 'Space Grotesk';letter-spacing:.025em}
 html[data-style="agamemnon"] .ag-page-heading p{margin:0;color:var(--ag-muted);font-size:13px;letter-spacing:.03em;overflow-wrap:anywhere}
+html[data-style="agamemnon"] .ag-page-heading p:not(:has(#ag-session-label:not(:empty),#ag-chat-status:not(:empty))){display:none}
 html[data-style="agamemnon"] .ag-page-heading b{padding:0 8px;color:var(--ag-border-strong)}
 html[data-style="agamemnon"] .ag-page-heading strong{color:var(--ag-gold);font-weight:700}
+html[data-style="agamemnon"] .ag-page-heading #ag-session-label:not(:empty) ~ strong:not(:empty)::before{content:' · ';padding:0 8px;color:var(--ag-border-strong)}
 html[data-style="agamemnon"] .chat-top-bar{flex:0 0 auto;min-height:30px;margin:0;padding:0;border:0;background:transparent;justify-content:flex-start}
 html[data-style="agamemnon"] .chat-top-bar .chat-meta-overlay{left:0;right:0;max-width:100%;justify-content:flex-start;transform:translateY(-50%);font-size:12px}
 html[data-style="agamemnon"] .chat-top-bar #current-meta{display:none}

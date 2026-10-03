@@ -889,7 +889,8 @@ function sourceControlHtml() {
     return `<span class="wb-ctx-chip" title="${esc(c.path || '')}">${sourceChip('claude_code')}<span class="wb-ctx-chip-label">${esc(c.label || c.taskId.slice(0, 8))}</span><button type="button" class="wb-chip-close" data-wb-act="leave-run" title="Back to the repository's working tree" aria-label="Back to repository">×</button></span>`;
   }
   if (state.reposError) return `<span class="wb-meta-item wb-text-bad" title="${esc(state.reposError)}">Repositories unavailable</span>`;
-  const options = state.repos.map((x) => `<option value="${esc(x.path)}"${x.path === c.path ? ' selected' : ''}>${esc(x.branch || 'detached')} · ${esc(x.path.split(/[\\/]/).pop())}${x.kind === 'worktree' ? ' · worktree' : ''}</option>`).join('');
+  const suggested = state.repos.find((x) => x.activity_at > 0);
+  const options = state.repos.map((x) => `<option value="${esc(x.path)}"${x.path === c.path ? ' selected' : ''}>${x === suggested ? 'Recent activity · ' : ''}${esc(x.branch || 'detached')} · ${esc(x.path.split(/[\\/]/).pop())}${x.kind === 'worktree' ? ' · worktree' : ''}</option>`).join('');
   return `<label class="wb-branch-picker">Branch / worktree <select class="wb-select wb-repo-select" data-wb-change="repo" title="Select an active branch checkout" aria-label="Branch or worktree">${c.path ? '' : '<option value="">Choose a branch checkout…</option>'}${options}</select></label>`;
 }
 function renderChanges() {
@@ -1088,15 +1089,15 @@ function prPaneHtml() {
 async function loadRoots() {
   try {
     const r = await api('/api/workbench/repo/roots');
-    const recent = Array.isArray(state.prefs.recentRepos) ? state.prefs.recentRepos : [];
     state.repos = (r.repositories || []).sort((a, b) => {
-      const rank = (x) => recent.indexOf(x.path) < 0 ? 999 : recent.indexOf(x.path);
-      return rank(a) - rank(b) || Number(!!b.branch) - Number(!!a.branch) || a.path.localeCompare(b.path);
+      return (b.activity_at || 0) - (a.activity_at || 0) || Number(!!b.branch) - Number(!!a.branch) || a.path.localeCompare(b.path);
     });
     state.reposError = '';
     const repos = state.repos;
-    const want = state.repoCtx.path || state.prefs.repo || (r.workspace && repos.some((x) => x.path === r.workspace) ? r.workspace : '') || (repos[0] && repos[0].path) || '';
-    if (want && repos.some((x) => x.path === want) && !state.repoCtx.taskId && state.repoCtx.path !== want) { setRepo(want); return; }
+    const valid = (path) => path && repos.some((x) => x.path === path);
+    const chosen = valid(state.prefs.repo) ? state.prefs.repo : '';
+    const want = chosen || (repos[0]?.activity_at ? repos[0].path : (valid(r.workspace) ? r.workspace : repos[0]?.path || ''));
+    if (want && !state.repoCtx.taskId && state.repoCtx.path !== want) { setRepo(want, { remember: !!chosen }); return; }
   } catch (e) {
     if (e.status === 403) { state.enabled = false; hideRail(); }
     state.repos = [];
@@ -1105,13 +1106,15 @@ async function loadRoots() {
   if (state.prefs.tab === 'changes') renderChanges();
   if (state.prefs.tab === 'commits') renderCommits();
 }
-function setRepo(path) {
+function setRepo(path, { remember = true } = {}) {
   if (!confirmDiscardEditor()) return;
   state.repoCtx = { path, base: '', taskId: null, label: '' };
   state.browse = null;
-  state.prefs.repo = path;
-  state.prefs.recentRepos = [path, ...(state.prefs.recentRepos || []).filter((x) => x !== path)].slice(0, 12);
-  savePrefs();
+  if (remember) {
+    state.prefs.repo = path;
+    state.prefs.recentRepos = [path, ...(state.prefs.recentRepos || []).filter((x) => x !== path)].slice(0, 12);
+    savePrefs();
+  }
   state.files = []; state.commits = []; state.selectedFile = null; state.selectedCommit = null; state.diffText = '';
   refreshChanges(); refreshCommits();
 }
