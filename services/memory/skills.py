@@ -20,6 +20,7 @@ loads while a user migrates them to disk.
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import re
@@ -631,7 +632,8 @@ class SkillsManager:
                 if k in updates:
                     setattr(sk, k, updates[k])
             list_keys = ("tags", "procedure", "pitfalls", "verification",
-                         "platforms", "requires_toolsets", "fallback_for_toolsets")
+                         "platforms", "requires_toolsets", "fallback_for_toolsets",
+                         "related_skills", "related_scripts")
             for k in list_keys:
                 if k in updates:
                     setattr(sk, k, list(updates[k] or []))
@@ -764,6 +766,117 @@ class SkillsManager:
             except Exception:
                 return None
         return None
+
+    def _package_root(self, name: str, owner: Optional[str], *, writable: bool = False) -> str:
+        """Resolve by parsed owner, never by a guessed category/name path."""
+        for path in self._iter_skill_files():
+            sk = self._read_skill(path)
+            if not sk or sk.name != name:
+                continue
+            if is_app_shipped_source(sk.source):
+                if writable:
+                    continue
+            elif (sk.owner or "") != (owner or ""):
+                continue
+            root = os.path.dirname(path)
+            real_base = os.path.realpath(self.skills_root)
+            if (os.path.commonpath((real_base, os.path.realpath(root))) == real_base
+                    and not any(os.path.islink(part) for part in (
+                        os.path.dirname(root), root, path))):
+                return root
+        raise FileNotFoundError("Skill not found or not editable")
+
+    @staticmethod
+    def _package_path(root: str, rel: str) -> str:
+        from .skill_importer import _safe_relpath, _is_text_file, SkillImportError
+        safe = _safe_relpath(rel)
+        if safe.casefold() == "skill.md" or any(p.startswith(".") for p in safe.split("/")):
+            raise SkillImportError("Edit SKILL.md in the main editor; hidden files are not editable")
+        if not _is_text_file(safe):
+            raise SkillImportError("Only supported text resources can be edited")
+        target = os.path.join(root, safe)
+        if os.path.commonpath((os.path.realpath(root), os.path.realpath(target))) != os.path.realpath(root):
+            raise SkillImportError("Unsafe package path")
+        return target
+
+    def package_files(self, name: str, owner: Optional[str] = None) -> List[Dict]:
+        """List textual package resources; never follow symlinks or expose another owner."""
+        from .skill_importer import MAX_FILES, _is_text_file
+        root = self._package_root(name, owner)
+        result = []
+        for base, dirs, files in os.walk(root, followlinks=False):
+            dirs[:] = sorted(d for d in dirs if not d.startswith(".") and not os.path.islink(os.path.join(base, d)))
+            for filename in sorted(files):
+                path = os.path.join(base, filename)
+                rel = os.path.relpath(path, root).replace(os.sep, "/")
+                if rel == "SKILL.md" or filename.startswith(".") or not _is_text_file(filename) or os.path.islink(path):
+                    continue
+                if len(result) >= MAX_FILES:
+                    raise ValueError("Package has too many files")
+                result.append({"path": rel, "bytes": os.path.getsize(path)})
+        return result
+
+    def package_file(self, name: str, rel: str, owner: Optional[str] = None) -> Dict:
+        from .skill_importer import MAX_FILE_BYTES
+        root = self._package_root(name, owner)
+        target = self._package_path(root, rel)
+        if not os.path.isfile(target) or os.path.islink(target) or os.path.getsize(target) > MAX_FILE_BYTES:
+            raise FileNotFoundError("Resource unavailable or too large")
+        with open(target, "rb") as f:
+            data = f.read(MAX_FILE_BYTES + 1)
+        if len(data) > MAX_FILE_BYTES:
+            raise ValueError("Resource too large")
+        return {"path": rel, "content": data.decode("utf-8"), "version": hashlib.sha256(data).hexdigest()}
+
+    def save_package_file(self, name: str, rel: str, content: str, version: Optional[str], owner: Optional[str] = None) -> Dict:
+        from .skill_importer import MAX_FILES, MAX_FILE_BYTES
+        from core.atomic_io import atomic_write_text
+        root = self._package_root(name, owner, writable=True)
+        target = self._package_path(root, rel)
+        if not isinstance(content, str) or len(content.encode("utf-8")) > MAX_FILE_BYTES:
+            raise ValueError("Resource must be text and at most 400 KB")
+        exists = os.path.lexists(target)
+        if exists and (os.path.islink(target) or not os.path.isfile(target)):
+            raise ValueError("Resource is not a regular file")
+        if exists:
+            old = self.package_file(name, rel, owner)["version"]
+            if version != old:
+                raise FileExistsError("Resource changed since it was opened; reload before saving")
+        elif version != "new":
+            raise FileExistsError("Resource already removed or not opened as new")
+        if not exists and len(self.package_files(name, owner)) >= MAX_FILES:
+            raise ValueError("Package has too many files")
+        if not exists and any(row["path"].casefold() == rel.casefold() for row in self.package_files(name, owner)):
+            raise ValueError("Resource path already exists with different casing")
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        self._package_path(root, rel)  # recheck after mkdir
+        atomic_write_text(target, content)
+        return self.package_file(name, rel, owner)
+
+    def validate_skill_links(self, name: str, related_skills: list, related_scripts: list,
+                             owner: Optional[str], *, existing_skills=(), existing_scripts=()) -> None:
+        """Links are references, not executable dependencies. Validate both destinations."""
+        from .skill_importer import _safe_relpath
+        if not isinstance(related_skills, list) or not isinstance(related_scripts, list):
+            raise ValueError("Related links must be lists")
+        if len(related_skills) > 32 or len(related_scripts) > 32:
+            raise ValueError("Too many related links (maximum 32 per kind)")
+        visible = {sk['name'] for sk in self.load(owner=owner) if not sk.get('_legacy')}
+        for kind, entries in (("skill", related_skills), ("script", related_scripts)):
+            if len(entries) != len(set(str(x) for x in entries)):
+                raise ValueError(f"Duplicate related {kind}")
+        for linked in related_skills:
+            if not isinstance(linked, str) or linked == name or (linked not in visible and linked not in existing_skills):
+                raise ValueError(f"Related skill unavailable: {linked}")
+        for rel in related_scripts:
+            if not isinstance(rel, str) or not rel.startswith('scripts/') or not rel.lower().endswith(('.py', '.sh', '.js', '.ts')):
+                raise ValueError("Related scripts must point to existing scripts/*.py, .sh, .js or .ts files")
+            _safe_relpath(rel)
+            try:
+                self.package_file(name, rel, owner=owner)
+            except (FileNotFoundError, UnicodeError) as exc:
+                if rel not in existing_scripts:
+                    raise ValueError(f"Related script unavailable: {rel}") from exc
 
     # ----------------------------------------------------------------------
     # Index — the lightweight summary injected into the system prompt

@@ -407,6 +407,8 @@ class Skill:
     # only to hide the skill from the model; never shown in the prompt.
     requires_integration: Optional[str] = None
     fallback_for_toolsets: List[str] = field(default_factory=list)
+    related_skills: List[str] = field(default_factory=list)
+    related_scripts: List[str] = field(default_factory=list)
     status: str = "draft"                              # draft | published
     confidence: float = 0.8
     source: str = "learned"
@@ -440,6 +442,8 @@ class Skill:
         if self.requires_toolsets:     fm["requires_toolsets"] = list(self.requires_toolsets)
         if self.requires_integration:  fm["requires_integration"] = self.requires_integration
         if self.fallback_for_toolsets: fm["fallback_for_toolsets"] = list(self.fallback_for_toolsets)
+        if self.related_skills:       fm["related_skills"] = list(self.related_skills)
+        if self.related_scripts:      fm["related_scripts"] = list(self.related_scripts)
         fm["status"] = self.status
         fm["confidence"] = round(float(self.confidence), 3)
         fm["source"] = self.source
@@ -460,6 +464,8 @@ class Skill:
             "requires_toolsets": list(self.requires_toolsets),
             "requires_integration": self.requires_integration,
             "fallback_for_toolsets": list(self.fallback_for_toolsets),
+            "related_skills": list(self.related_skills),
+            "related_scripts": list(self.related_scripts),
             "status": self.status,
             "confidence": round(float(self.confidence), 3),
             "source": self.source,
@@ -507,6 +513,8 @@ class Skill:
             requires_toolsets=_as_list(get("requires_toolsets")),
             requires_integration=str(requires_integration).strip() if requires_integration else None,
             fallback_for_toolsets=_as_list(get("fallback_for_toolsets")),
+            related_skills=_as_list(get("related_skills")),
+            related_scripts=_as_list(get("related_scripts")),
             status=str(get("status", "draft") or "draft"),
             confidence=_as_float(get("confidence", 0.8), 0.8),
             source=str(get("source", "learned") or "learned"),

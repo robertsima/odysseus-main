@@ -38,6 +38,7 @@ function _playSkillsCascade(container = document.getElementById('skills-list')) 
 // fetch + content-settle jump). Populated lazily on expand AND eagerly in
 // the background for all visible cards right after render.
 const _mdCache = new Map();
+const _mdVersions = new Map();
 async function _fetchSkillMarkdown(name) {
   if (_mdCache.has(name)) return _mdCache.get(name);
   const res = await fetch(`${API}/api/skills/${encodeURIComponent(name)}/markdown`);
@@ -45,6 +46,7 @@ async function _fetchSkillMarkdown(name) {
   const data = await res.json();
   const md = data.markdown || '';
   _mdCache.set(name, md);
+  _mdVersions.set(name, data.version);
   return md;
 }
 // Background-load the markdown for every currently-rendered skill card so it
@@ -853,6 +855,23 @@ function renderSkillsList() {
     pre.className = 'skill-md-pre';
     pre.textContent = '';  // filled on expand
     preview.appendChild(pre);
+    const packagePanel = document.createElement('section');
+    packagePanel.className = 'skill-package';
+    packagePanel.setAttribute('aria-label', 'Skill package files');
+    packagePanel.innerHTML = `<div class="skill-package-head"><strong>Skill package</strong><div class="skill-package-new"><input class="skill-package-path" aria-label="New package file path" placeholder="references/guide.md" maxlength="240"><button type="button" class="doclib-card-text-btn skill-package-add">+ New file</button></div></div><p class="skill-package-hint">SKILL.md is edited with Edit below. Supporting references and scripts are text only; linking a script never runs it.</p><div class="skill-package-list">Loading…</div><div class="skill-package-editor" hidden></div><div class="skill-package-links"></div>`;
+    preview.appendChild(packagePanel);
+    const newPath = packagePanel.querySelector('.skill-package-path');
+    const addFile = () => {
+      const path = newPath.value.trim();
+      if (!path) { newPath.focus(); return; }
+      _openPackageFile(card, name, path, true);
+    };
+    packagePanel.querySelector('.skill-package-add').addEventListener('click', addFile);
+    newPath.addEventListener('keydown', e => { if (e.key === 'Enter') addFile(); });
+    if (['bundled', 'curated', 'integration'].includes(sk.source) || sk._legacy) {
+      newPath.disabled = true; packagePanel.querySelector('.skill-package-add').disabled = true;
+      newPath.title = 'This shared skill is read-only';
+    }
 
     // Footer: Approve/Unpublish on the left, destructive delete on the right.
     const actions = document.createElement('div');
@@ -927,7 +946,7 @@ function renderSkillsList() {
     // Click to expand/collapse (unless in select mode → toggle checkbox).
     card.addEventListener('click', (e) => {
       if (card._suppressNextClick) { card._suppressNextClick = false; return; }
-      if (e.target.closest('button, input, textarea')) return;
+      if (e.target.closest('button, input, textarea, .skill-package')) return;
       // While editing, a click on the card body (outside the textarea) must
       // NOT collapse the card — that silently discards unsaved edits. Only
       // Save/Cancel exit edit mode.
@@ -1048,6 +1067,7 @@ async function _expandSkillCard(card, name) {
   const adminCard = card.closest('.admin-card');
   // Toggle collapse if already open.
   if (card.classList.contains('doclib-card-expanded')) {
+    if (_hasUnsavedPackage(card) && !window.confirm('Discard unsaved resource changes?')) return;
     _collapseSkillCardEl(card);
     if (adminCard) adminCard.classList.remove('skills-has-expanded');
     return;
@@ -1057,6 +1077,8 @@ async function _expandSkillCard(card, name) {
   // collapsing behind the new (semi-transparent) one, which read as a jump.
   const switching = !!(grid && grid.querySelector('.doclib-card-expanded'));
   // Collapse any other expanded sibling (full cleanup, not just the class).
+  if (grid && [...grid.querySelectorAll('.doclib-card-expanded')].some(_hasUnsavedPackage)
+      && !window.confirm('Discard unsaved resource changes?')) return;
   if (grid) grid.querySelectorAll('.doclib-card-expanded').forEach(_collapseSkillCardEl);
   card.classList.add('doclib-card-expanded');
   if (switching) card.classList.add('skill-expand-instant');
@@ -1100,7 +1122,7 @@ async function _expandSkillCard(card, name) {
     preview.style.setProperty('max-height', 'none', 'important');
     preview.style.setProperty('height', previewH + 'px', 'important');
 
-    if (pre) {
+    if (pre && !card.classList.contains('skill-package-editing')) {
       // Pre = preview height minus its non-pre siblings (footer, warn banner).
       const prevPad = px(preview, 'paddingTop') + px(preview, 'paddingBottom');
       let siblings = 0;
@@ -1140,6 +1162,138 @@ async function _expandSkillCard(card, name) {
       }
     }
   }
+  _loadPackageFiles(card, name);
+}
+
+async function _packageRequest(url, options) {
+  const response = await fetch(url, { credentials: 'same-origin', ...options });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : `HTTP ${response.status}`);
+  return data;
+}
+function _hasUnsavedPackage(card) {
+  const panel = card.querySelector('.skill-package-editor');
+  const input = panel?.querySelector('textarea');
+  return !!input && input.value !== panel._original;
+}
+function _packageUrl(name, path) {
+  return `${API}/api/skills/${encodeURIComponent(name)}/package/file?path=${encodeURIComponent(path)}`;
+}
+async function _loadPackageFiles(card, name) {
+  const list = card.querySelector('.skill-package-list');
+  if (!list) return;
+  try {
+    const data = await _packageRequest(`${API}/api/skills/${encodeURIComponent(name)}/package`);
+    list.replaceChildren();
+    const files = data.files || [];
+    if (!files.length) list.textContent = 'No extra files yet — this is a single-file skill.';
+    for (const file of files) {
+      const button = document.createElement('button');
+      button.type = 'button'; button.className = 'skill-package-file';
+      button.textContent = `${file.path} · ${file.bytes} bytes`;
+      button.title = `Open ${file.path}`;
+      button.addEventListener('click', () => _openPackageFile(card, name, file.path));
+      list.appendChild(button);
+    }
+    _renderSkillLinks(card, name, files);
+  } catch (error) { list.textContent = `Package unavailable: ${error.message}`; }
+}
+function _renderSkillLinks(card, name, files) {
+  const panel = card.querySelector('.skill-package-links');
+  if (!panel) return;
+  const skill = skills.find(s => s.name === name) || {};
+  panel.replaceChildren();
+  const heading = document.createElement('strong'); heading.textContent = 'Related skills & scripts';
+  const hint = document.createElement('p'); hint.className = 'skill-package-hint';
+  hint.textContent = 'Links are references, not automatic invocations. Choose an existing destination and save.';
+  panel.append(heading, hint);
+  const draw = (kind, items, choices) => {
+    const section = document.createElement('div'); section.className = 'skill-link-row';
+    const label = document.createElement('span'); label.textContent = kind === 'skill' ? 'Skills' : 'Scripts';
+    section.append(label);
+    for (const item of items) {
+      const destination = document.createElement('button'); destination.type = 'button';
+      destination.className = 'skill-package-file'; destination.textContent = item;
+      destination.title = kind === 'skill' ? `Open skill ${item}` : `Open script ${item} (does not run)`;
+      destination.addEventListener('click', () => kind === 'skill' ? _focusSkillRow(item) : _openPackageFile(card, name, item));
+      if (!choices.includes(item)) { destination.classList.add('skill-link-missing'); destination.title = 'Destination missing or inaccessible'; destination.disabled = true; }
+      const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'skill-link-remove';
+      remove.textContent = '×'; remove.title = `Unlink ${item}`;
+      remove.addEventListener('click', () => _saveSkillLinks(card, name, kind, items.filter(x => x !== item)));
+      section.append(destination, remove);
+    }
+    const select = document.createElement('select'); select.setAttribute('aria-label', `Add related ${kind}`);
+    const initial = document.createElement('option'); initial.value = ''; initial.textContent = `+ Link ${kind}`; select.append(initial);
+    choices.filter(x => !items.includes(x)).forEach(x => {
+      const option = document.createElement('option'); option.value = x; option.textContent = x; select.append(option);
+    });
+    select.addEventListener('change', () => {
+      if (select.value) _saveSkillLinks(card, name, kind, [...items, select.value]);
+    });
+    section.append(select); panel.append(section);
+  };
+  draw('skill', skill.related_skills || [], skills.filter(s => s.name !== name && !s._legacy).map(s => s.name));
+  draw('script', skill.related_scripts || [], files.map(f => f.path).filter(p => /^scripts\/.+\.(py|sh|js|ts)$/i.test(p)));
+  const feedback = document.createElement('div'); feedback.className = 'skill-link-feedback'; feedback.setAttribute('role', 'status'); panel.append(feedback);
+}
+async function _saveSkillLinks(card, name, kind, values) {
+  const feedback = card.querySelector('.skill-link-feedback');
+  const panel = card.querySelector('.skill-package-links');
+  if (panel.dataset.busy || card.querySelector('.skill-md-editor')) {
+    feedback.textContent = 'Save SKILL.md first, then edit links.'; return;
+  }
+  panel.dataset.busy = '1';
+  const skill = skills.find(s => s.name === name);
+  try {
+    const data = await _packageRequest(`${API}/api/skills/${encodeURIComponent(name)}/links`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ version: _mdVersions.get(name),
+        related_skills: kind === 'skill' ? values : (skill.related_skills || []),
+        related_scripts: kind === 'script' ? values : (skill.related_scripts || []) }),
+    });
+    skill.related_skills = data.related_skills; skill.related_scripts = data.related_scripts;
+    _mdVersions.set(name, data.version); _mdCache.set(name, data.markdown); card._md = data.markdown;
+    card.querySelector('.skill-md-pre').textContent = data.markdown;
+    await _loadPackageFiles(card, name);
+    card.querySelector('.skill-link-feedback').textContent = 'Links saved';
+  } catch (error) { feedback.textContent = `Links not saved: ${error.message}`; }
+  finally { delete panel.dataset.busy; }
+}
+async function _openPackageFile(card, name, path, create = false) {
+  const panel = card.querySelector('.skill-package-editor');
+  if (!panel) return;
+  const previous = panel.querySelector('textarea');
+  if (previous && previous.value !== panel._original && !window.confirm('Discard unsaved changes to this resource?')) return;
+  try {
+    const file = create ? { path, content: '', version: 'new' } : await _packageRequest(_packageUrl(name, path));
+    panel.replaceChildren(); panel.hidden = false; panel._original = file.content;
+    card.classList.add('skill-package-editing');
+    card._fillH?.();
+    const label = document.createElement('label'); label.textContent = file.path;
+    const textarea = document.createElement('textarea'); textarea.className = 'skill-package-text';
+    textarea.value = file.content; textarea.spellcheck = false;
+    const save = document.createElement('button'); save.type = 'button'; save.className = 'doclib-card-text-btn'; save.textContent = 'Save file';
+    const close = document.createElement('button'); close.type = 'button'; close.className = 'doclib-card-text-btn'; close.textContent = 'Close';
+    const feedback = document.createElement('span'); feedback.setAttribute('role', 'status');
+    save.addEventListener('click', async () => {
+      save.disabled = true;
+      try {
+        const result = await _packageRequest(_packageUrl(name, path), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: textarea.value, version: file.version }) });
+        file.version = result.version; panel._original = textarea.value;
+        feedback.textContent = 'Saved'; await _loadPackageFiles(card, name);
+      } catch (error) { feedback.textContent = `Not saved: ${error.message}`; }
+      finally { save.disabled = false; }
+    });
+    close.addEventListener('click', () => {
+      if (textarea.value !== panel._original && !window.confirm('Discard unsaved changes?')) return;
+      panel.hidden = true; panel.replaceChildren();
+      card.classList.remove('skill-package-editing');
+      card._fillH?.();
+    });
+    const actions = document.createElement('div'); actions.className = 'skill-package-actions';
+    actions.append(save, close, feedback);
+    label.appendChild(textarea); panel.append(label, actions); textarea.focus();
+  } catch (error) { uiModule.showError(`Cannot open ${path}: ${error.message}`); }
 }
 
 // Swap the read-only <pre> for an editable <textarea> (and back). The
@@ -1175,11 +1329,15 @@ async function _saveSkillEdit(card, name) {
     const res = await fetch(`${API}/api/skills/${encodeURIComponent(name)}/markdown`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ markdown: ta.value }),
+      body: JSON.stringify({ markdown: ta.value, version: _mdVersions.get(name) }),
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) {
+      const detail = (await res.json().catch(() => ({}))).detail;
+      throw new Error(detail || `HTTP ${res.status}`);
+    }
     // Refresh the cached markdown so the preload/expand show the new text.
     _mdCache.set(name, ta.value);
+    _mdVersions.delete(name);
     uiModule.showToast('Saved');
     await loadSkills();  // re-render (frontmatter changes like name/status may have changed)
   } catch (e) {
