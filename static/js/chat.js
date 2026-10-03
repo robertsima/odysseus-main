@@ -12,6 +12,7 @@ import chatRenderer from './chatRenderer.js?v=20261002steer1';
 import chatStream from './chatStream.js?v=20261002approvals1';
 import { renderDiffCard } from './diffView.js';
 import agentThread from './agentThread.js?v=20260928subagentui1';
+import { showRoundDuration } from './roundTiming.js';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js';
 import spinnerModule from './spinner.js';
@@ -4406,6 +4407,8 @@ function _personaNameForTurn() {
                   }));
                 } catch (_) {}
 
+              } else if (json.type === 'round_complete') {
+                if (!_isBg) showRoundDuration(_metricsTargetForTurn(), json.duration_s);
               } else if (json.type === 'agent_step') {
                 _closeOpenThinkingMarkup(_isBg);
                 if (_isBg) continue;

@@ -43576,3 +43576,7 @@ details.admin-ep-advanced[open] > summary { opacity: 0.8; }
   .pa-row { flex-wrap: wrap; }
   .pa-meta { flex-basis: 100%; }
 }
+
+/* Agent round wall time, visible after delivery in both chat themes. */
+.agent-round-duration{display:inline-flex;align-items:center;margin-inline-start:8px;padding:2px 7px;border:1px solid currentColor;border-radius:999px;font-size:11px;font-weight:600;opacity:.8;white-space:nowrap;vertical-align:middle}
+.agent-thread>.agent-round-duration{margin:6px 8px;color:var(--text-secondary,var(--fg));}

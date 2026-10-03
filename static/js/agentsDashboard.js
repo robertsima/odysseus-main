@@ -30,7 +30,7 @@ const STATUS = {
   // A worker that paused on a card whose approval has since lapsed (expired or
   // superseded): nothing is left to answer, so it must not read as "Needs approval".
   approval_expired: ['Approval expired', 'warn'],
-  running: ['Running', 'run'], failed: ['Failed', 'bad'],
+  running: ['Working', 'run'], failed: ['Failed', 'bad'],
   finished: ['Finished', 'ok'], stopped: ['Stopped', 'warn'], idle: ['Idle', ''],
   // A turn that ended on `Needs user:` lines or a question to the user
   // (src/open_needs.py). It used to show as Finished, so the one thing the
@@ -549,7 +549,20 @@ function bindHistorySearch() {
 }
 function filteredRows() {
   const q = state.filter.trim().toLowerCase();
-  return state.rows.filter((r) => !q || (r.name || '').toLowerCase().includes(q) || (r.latest || '').toLowerCase().includes(q));
+  if (!q) return state.rows;
+  const byId = new Map(state.rows.map((row) => [row.session_id, row]));
+  const visible = new Set();
+  for (const row of state.rows) {
+    if (!(row.name || '').toLowerCase().includes(q) && !(row.latest || '').toLowerCase().includes(q)) continue;
+    let cursor = row;
+    const visited = new Set();
+    while (cursor && !visited.has(cursor.session_id)) {
+      visible.add(cursor.session_id);
+      visited.add(cursor.session_id);
+      cursor = byId.get(cursor.parent_session);
+    }
+  }
+  return state.rows.filter((row) => visible.has(row.session_id));
 }
 /** Parent → worker rows among `rows`, and the rows with no listed parent.
  *  A worker whose parent is filtered out or archived stands on its own. */
@@ -585,7 +598,7 @@ function treeHtml(row, kids, seen = new Set()) {
   seen.add(row.session_id);
   const workers = (kids.get(row.session_id) || []).filter((child) => !seen.has(child.session_id));
   if (!workers.length) return rowHtml(row);
-  const pinned = (child) => [child, ...descendants(child, kids)].some((node) => isLiveAgent(node) || node.session_id === state.selected);
+  const pinned = (child) => !!state.filter.trim() || [child, ...descendants(child, kids)].some((node) => isLiveAgent(node) || node.session_id === state.selected);
   const open = state.expandedParents.has(row.session_id);
   const folded = workers.filter((child) => !pinned(child)).length;
   const visible = open ? workers : workers.filter(pinned);
@@ -924,7 +937,7 @@ function rowHtml(r, nest = {}) {
       ${need}
       <div class="ag-row-sub">${meta ? `<span class="ag-row-meta-inline">${meta}</span>` : ''}${r.latest ? `<span class="ag-row-latest" title="${esc(r.latest)}">${esc(latestText(r))}</span>` : '<span class="ag-row-latest">Standing by</span>'}</div>
       ${crew}
-      ${nest.folded ? `<button type="button" class="ag-workers-toggle" data-ag="toggle-workers" data-sid="${esc(r.session_id)}" aria-expanded="${nest.open ? 'true' : 'false'}" title="${nest.open ? 'Hide finished workers' : 'Show finished workers'}">${nest.open ? '▾' : '▸'} ${nest.folded} finished worker${nest.folded === 1 ? '' : 's'}</button>` : ''}
+      ${nest.folded ? `<button type="button" class="ag-workers-toggle" data-ag="toggle-workers" data-sid="${esc(r.session_id)}" aria-expanded="${nest.open ? 'true' : 'false'}" title="${nest.open ? 'Hide inactive branches' : 'Show inactive branches'}">${nest.open ? '▾' : '▸'} ${nest.folded} inactive branch${nest.folded === 1 ? '' : 'es'}</button>` : ''}
     </div>
     <div class="ag-card-actions">${isCurrentChat(r.session_id) ? '' : `<button type="button" class="wb-icon-btn" data-ag="open-chat" data-sid="${esc(r.session_id)}" title="Open chat" aria-label="Open ${esc(r.name)} chat">Open</button>`}${status === 'running' ? `<button type="button" class="wb-icon-btn" data-ag="stop-chat" data-sid="${esc(r.session_id)}" title="Stop agent" aria-label="Stop ${esc(r.name)}">Stop</button>` : ''}</div>
   </div>`;
