@@ -35,6 +35,15 @@ html[data-style="agamemnon"] body[class*="bg-pattern-"] .chat-container{backgrou
 /* Animated strokes remain visible above the opaque reading cards too, at a
    restrained strength; pointer events and the saved intensity still apply. */
 html[data-style="agamemnon"] body[class*="bg-pattern-"] :is(#synapse-canvas,#rain-canvas,#constellations-canvas,#perlin-flow-canvas,#petals-canvas,#sparkles-canvas,#embers-canvas){z-index:1002!important;opacity:calc(var(--bg-effect-intensity,1) * .6);pointer-events:none}
+/* Effects pass through the open gutters, never in front of readable cards,
+   form controls or modal text. The selected effect remains visible through
+   the translucent board backing without weakening the reading surfaces. */
+html[data-style="agamemnon"] body[class*="bg-pattern-"] :is(#workbench-modal,#agents-dashboard):not(.hidden){z-index:1003!important;background:color-mix(in srgb,var(--ag-bg) 36%,transparent)!important}
+html[data-style="agamemnon"] body[class*="bg-pattern-"] :is(.workbench-modal-content,.agents-modal-content){background:color-mix(in srgb,var(--ag-bg) 36%,transparent)!important}
+html[data-style="agamemnon"] body[class*="bg-pattern-"] #workbench-modal .ag-run-summary{background:var(--ag-bg)!important;padding:6px 8px 10px!important}
+/* An undocked board replaces Scribe. Do not let its transcript ghost through
+   the translucent effect gutters; docked boards must still show the chat. */
+html[data-style="agamemnon"] body[class*="bg-pattern-"]:has(:is(#workbench-modal,#agents-dashboard):not(.hidden):not(.modal-right-docked):not(.modal-left-docked)) .chat-container{visibility:hidden}
 html[data-style="agamemnon"] body[class*="bg-pattern-"] #chat-history{background:color-mix(in srgb,var(--ag-panel) 89%,transparent)}
 html[data-style="agamemnon"] .ody-brand-name,html[data-style="agamemnon"] .ody-page-title{display:none!important}
 html[data-style="agamemnon"] .sidebar{width:240px!important;min-width:240px!important;background:var(--ag-rail)!important;border-right:2px solid var(--ag-border)}
@@ -292,6 +301,10 @@ html[data-style="agamemnon"] #workbench-modal .ag-run-console{grid-row:5}
 html[data-style="agamemnon"] #workbench-modal .ag-run-detail{grid-column:1;grid-row:6;width:100%;margin:0;padding:16px 18px;border:1px solid var(--ag-border);background:var(--ag-rail)}
 html[data-style="agamemnon"] #workbench-modal .ag-run-detail section+section{margin-top:14px;padding-top:14px}
 html[data-style="agamemnon"] #workbench-modal .workbench-modal-body>.wb-tabs{margin:0;gap:0;border-bottom:1px solid var(--ag-border-strong)}
+/* Keep the existing select controls in their usual desktop positions. */
+#workbench-modal .wb-filter-options,#workbench-modal .wb-filter-fields{display:contents}
+#workbench-modal .wb-filter-options>summary{display:none}
+#workbench-modal .wb-pr-short{display:none}
 html[data-style="agamemnon"] #workbench-modal .wb-activity{border-width:1px}
 @container (min-width:850px){
  html[data-style="agamemnon"] #workbench-modal .wb-panel[data-wb-panel="activity"]{grid-template-columns:minmax(0,1fr) minmax(260px,32%);gap:14px 22px}
@@ -380,8 +393,22 @@ html[data-style="agamemnon"] #agents-dashboard .ag-appearance-options{grid-templ
 
  html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-row-name{white-space:normal;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;line-height:1.3}
  html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-row-dur{font-size:11px}
- html[data-style="agamemnon"] #workbench-modal .workbench-modal-body>.wb-tabs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0}
+ html[data-style="agamemnon"] #workbench-modal .workbench-modal-body>.wb-tabs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:0}
  html[data-style="agamemnon"] #workbench-modal .wb-tabs .memory-tab{width:100%;justify-content:center}
+ html[data-style="agamemnon"] #workbench-modal .wb-tabs .memory-tab{padding-inline:3px;font-size:11px}
+ html[data-style="agamemnon"] #workbench-modal .wb-pr-long{display:none}
+ html[data-style="agamemnon"] #workbench-modal .wb-pr-short{display:inline}
+ html[data-style="agamemnon"] #workbench-modal .ag-run-summary{padding-bottom:10px!important}
+ html[data-style="agamemnon"] #workbench-modal .wb-panel[data-wb-panel="activity"]{gap:10px}
+ html[data-style="agamemnon"] #workbench-modal .wb-filter-options{display:block;order:0}
+ html[data-style="agamemnon"] #workbench-modal .wb-filter-options>summary{display:list-item;cursor:pointer;min-height:44px;box-sizing:border-box;padding:12px 6px;color:var(--ag-gold);font-size:12px}
+ html[data-style="agamemnon"] #workbench-modal .wb-filter-options>summary:focus-visible{outline:2px solid var(--ag-gold)}
+ html[data-style="agamemnon"] #workbench-modal .wb-filter-options:not([open]) .wb-filter-fields{display:none}
+ html[data-style="agamemnon"] #workbench-modal .wb-filter-options[open]{flex-basis:100%}
+ html[data-style="agamemnon"] #workbench-modal .wb-filter-options[open] .wb-filter-fields{display:flex;gap:8px;flex-wrap:wrap;padding:4px 0 10px}
+ html[data-style="agamemnon"] #workbench-modal .wb-toolbar .wb-spacer{display:none}
+ html[data-style="agamemnon"] #workbench-modal .wb-toolbar{gap:4px;justify-content:space-between}
+ html[data-style="agamemnon"] #workbench-modal .wb-toolbar :is(#wb-pause,#wb-clear){min-height:44px}
  html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-detail{padding:16px}
  html[data-style="agamemnon"] .ag-run-control>section{padding:16px 18px}
  html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-body>.wb-panel{height:auto;min-height:420px;padding:12px}
@@ -445,7 +472,7 @@ html[data-style] .sidebar.right-side .sidebar-brand{gap:10px;padding:0}
 @container wbpanel (max-width:610px){#workbench-modal .wb-branch-picker{width:100%}#workbench-modal .wb-repo-select{flex:1;max-width:100%}}
 /* Let all four views remain reachable even in a hand-resized dock. */
 #workbench-modal .workbench-modal-content{container:wbwindow / inline-size}
-@container wbwindow (max-width:660px){html[data-style="agamemnon"] #workbench-modal .workbench-modal-body>.wb-tabs,#workbench-modal .workbench-modal-body>.wb-tabs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}#workbench-modal .wb-tabs .memory-tab{justify-content:center;min-width:0}}
+@container wbwindow (max-width:660px){#workbench-modal .workbench-modal-body>.wb-tabs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}html[data-style="agamemnon"] #workbench-modal .workbench-modal-body>.wb-tabs{grid-template-columns:repeat(4,minmax(0,1fr))}#workbench-modal .wb-tabs .memory-tab{justify-content:center;min-width:0}}
 @container wbpane (max-width:460px){#workbench-modal .wb-diff-body:after{content:'↔ Scroll for long lines';display:block;position:sticky;left:0;width:max-content;padding:4px 8px;background:var(--panel);color:var(--wb-muted);font-size:11px}}
 /* Font/Layout previously required horizontal scrolling even at 1440px. */
 #theme-modal .admin-card:has(#theme-font-select) .theme-fd-row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}

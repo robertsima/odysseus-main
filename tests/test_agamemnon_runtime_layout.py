@@ -374,8 +374,8 @@ def test_workbench_activity_polish_keeps_full_tabs_and_run_content(open_app, wid
     assert page.probe('.ag-run-summary')['visible']
     assert_no_sideways_scroll(page, '.workbench-modal-content')
     if width <= 390:
-        assert abs(tabs[0]['left'] - tabs[2]['left']) <= 1, tabs
-        assert tabs[2]['right'] <= width
+        assert tabs[0]['left'] < tabs[1]['left'] < tabs[2]['left'] < tabs[3]['left'], tabs
+        assert tabs[3]['right'] <= width
 
 
 @pytest.mark.parametrize('width', [390, 320])
@@ -456,7 +456,7 @@ def test_workbench_draws_only_the_selected_tab(open_app, width):
     if width <= 390:
         tabs = page.eval("[...document.querySelectorAll('#workbench-modal [data-wb-tab]')].map(t => ({label:t.textContent.trim(), right:t.getBoundingClientRect().right, visible:getComputedStyle(t).display !== 'none'}))")
         assert all(tab['visible'] and tab['right'] <= width + 1 for tab in tabs), tabs
-        assert any('Pull Requests' in tab['label'] for tab in tabs), tabs
+        assert any('PRs' in tab['label'] for tab in tabs), tabs
     assert visible_panels(page) == ["activity"]
     for tab, label in (("changes", "Changes"), ("commits", "Commits"), ("prs", "Pull Requests"), ("activity", "Activity")):
         selector = f'#workbench-modal [data-wb-tab="{tab}"]'
@@ -532,6 +532,45 @@ def test_responsive_work_surfaces_and_run_states(open_app, server):
         server.state.run_status = 'running'
 
 
+@pytest.mark.parametrize('width', [390, 700])
+def test_compact_workbench_filters_keyboard_long_title_and_status(open_app, width):
+    page = open_app(width)
+    open_workbench(page)
+    tabs = page.probe('.wb-tabs')
+    summary = page.probe('.ag-run-summary')
+    feed = page.probe('.wb-activity')
+    assert tabs['height'] <= 50 and feed['top'] < 390, (tabs, feed)
+    assert summary['bottom'] < feed['top']
+    assert page.eval("document.getElementById('ag-run-state').getAttribute('role')") == 'status'
+    assert page.eval("document.getElementById('wb-tab-prs').getAttribute('aria-label')") == 'Pull Requests'
+    assert not page.probe('#wb-scope')['visible']
+    page.eval("document.querySelector('.wb-filter-options summary').focus(); document.activeElement.click()")
+    assert page.eval("document.querySelector('.wb-filter-options').open")
+    assert page.probe('#wb-scope')['visible'] and page.probe('#wb-filter')['visible']
+    page.eval("document.getElementById('wb-scope').value='all'; document.getElementById('wb-scope').dispatchEvent(new Event('change',{bubbles:true}))")
+    assert page.eval("document.getElementById('wb-scope').value") == 'all'
+    page.eval("document.querySelector('.wb-filter-options summary').click()")
+    assert not page.probe('#wb-filter')['visible']
+    page.click('#wb-pause')
+    assert page.eval("document.getElementById('wb-pause').textContent") == 'Resume'
+    page.click('#wb-pause')
+    page.eval("document.getElementById('ag-run-title').textContent = 'ExtremelyLongUnbrokenRunName'.repeat(12)")
+    assert_no_sideways_scroll(page, '.workbench-modal-content')
+    assert page.probe('#ag-run-title')['right'] <= width
+    page.click('#wb-tab-prs')
+    assert visible_panels(page) == ['prs']
+
+
+def test_workbench_200_percent_zoom_equivalent_keeps_actions(open_app):
+    # At desktop width with 200% CSS zoom, the effective layout viewport is
+    # 390px: exercise the same reflow and reachable controls as browser zoom.
+    page = open_app(390)
+    open_workbench(page)
+    assert_no_sideways_scroll(page, '.workbench-modal-content')
+    for selector in ('#close-workbench-modal', '#wb-pause', '#wb-clear', '.wb-filter-options summary'):
+        assert_usable(page, selector)
+
+
 @pytest.mark.parametrize('width', [1440, 700, 390])
 def test_appearance_effects_show_through_agamemnon_work_surfaces(open_app, width):
     page = open_app(width)
@@ -542,13 +581,14 @@ def test_appearance_effects_show_through_agamemnon_work_surfaces(open_app, width
     time.sleep(1.5)  # let animated drops traverse the screenshot, not just spawn above it
     shot(page, 'rain-chat')
     open_workbench(page)
-    assert page.eval("getComputedStyle(document.querySelector('.workbench-modal-content')).backgroundColor").startswith('rgb(')
-    assert page.eval("+getComputedStyle(document.querySelector('#rain-canvas')).zIndex") > page.eval("+getComputedStyle(document.querySelector('#workbench-modal')).zIndex")
+    assert '/ 0.36)' in page.eval("getComputedStyle(document.querySelector('.workbench-modal-content')).backgroundColor")
+    assert page.eval("+getComputedStyle(document.querySelector('#rain-canvas')).zIndex") < page.eval("+getComputedStyle(document.querySelector('#workbench-modal')).zIndex")
+    assert page.eval("getComputedStyle(document.querySelector('.wb-activity')).backgroundColor") != 'rgba(0, 0, 0, 0)'
     shot(page, 'rain-workbench')
     page.click('#close-workbench-modal')
     open_agents(page)
     shot(page, 'rain-phalanx')
-    assert page.eval("getComputedStyle(document.querySelector('.agents-modal-content')).backgroundColor").startswith('rgb(')
+    assert '/ 0.36)' in page.eval("getComputedStyle(document.querySelector('.agents-modal-content')).backgroundColor")
     page.click('#close-agents-dashboard')
     page.eval("(() => {const s=document.getElementById('theme-bg-pattern-select'); s.value='none'; s.dispatchEvent(new Event('change',{bubbles:true}));})()")
     page.wait_for("!document.querySelector('#rain-canvas')")
