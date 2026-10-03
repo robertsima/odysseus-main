@@ -1,0 +1,72 @@
+"""Fixtures for browser tests of the shipped static UI against a canned API.
+
+One :class:`~tests.helpers.static_app.StaticAppServer` serves every test in a
+process; its recorded state is reset before each test. ``open_app`` opens the
+app in a fresh browser context (see tests/plugins/browser.py).
+"""
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from tests.helpers.static_app import SESSION_ID, StaticAppServer, settle
+
+ODYSSEUS_THEME = json.dumps({"name": "odysseus", "colors": {
+    "bg": "#211f1c", "fg": "#f2eee5", "panel": "#171614", "border": "#554b36", "red": "#c99a45"}})
+LIGHT_THEME = json.dumps({"name": "light", "colors": {
+    "bg": "#f0ebe3", "fg": "#5a5248", "panel": "#faf6f0", "border": "#d4cdc2", "red": "#c47d5a"}})
+
+
+@pytest.fixture(scope="session")
+def _static_server():
+    with StaticAppServer() as srv:
+        yield srv
+
+
+@pytest.fixture
+def static_app(_static_server):
+    _static_server.state.reset()
+    yield _static_server
+    _static_server.state.reset()
+
+
+@pytest.fixture
+def open_app(static_app, new_page):
+    """``open_app(width, theme=None, style=None, workbench_prefs=None, chat=True)``.
+
+    Opens the app with optional stored theme, page style and Workbench
+    preferences. With ``chat`` it opens the fixture chat and waits for its four
+    messages; without, the start page. Either way it returns once the app's
+    modules are up and the layout has stopped moving.
+    """
+    def _open(width: int, theme: str | None = None, style: str | None = None,
+              workbench_prefs: dict | None = None, chat: bool = True, height: int | None = None):
+        page = new_page(width, height)
+        seed = []
+        if workbench_prefs is not None:
+            seed.append(f"localStorage.setItem('odysseus-workbench-prefs', {json.dumps(json.dumps(workbench_prefs))});")
+        if theme:
+            seed.append(f"localStorage.setItem('odysseus-theme', {json.dumps(theme)});")
+        if style:
+            # Only the first load: a test that switches style and reloads
+            # must see its own choice.
+            value = json.dumps(json.dumps({"value": style, "updated_at": 1}))
+            seed.append(f"if (!localStorage.getItem('odysseus-page-style-v1')) "
+                        f"localStorage.setItem('odysseus-page-style-v1', {value});")
+        if seed:
+            page.add_init_script("try {" + " ".join(seed) + "} catch (_) {}")
+        page.goto(static_app.url + (f"/#{SESSION_ID}" if chat else "/"))
+        wait_ready(page, chat=chat)
+        return page
+
+    return _open
+
+
+def wait_ready(page, chat: bool = True) -> None:
+    """The app's modules are loaded, the chat (if any) is drawn, nothing moves."""
+    if chat:
+        page.wait_for_function("document.querySelectorAll('#chat-history .msg').length >= 4")
+    page.wait_for_function("!!(window.agentsDashboard && window.workbenchModule)")
+    # The composer slides out of the welcome state with a 0.3 s transition.
+    settle(page, ".chat-input-bar")

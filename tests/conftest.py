@@ -13,6 +13,7 @@ pytest_plugins = [
     "tests.plugins.network_guard",
     "tests.plugins.database",
     "tests.plugins.http_app",
+    "tests.plugins.browser",
 ]
 
 # Importing core.database below runs init_db() at import time against
