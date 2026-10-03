@@ -27,7 +27,7 @@ from tests.helpers.agamemnon_browser import (
 )
 
 EXE = chromium_path()
-pytestmark = pytest.mark.skipif(not EXE, reason="needs a Chromium binary (ODYSSEUS_TEST_CHROMIUM)")
+pytestmark = [pytest.mark.browser, pytest.mark.skipif(not EXE, reason="needs a Chromium binary (ODYSSEUS_TEST_CHROMIUM)")]
 
 VIEWPORTS = {1440: 920, 1280: 800, 1024: 768, 700: 844, 390: 844, 320: 740}
 SHOTS = os.environ.get("AGAMEMNON_SCREENSHOT_DIR")

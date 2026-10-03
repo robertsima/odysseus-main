@@ -3,7 +3,7 @@ import json
 import pytest
 from tests.helpers.agamemnon_browser import StaticAppServer, chromium_path, launch_chromium
 
-pytestmark = pytest.mark.skipif(not chromium_path(), reason='needs Chromium')
+pytestmark = [pytest.mark.browser, pytest.mark.skipif(not chromium_path(), reason='needs Chromium')]
 
 @pytest.mark.parametrize('width', [1440, 700, 390])
 def test_command_and_style_independent_of_colorway(width):
