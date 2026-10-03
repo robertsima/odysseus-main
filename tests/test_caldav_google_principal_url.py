@@ -14,27 +14,14 @@ maps the principal URL to its events collection and pulls the event. No live
 Google account is required.
 """
 import sys
-import tempfile
 import types
 from datetime import datetime, timedelta
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import NullPool
 
 import core.database as cdb
-from core.database import CalendarCal, CalendarEvent
+from core.database import CalendarEvent
 from src import caldav_sync
-
-_TMPDB = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-_ENGINE = create_engine(
-    f"sqlite:///{_TMPDB.name}",
-    connect_args={"check_same_thread": False},
-    poolclass=NullPool,
-)
-cdb.Base.metadata.create_all(_ENGINE)
-_TS = sessionmaker(bind=_ENGINE, autoflush=False, autocommit=False)
 
 _GOOGLE_PRINCIPAL = "https://apidata.googleusercontent.com/caldav/v2/me@gmail.com/user"
 _GOOGLE_EVENTS = "https://apidata.googleusercontent.com/caldav/v2/me@gmail.com/events"
@@ -98,7 +85,7 @@ class _FakeClient:
         self.closed = True
 
 
-def _install_fake_caldav(monkeypatch):
+def _install_fake_caldav(monkeypatch, app_db):
     fake = types.ModuleType("caldav")
     fake.DAVClient = _FakeClient
     err = types.ModuleType("caldav.lib.error")
@@ -117,18 +104,8 @@ def _install_fake_caldav(monkeypatch):
     monkeypatch.setitem(sys.modules, "caldav", fake)
     monkeypatch.setitem(sys.modules, "caldav.lib", lib)
     monkeypatch.setitem(sys.modules, "caldav.lib.error", err)
-    monkeypatch.setattr(caldav_sync, "SessionLocal", _TS, raising=False)
-    monkeypatch.setattr(cdb, "SessionLocal", _TS, raising=False)
-
-
-def _clear_db():
-    db = _TS()
-    try:
-        db.query(CalendarEvent).delete()
-        db.query(CalendarCal).delete()
-        db.commit()
-    finally:
-        db.close()
+    monkeypatch.setattr(caldav_sync, "SessionLocal", app_db.SessionLocal, raising=False)
+    monkeypatch.setattr(cdb, "SessionLocal", app_db.SessionLocal, raising=False)
 
 
 def test_maps_google_principal_url_to_events_collection():
@@ -152,9 +129,8 @@ def test_maps_legacy_google_calendar_dav_url():
     assert caldav_sync._google_caldav_events_url("https://www.google.com/accounts/user") is None
 
 
-def test_google_sync_pulls_events_instead_of_empty(monkeypatch):
-    _install_fake_caldav(monkeypatch)
-    _clear_db()
+def test_google_sync_pulls_events_instead_of_empty(monkeypatch, app_db):
+    _install_fake_caldav(monkeypatch, app_db)
 
     result = caldav_sync._sync_blocking("alice", _GOOGLE_PRINCIPAL, "me@gmail.com", "app-pw")
 
@@ -163,7 +139,7 @@ def test_google_sync_pulls_events_instead_of_empty(monkeypatch):
     assert result["events"] == 1, result
     assert not result["errors"], result["errors"]
 
-    db = _TS()
+    db = app_db.SessionLocal()
     try:
         ev = db.query(CalendarEvent).filter(CalendarEvent.uid == "evt-1@google").first()
         assert ev is not None and ev.summary == "Standup"

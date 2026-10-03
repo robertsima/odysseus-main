@@ -12,18 +12,15 @@ import uuid
 import pytest
 
 from tests.helpers.import_state import clear_fake_database_modules
-from tests.helpers.sqlite_db import make_temp_sqlite
 
 clear_fake_database_modules()
 
 import core.database as cdb
 from core.database import CalendarEvent
 
-_TS, _ENGINE, _TMPDB = make_temp_sqlite(cdb.Base.metadata)
-
 
 @pytest.fixture(autouse=True)
-def _bind_temp_db(monkeypatch):
+def _bind_temp_db(monkeypatch, app_db):
     # do_manage_calendar does `from core.database import SessionLocal` at call
     # time, so patch the module attribute to our temp DB — via monkeypatch so it
     # is RESTORED after each test and can't leak into later tests in the process.
@@ -31,11 +28,11 @@ def _bind_temp_db(monkeypatch):
     parent = sys.modules.get("core")
     if parent is not None:
         monkeypatch.setattr(parent, "database", cdb, raising=False)
-    monkeypatch.setattr(cdb, "SessionLocal", _TS)
+    monkeypatch.setattr(cdb, "SessionLocal", app_db.SessionLocal)
     yield
 
 
-async def test_create_event_with_rrule_persists_recurrence():
+async def test_create_event_with_rrule_persists_recurrence(app_db):
     from src.tool_implementations import do_manage_calendar
 
     owner = "tester-" + uuid.uuid4().hex[:6]
@@ -50,7 +47,7 @@ async def test_create_event_with_rrule_persists_recurrence():
     uid = res.get("uid")
     assert uid, res
 
-    db = _TS()
+    db = app_db.SessionLocal()
     try:
         ev = db.query(CalendarEvent).filter(CalendarEvent.uid == uid).first()
         assert ev is not None
@@ -60,7 +57,7 @@ async def test_create_event_with_rrule_persists_recurrence():
         db.close()
 
 
-async def test_create_event_without_rrule_is_single():
+async def test_create_event_without_rrule_is_single(app_db):
     from src.tool_implementations import do_manage_calendar
 
     owner = "tester-" + uuid.uuid4().hex[:6]
@@ -70,7 +67,7 @@ async def test_create_event_without_rrule_is_single():
         "dtstart": "2026-06-09T10:00:00Z",
     }), owner=owner)
     assert res.get("exit_code", 0) == 0, res
-    db = _TS()
+    db = app_db.SessionLocal()
     try:
         ev = db.query(CalendarEvent).filter(CalendarEvent.uid == res["uid"]).first()
         assert ev is not None and (ev.rrule or "") == ""
@@ -78,7 +75,7 @@ async def test_create_event_without_rrule_is_single():
         db.close()
 
 
-async def test_update_event_can_clear_rrule():
+async def test_update_event_can_clear_rrule(app_db):
     from src.tool_implementations import do_manage_calendar
 
     owner = "tester-" + uuid.uuid4().hex[:6]
@@ -97,7 +94,7 @@ async def test_update_event_can_clear_rrule():
     }), owner=owner)
     assert updated.get("exit_code", 0) == 0, updated
 
-    db = _TS()
+    db = app_db.SessionLocal()
     try:
         ev = db.query(CalendarEvent).filter(CalendarEvent.uid == created["uid"]).first()
         assert ev is not None
@@ -106,7 +103,7 @@ async def test_update_event_can_clear_rrule():
         db.close()
 
 
-async def test_update_event_can_clear_rrule_with_repeat_none_alias():
+async def test_update_event_can_clear_rrule_with_repeat_none_alias(app_db):
     from src.tool_implementations import do_manage_calendar
 
     owner = "tester-" + uuid.uuid4().hex[:6]
@@ -125,7 +122,7 @@ async def test_update_event_can_clear_rrule_with_repeat_none_alias():
     }), owner=owner)
     assert updated.get("exit_code", 0) == 0, updated
 
-    db = _TS()
+    db = app_db.SessionLocal()
     try:
         ev = db.query(CalendarEvent).filter(CalendarEvent.uid == created["uid"]).first()
         assert ev is not None

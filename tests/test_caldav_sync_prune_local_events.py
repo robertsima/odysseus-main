@@ -12,24 +12,9 @@ pure DB logic; `_sync_blocking` itself needs a live CalDAV client) and asserts a
 local-origin event survives while a server-origin one with a vanished UID does
 not.
 """
-import tempfile
 from datetime import datetime, timedelta
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import NullPool
-
-import core.database as cdb
 from core.database import CalendarEvent, CalendarCal
-
-_TMPDB = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-_ENGINE = create_engine(
-    f"sqlite:///{_TMPDB.name}",
-    connect_args={"check_same_thread": False},
-    poolclass=NullPool,
-)
-cdb.Base.metadata.create_all(_ENGINE)
-_TS = sessionmaker(bind=_ENGINE, autoflush=False, autocommit=False)
 
 _NOW = datetime(2026, 6, 4, 12, 0)
 _START = _NOW - timedelta(days=90)
@@ -51,11 +36,9 @@ def _prune(db, calendar_id, seen_uids):
     return len(stale)
 
 
-def _seed():
-    db = _TS()
+def _seed(app_db):
+    db = app_db.SessionLocal()
     try:
-        db.query(CalendarEvent).delete()
-        db.query(CalendarCal).delete()
         db.add(CalendarCal(id="cal1", owner="alice", name="Work", source="caldav"))
         # A server-synced event whose UID is NO LONGER returned (deleted upstream).
         db.add(CalendarEvent(
@@ -74,9 +57,9 @@ def _seed():
         db.close()
 
 
-def test_local_event_survives_prune():
-    _seed()
-    db = _TS()
+def test_local_event_survives_prune(app_db):
+    _seed(app_db)
+    db = app_db.SessionLocal()
     try:
         # Server returned nothing (both UIDs absent from seen_uids).
         deleted = _prune(db, "cal1", seen_uids={"some-other-uid"})
@@ -88,9 +71,9 @@ def test_local_event_survives_prune():
         db.close()
 
 
-def test_synced_event_still_returned_is_kept():
-    _seed()
-    db = _TS()
+def test_synced_event_still_returned_is_kept(app_db):
+    _seed(app_db)
+    db = app_db.SessionLocal()
     try:
         # The server still returns the synced event → it must be kept.
         deleted = _prune(db, "cal1", seen_uids={"server-gone@svc"})

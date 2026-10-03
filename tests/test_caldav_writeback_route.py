@@ -9,30 +9,20 @@ hang in some environments; a direct call with a minimal fake request keeps the
 same coverage and completes reliably.
 """
 
-import tempfile
 import uuid
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import NullPool
 
-import core.database as cdb
 import routes.calendar_routes as croutes
 import src.caldav_sync as csync
 from core.database import CalendarCal
 from routes.calendar_routes import EventCreate
 
-_TMPDB = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-_ENGINE = create_engine(
-    f"sqlite:///{_TMPDB.name}",
-    connect_args={"check_same_thread": False},
-    poolclass=NullPool,
-)
-cdb.Base.metadata.create_all(_ENGINE)
-_TS = sessionmaker(bind=_ENGINE, autoflush=False, autocommit=False)
-croutes.SessionLocal = _TS
+
+@pytest.fixture(autouse=True)
+def _bind_test_db(monkeypatch, app_db):
+    monkeypatch.setattr(croutes, "SessionLocal", app_db.SessionLocal)
 
 
 @pytest.fixture
@@ -64,9 +54,9 @@ def _endpoint(method, suffix):
     raise RuntimeError(f"{method} *{suffix} not found")
 
 
-def _make_cal(source):
+def _make_cal(app_db, source):
     cid = ("caldav-" if source == "caldav" else "loc-") + uuid.uuid4().hex[:10]
-    db = _TS()
+    db = app_db.SessionLocal()
     try:
         db.add(CalendarCal(id=cid, owner="tester", name="C", source=source))
         db.commit()
@@ -75,9 +65,9 @@ def _make_cal(source):
         db.close()
 
 
-async def test_create_on_caldav_calendar_pushes_to_remote(calls):
+async def test_create_on_caldav_calendar_pushes_to_remote(calls, app_db):
     create_event = _endpoint("POST", "/events")
-    cal_id = _make_cal("caldav")
+    cal_id = _make_cal(app_db, "caldav")
     res = await create_event(_req(), EventCreate(
         summary="Dentist", dtstart="2026-06-10T14:00:00Z", calendar_href=cal_id))
     assert res["ok"] is True
@@ -85,19 +75,19 @@ async def test_create_on_caldav_calendar_pushes_to_remote(calls):
     assert calls[0]["delete"] is False
 
 
-async def test_create_on_local_calendar_does_not_push(calls):
+async def test_create_on_local_calendar_does_not_push(calls, app_db):
     create_event = _endpoint("POST", "/events")
-    cal_id = _make_cal("local")
+    cal_id = _make_cal(app_db, "local")
     res = await create_event(_req(), EventCreate(
         summary="Local", dtstart="2026-06-10T14:00:00Z", calendar_href=cal_id))
     assert res["ok"] is True
     assert calls == []
 
 
-async def test_delete_on_caldav_calendar_pushes_delete(calls):
+async def test_delete_on_caldav_calendar_pushes_delete(calls, app_db):
     create_event = _endpoint("POST", "/events")
     delete_event = _endpoint("DELETE", "/events/{uid}")
-    cal_id = _make_cal("caldav")
+    cal_id = _make_cal(app_db, "caldav")
     res = await create_event(_req(), EventCreate(
         summary="Temp", dtstart="2026-06-10T14:00:00Z", calendar_href=cal_id))
     uid = res["uid"]

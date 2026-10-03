@@ -15,16 +15,13 @@ import pytest
 
 import core.database as cdb
 from core.database import CalendarEvent
-from tests.helpers.sqlite_db import make_temp_sqlite
-
-_TS, _ENGINE, _TMPDB = make_temp_sqlite(cdb.Base.metadata)
 
 
 @pytest.fixture(autouse=True)
-def _bind_temp_db(monkeypatch):
-    monkeypatch.setattr(cdb, "SessionLocal", _TS)
+def _bind_temp_db(monkeypatch, app_db):
+    monkeypatch.setattr(cdb, "SessionLocal", app_db.SessionLocal)
     import routes.calendar_routes as cr
-    monkeypatch.setattr(cr, "SessionLocal", _TS, raising=False)
+    monkeypatch.setattr(cr, "SessionLocal", app_db.SessionLocal, raising=False)
     yield
 
 
@@ -38,7 +35,7 @@ def tokyo_offset():
         set_user_tz_offset(None)
 
 
-async def test_update_event_dtstart_anchored_to_user_tz(tokyo_offset):
+async def test_update_event_dtstart_anchored_to_user_tz(tokyo_offset, app_db):
     from src.tool_implementations import do_manage_calendar
 
     owner = "tz-" + uuid.uuid4().hex[:6]
@@ -52,7 +49,7 @@ async def test_update_event_dtstart_anchored_to_user_tz(tokyo_offset):
     assert created.get("exit_code", 0) == 0, created
     uid = created["uid"]
 
-    db = _TS()
+    db = app_db.SessionLocal()
     try:
         ev = db.query(CalendarEvent).filter(CalendarEvent.uid == uid).first()
         created_dtstart, created_is_utc = ev.dtstart, ev.is_utc
@@ -67,7 +64,7 @@ async def test_update_event_dtstart_anchored_to_user_tz(tokyo_offset):
     }), owner=owner)
     assert updated.get("exit_code", 0) == 0, updated
 
-    db = _TS()
+    db = app_db.SessionLocal()
     try:
         ev = db.query(CalendarEvent).filter(CalendarEvent.uid == uid).first()
         # Same input -> same stored moment and same is_utc flag as create.
