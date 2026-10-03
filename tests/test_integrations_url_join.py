@@ -105,6 +105,9 @@ async def test_api_call_root_path_has_no_trailing_slash():
 
     with (
         patch.object(integrations, "_find_integration", return_value=DISCORD_INTEGRATION),
+        # The SSRF guard resolves the host; answer with a public address
+        # instead of asking real DNS for discord.com.
+        patch("src.url_safety._default_resolver", return_value=["162.159.135.232"]),
         patch("httpx.AsyncClient", return_value=mock_client),
     ):
         result = await integrations.execute_api_call(

@@ -51,25 +51,39 @@ def _is_local(host) -> bool:
     return addr.is_loopback or addr.is_unspecified
 
 
+def _is_ip_literal(host) -> bool:
+    """Resolving an address literal needs no DNS, so it may go through; the
+    connect guard still stops a connection to it."""
+    try:
+        ipaddress.ip_address(_host_name(host).split("%", 1)[0])
+    except ValueError:
+        return False
+    return True
+
+
+def _resolvable(host) -> bool:
+    return _allowed or _is_local(host) or _is_ip_literal(host)
+
+
 def _blocked(what: str, host) -> str:
     return (f"blocked by the test network guard: {what} {host!r}. "
             "Fake the call, or mark the test @pytest.mark.allow_network with a reason.")
 
 
 def _getaddrinfo(host, *args, **kwargs):
-    if _allowed or _is_local(host):
+    if _resolvable(host):
         return _REAL["getaddrinfo"](host, *args, **kwargs)
     raise socket.gaierror(socket.EAI_NONAME, _blocked("DNS lookup of", host))
 
 
 def _gethostbyname(host):
-    if _allowed or _is_local(host):
+    if _resolvable(host):
         return _REAL["gethostbyname"](host)
     raise socket.gaierror(socket.EAI_NONAME, _blocked("DNS lookup of", host))
 
 
 def _gethostbyname_ex(host):
-    if _allowed or _is_local(host):
+    if _resolvable(host):
         return _REAL["gethostbyname_ex"](host)
     raise socket.gaierror(socket.EAI_NONAME, _blocked("DNS lookup of", host))
 
