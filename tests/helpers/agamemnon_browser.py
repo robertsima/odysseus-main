@@ -119,7 +119,15 @@ def _api_response(state: StubState, method: str, path: str, body: dict) -> tuple
     if path == "/api/agents/overview":
         rows = [dict(row, soldier_appearance=state.appearance.get(row["session_id"], row.get("soldier_appearance")))
                 for row in AGENT_ROWS]
-        return 200, {"rows": rows, "totals": {"running": 2, "finished_24h": 1}, "profiles": [], "chats": []}
+        # Mirror the real overview's status totals. Browser tests mutate rows
+        # to exercise transitions; fixed counters make the header contradict
+        # the tree (e.g. two approvals under a "0 waiting" heading).
+        totals = {status: sum(row["status"] == status for row in rows)
+                  for status in ("running", "waiting_approval", "needs_input")}
+        totals.update(finished_24h=sum(row["status"] == "finished" for row in rows),
+                      failed_24h=sum(row["status"] == "failed" for row in rows),
+                      workers_running=sum(row.get("children_running", 0) for row in rows))
+        return 200, {"rows": rows, "totals": totals, "profiles": [], "chats": []}
     if path == "/api/agents/approvals":
         return 200, {"approvals": []}
     if path in ("/api/workbench/activity", "/api/agents/history"):

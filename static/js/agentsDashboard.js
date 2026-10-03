@@ -603,8 +603,8 @@ function treeHtml(row, kids, seen = new Set()) {
   const folded = workers.filter((child) => !pinned(child)).length;
   const visible = open ? workers : workers.filter(pinned);
   const inner = visible.map((child) => treeHtml(child, kids, seen)).join('');
-  return `${rowHtml(row, { folded, open })}${inner
-    ? `<div class="ag-card-workers" role="group" aria-label="Workers of ${esc(row.name)}">${inner}</div>` : ''}`;
+  return `${rowHtml(row, { folded, open })}${(inner || folded)
+    ? `<div id="ag-workers-${esc(encodeURIComponent(row.session_id))}" class="ag-card-workers" role="group" aria-label="Workers of ${esc(row.name)}"${inner ? '' : ' hidden'}>${inner}</div>` : ''}`;
 }
 function fleetHtml() {
   const rows = filteredRows();
@@ -654,9 +654,12 @@ function renderFleetOnly() {
   const top = list.scrollTop;
   const focusedUnit = list.contains(document.activeElement) && document.activeElement.matches('.ag-card-select')
     ? document.activeElement.dataset.sid : null;
+  const focusedToggle = list.contains(document.activeElement) && document.activeElement.matches('.ag-workers-toggle')
+    ? document.activeElement.dataset.sid : null;
   list.innerHTML = fleetHtml();
   list.scrollTop = top;
   if (focusedUnit) list.querySelector(`.ag-card-select[data-sid="${CSS.escape(focusedUnit)}"]`)?.focus({ preventScroll: true });
+  if (focusedToggle) list.querySelector(`.ag-workers-toggle[data-sid="${CSS.escape(focusedToggle)}"]`)?.focus({ preventScroll: true });
 }
 function updateStats() {
   const box = $('agents-dashboard')?.querySelector('.ag-triage');
@@ -937,7 +940,7 @@ function rowHtml(r, nest = {}) {
       ${need}
       <div class="ag-row-sub">${meta ? `<span class="ag-row-meta-inline">${meta}</span>` : ''}${r.latest ? `<span class="ag-row-latest" title="${esc(r.latest)}">${esc(latestText(r))}</span>` : '<span class="ag-row-latest">Standing by</span>'}</div>
       ${crew}
-      ${nest.folded ? `<button type="button" class="ag-workers-toggle" data-ag="toggle-workers" data-sid="${esc(r.session_id)}" aria-expanded="${nest.open ? 'true' : 'false'}" title="${nest.open ? 'Hide inactive branches' : 'Show inactive branches'}">${nest.open ? '▾' : '▸'} ${nest.folded} inactive branch${nest.folded === 1 ? '' : 'es'}</button>` : ''}
+      ${nest.folded ? `<button type="button" class="ag-workers-toggle" data-ag="toggle-workers" data-sid="${esc(r.session_id)}" aria-controls="ag-workers-${esc(encodeURIComponent(r.session_id))}" aria-expanded="${nest.open ? 'true' : 'false'}" title="${nest.open ? 'Hide inactive branches' : 'Show inactive branches'}">${nest.open ? '▾' : '▸'} ${nest.folded} inactive branch${nest.folded === 1 ? '' : 'es'}</button>` : ''}
     </div>
     <div class="ag-card-actions">${isCurrentChat(r.session_id) ? '' : `<button type="button" class="wb-icon-btn" data-ag="open-chat" data-sid="${esc(r.session_id)}" title="Open chat" aria-label="Open ${esc(r.name)} chat">Open</button>`}${status === 'running' ? `<button type="button" class="wb-icon-btn" data-ag="stop-chat" data-sid="${esc(r.session_id)}" title="Stop agent" aria-label="Stop ${esc(r.name)}">Stop</button>` : ''}</div>
   </div>`;
