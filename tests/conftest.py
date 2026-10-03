@@ -7,6 +7,11 @@ from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Shared fixtures and guards live in tests/plugins/, one module per concern.
+pytest_plugins = [
+    "tests.plugins.network_guard",
+]
+
 # Importing core.database below runs init_db() at import time, and its default
 # (sqlite:///./data/app.db) can't be opened in a clean worktree because SQLite
 # won't create the missing ./data parent dir - pytest then dies during
