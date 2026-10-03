@@ -20,6 +20,9 @@ and workspace routes: it exposes host checkouts and can write to GitHub.
 from __future__ import annotations
 
 import logging
+import os
+import subprocess
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Body, HTTPException, Query, Request
@@ -31,6 +34,34 @@ from src import repo_inspect
 from src.auth_helpers import require_user
 
 logger = logging.getLogger(__name__)
+
+
+def _checkout_activity(path: str) -> float:
+    """Latest commit or working-file edit in an already approved checkout.
+
+    Do not use directory mtimes: checkout traversal and unrelated filesystem
+    changes otherwise make an idle branch look active.
+    """
+    try:
+        head = subprocess.run(["git", "-C", path, "log", "-1", "--format=%ct"],
+                              capture_output=True, text=True, timeout=2, check=True)
+        latest = float(head.stdout.strip() or 0)
+        changed = subprocess.run(["git", "-C", path, "status", "--porcelain", "-z", "--untracked-files=normal"],
+                                 capture_output=True, timeout=3, check=True)
+        root = Path(path).resolve()
+        for entry in changed.stdout.split(b"\0")[:200]:
+            if len(entry) < 4 or entry[:2] == b"??" and entry[3:].startswith(b".visual-check/"):
+                continue
+            candidate = root / os.fsdecode(entry[3:])
+            # lstat avoids following a symlink outside the inspected checkout.
+            if candidate.is_relative_to(root):
+                try:
+                    latest = max(latest, candidate.lstat().st_mtime)
+                except OSError:
+                    pass
+        return latest
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0
 
 
 _RUNS_ANSWERED: Dict[str, tuple] = {}
@@ -264,6 +295,14 @@ def setup_workbench_routes() -> APIRouter:
                     seen.add(candidate)
         except Exception:
             pass
+        for repo in repos:
+            # Discovery/configured candidates are confined again before reading
+            # metadata, including the fallback source_repo and workspace.
+            try:
+                repo_inspect.resolve_repo(repo["path"])
+                repo["activity_at"] = _checkout_activity(repo["path"])
+            except repo_inspect.RepoError:
+                repo["activity_at"] = 0
         return {"roots": repo_inspect.allowed_roots(), "repositories": repos, "workspace": workspace}
 
     @router.get("/repo/files")
