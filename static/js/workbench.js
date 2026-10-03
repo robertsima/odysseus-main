@@ -788,7 +788,8 @@ function renderAgamemnonRunControl(runs) {
   const run = (state.focusRun && state.runs.get(state.focusRun)) || runs[0] || null;
   const set = (id, value) => { const el = $(id); if (el) el.textContent = value; };
   if (!run) {
-    title.textContent = 'RUN SUMMARY';
+    title.textContent = 'Select a run to inspect';
+    set('ag-run-state', 'Ready');
     set('ag-run-summary-meta', 'No run selected · activity ready');
     set('ag-run-agent', '—'); set('ag-run-started', '—'); set('ag-run-status', 'Ready');
     set('ag-run-activity-note', 'Inspect the recorded per-run event history below.');
@@ -798,7 +799,8 @@ function renderAgamemnonRunControl(runs) {
   }
   const events = (run.events || []).slice(-8);
   const data = run.data || {};
-  title.textContent = `RUN ${String(run.run_id || '').slice(0, 8).toUpperCase()} / ${String(run.status || 'running').replaceAll('_', ' ').toUpperCase()}`;
+  title.textContent = run.title || `Run ${String(run.run_id || '').slice(0, 8)}`;
+  set('ag-run-state', String(run.status || 'running').replaceAll('_', ' '));
   set('ag-run-summary-meta', `${plural(events.length, 'recorded event')} · ${plural(run.tools || 0, 'tool')} · last update ${fmtTime((events.at(-1) || {}).ts || run.started_at)}`);
   set('ag-run-agent', SOURCE_LABEL[run.source] || run.source || 'Agent');
 

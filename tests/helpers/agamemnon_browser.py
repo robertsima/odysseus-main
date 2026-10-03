@@ -88,6 +88,7 @@ class StubState:
     def __init__(self) -> None:
         self.posts: list[tuple[str, dict]] = []
         self.appearance: dict[str, str | None] = {}
+        self.run_status = 'running'
 
 
 def _api_response(state: StubState, method: str, path: str, body: dict) -> tuple[int, object]:
@@ -117,12 +118,19 @@ def _api_response(state: StubState, method: str, path: str, body: dict) -> tuple
     if path == "/api/agents/approvals":
         return 200, {"approvals": []}
     if path in ("/api/workbench/activity", "/api/agents/history"):
-        return 200, ACTIVITY if path == "/api/workbench/activity" else {"chats": [], "total": 0}
+        if path == "/api/workbench/activity":
+            events = list(ACTIVITY['events'])
+            if state.run_status != 'running':
+                events.append({"seq": 4, "ts": NOW - 20, "kind": "run_finished", "source": "claude_code",
+                               "run_id": RUN_ID, "session_id": SESSION_ID, "title": "Migration check finished",
+                               "data": {"status": state.run_status}})
+            return 200, {"events": events}
+        return 200, {"chats": [], "total": 0}
     if path.startswith("/api/agents/runs/"):
         return 200, {"events": []}
     if path == "/api/workbench/runs":
         return 200, {"runs": [{"run_id": RUN_ID, "session_id": SESSION_ID, "source": "claude_code",
-                                "status": "running", "title": "Claude Code · migrate orders",
+                                "status": state.run_status, "title": "Claude Code · migrate orders",
                                 "started_at": NOW - 60, "detail": "Checking migration safety"}]}
     if path == "/api/workbench/repo/roots":
         return 200, {"roots": ["/repo"], "workspace": "/repo/workbench",

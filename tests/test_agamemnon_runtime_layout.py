@@ -414,8 +414,8 @@ def test_workbench_sheds_empty_run_panel_height(open_app, width):
     assert_no_sideways_scroll(page, '.workbench-modal-content')
     if width <= 390:
         toolbar, feed, detail = (page.probe(s) for s in ('.wb-panel[data-wb-panel="activity"]>.wb-toolbar', '.wb-panel[data-wb-panel="activity"]>.wb-activity', '.ag-run-detail'))
-        assert toolbar['top'] >= output['bottom'] and feed['top'] >= toolbar['bottom'], (toolbar, feed)
-        assert detail['top'] >= feed['bottom'], (feed, detail)
+        assert feed['top'] >= toolbar['bottom'] and timeline['top'] >= feed['bottom'], (toolbar, feed, timeline)
+        assert detail['top'] >= output['bottom'], (output, detail)
 
 
 def test_long_workbench_run_panels_remain_bounded_and_scrollable(open_app):
@@ -484,9 +484,13 @@ def test_workbench_summary_details_and_controls_fit(open_app, width):
         assert box["visible"] and box["left"] >= 0 and box["right"] <= width + 1, (selector, box)
     summary, detail = page.probe(".ag-run-summary"), page.probe(".ag-run-detail")
     if width >= 1280:
-        assert detail["left"] >= summary["right"] + 20 and abs(detail["top"] - summary["top"]) <= 2
+        assert detail["left"] >= page.probe('.wb-activity')["right"] + 20
+        assert summary["top"] < detail["top"]
     else:
         assert detail["top"] >= page.probe(".ag-run-console")["bottom"]
+    assert page.probe('.wb-toolbar')['top'] < page.probe('.ag-run-timeline')['top'] or width >= 1280
+    assert 'migrate orders' in page.eval("document.getElementById('ag-run-title').textContent")
+    assert page.eval("document.getElementById('ag-run-state').textContent").strip()
     # The run timeline and output are filled from recorded events.
     page.wait_for("document.getElementById('ag-run-timeline-list').textContent.includes('Read schema.sql')")
     assert "Read schema.sql" in page.eval("document.getElementById('ag-run-console-output').textContent")
@@ -495,6 +499,84 @@ def test_workbench_summary_details_and_controls_fit(open_app, width):
         assert_usable(page, "#wb-dock-right")
     page.click("#close-workbench-modal")
     page.wait_for("document.getElementById('workbench-modal').classList.contains('hidden')")
+
+
+def test_responsive_work_surfaces_and_run_states(open_app, server):
+    """Evidence from the shipped page, including narrow fleet and finished run."""
+    for width in (1440, 700, 390):
+        page = open_app(width)
+        open_workbench(page)
+        shot(page, 'workbench-running')
+        summary = page.probe('.ag-run-summary')
+        feed = page.probe('.wb-activity')
+        assert feed['visible'] and feed['right'] <= width + 1
+        assert page.eval("getComputedStyle(document.querySelector('.ag-run-summary')).borderTopWidth") == '0px'
+        assert page.eval("document.getElementById('ag-run-state').textContent") == 'running'
+        if width <= 700:
+            assert feed['top'] >= summary['bottom']
+        assert_no_sideways_scroll(page, '.workbench-modal-content')
+        page.click('#close-workbench-modal')
+        open_agents(page)
+        shot(page, 'phalanx-fleet')
+        page.click(f'.ag-card-select[data-sid="{PARENT_ID}"]')
+        page.wait_for(f"document.querySelector('#ag-detail').dataset.sessionId === '{PARENT_ID}'")
+        shot(page, 'phalanx-detail')
+        assert_no_sideways_scroll(page, '.agents-modal-content')
+    server.state.run_status = 'finished'
+    try:
+        page = open_app(700)
+        open_workbench(page)
+        page.wait_for("document.getElementById('ag-run-state').textContent === 'finished'")
+        shot(page, 'workbench-finished')
+    finally:
+        server.state.run_status = 'running'
+
+
+@pytest.mark.parametrize('width', [1440, 700, 390])
+def test_appearance_effects_show_through_agamemnon_work_surfaces(open_app, width):
+    page = open_app(width)
+    page.eval("(() => {const s=document.getElementById('theme-bg-pattern-select'); s.value='rain'; s.dispatchEvent(new Event('change',{bubbles:true}));})()")
+    page.wait_for("document.querySelector('#rain-canvas') && document.body.classList.contains('bg-pattern-rain')")
+    assert page.eval("getComputedStyle(document.querySelector('#rain-canvas')).pointerEvents") == 'none'
+    assert page.eval("getComputedStyle(document.querySelector('.chat-container')).backgroundColor").endswith('0.76)')
+    time.sleep(1.5)  # let animated drops traverse the screenshot, not just spawn above it
+    shot(page, 'rain-chat')
+    open_workbench(page)
+    assert page.eval("getComputedStyle(document.querySelector('.workbench-modal-content')).backgroundColor").startswith('rgb(')
+    assert page.eval("+getComputedStyle(document.querySelector('#rain-canvas')).zIndex") > page.eval("+getComputedStyle(document.querySelector('#workbench-modal')).zIndex")
+    shot(page, 'rain-workbench')
+    page.click('#close-workbench-modal')
+    open_agents(page)
+    shot(page, 'rain-phalanx')
+    assert page.eval("getComputedStyle(document.querySelector('.agents-modal-content')).backgroundColor").startswith('rgb(')
+    page.click('#close-agents-dashboard')
+    page.eval("(() => {const s=document.getElementById('theme-bg-pattern-select'); s.value='none'; s.dispatchEvent(new Event('change',{bubbles:true}));})()")
+    page.wait_for("!document.querySelector('#rain-canvas')")
+    assert page.eval("getComputedStyle(document.querySelector('.chat-container')).backgroundColor").startswith('rgb(')
+    page.eval("(() => {const s=document.getElementById('theme-bg-pattern-select'); s.value='rain'; s.dispatchEvent(new Event('change',{bubbles:true}));})()")
+    page.goto(page.eval('location.href'), settle=0.5)
+    page.wait_for("document.querySelector('#rain-canvas')")
+    assert page.eval("document.getElementById('theme-bg-pattern-select').value") == 'rain'
+    page.send('Emulation.setEmulatedMedia', {'features': [{'name': 'prefers-reduced-motion', 'value': 'reduce'}]})
+    page.wait_for("!document.querySelector('#rain-canvas')")
+    assert page.eval("document.body.classList.contains('bg-pattern-rain')")
+    page.send('Emulation.setEmulatedMedia', {'features': [{'name': 'prefers-reduced-motion', 'value': 'no-preference'}]})
+    page.wait_for("!!document.querySelector('#rain-canvas')")
+
+
+def test_other_effects_switch_cleanly_and_classic_stays_opaque(open_app):
+    page = open_app(700)
+    for effect in ('synapse', 'constellations', 'perlin-flow', 'petals', 'sparkles', 'embers'):
+        page.eval(f"(() => {{const s=document.getElementById('theme-bg-pattern-select'); s.value='{effect}'; s.dispatchEvent(new Event('change',{{bubbles:true}}));}})()")
+        page.wait_for(f"!!document.querySelector('#{effect}-canvas')")
+        assert page.eval("document.querySelectorAll('canvas[id$=" + '"-canvas"' + "]').length") == 1
+    page.eval("(() => {const s=document.getElementById('theme-bg-pattern-select'); s.value='none'; s.dispatchEvent(new Event('change',{bubbles:true}));})()")
+    assert page.eval("document.querySelectorAll('canvas[id$=" + '"-canvas"' + "]').length") == 0
+    classic = open_app(700, theme=ODYSSEUS_THEME)
+    classic.eval("(() => {const s=document.getElementById('theme-bg-pattern-select'); s.value='rain'; s.dispatchEvent(new Event('change',{bubbles:true}));})()")
+    classic.wait_for("!!document.querySelector('#rain-canvas')")
+    assert classic.eval("document.documentElement.dataset.style") == 'classic'
+    assert classic.eval("getComputedStyle(document.querySelector('#rain-canvas')).zIndex") == '0'
 
 
 def test_workbench_docks_beside_the_chat_and_keeps_working_tabs(open_app):

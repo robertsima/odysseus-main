@@ -474,6 +474,11 @@ const _BG_CLASSES = ['bg-pattern-dots',
 const _CANVAS_PATTERNS = { synapse: _initSynapse, rain: _initRain, constellations: _initConstellations,
   'perlin-flow': _initPerlinFlow,
   petals: _initPetals, sparkles: _initSparkles, embers: _initEmbers };
+const _effectMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+_effectMotion.addEventListener('change', () => {
+  const active = Object.keys(_CANVAS_PATTERNS).find(p => document.body.classList.contains('bg-pattern-' + p));
+  if (active) applyBgPattern(active);
+});
 
 export function applyBgEffectColor(color) {
   document.documentElement.style.setProperty('--bg-effect-color', color || '');
@@ -513,7 +518,7 @@ export function applyBgPattern(pattern) {
   // Clean up any canvas backgrounds
   document.querySelectorAll('#synapse-canvas, #rain-canvas, #constellations-canvas, #perlin-flow-canvas, #petals-canvas, #sparkles-canvas, #embers-canvas').forEach(c => c.remove());
   if (p !== 'none') document.body.classList.add('bg-pattern-' + p);
-  if (_CANVAS_PATTERNS[p]) _CANVAS_PATTERNS[p]();
+  if (_CANVAS_PATTERNS[p] && !_effectMotion.matches) _CANVAS_PATTERNS[p]();
   // Hide sliders that do nothing on static patterns.
   const hide = _STATIC_PATTERNS.has(p);
   const ig = document.getElementById('theme-bg-intensity-group');
@@ -1650,7 +1655,7 @@ function _initSynapse() {
   }
 
   function draw() {
-    if (!document.body.classList.contains('bg-pattern-synapse')) {
+    if (!canvas.isConnected || _effectMotion.matches || !document.body.classList.contains('bg-pattern-synapse')) {
       window.removeEventListener('resize', _onResize);
       canvas.remove();
       return;
@@ -1734,7 +1739,7 @@ function _initRain() {
   }
 
   function draw() {
-    if (!document.body.classList.contains('bg-pattern-rain')) {
+    if (!canvas.isConnected || _effectMotion.matches || !document.body.classList.contains('bg-pattern-rain')) {
       window.removeEventListener('resize', _onResize);
       canvas.remove();
       return;
@@ -1820,7 +1825,7 @@ function _initConstellations() {
 
   let t = 0;
   function draw() {
-    if (!document.body.classList.contains('bg-pattern-constellations')) {
+    if (!canvas.isConnected || _effectMotion.matches || !document.body.classList.contains('bg-pattern-constellations')) {
       window.removeEventListener('resize', _onResize);
       canvas.remove();
       return;
@@ -1915,7 +1920,7 @@ function _initPerlinFlow() {
     return _fadeStyle;
   }
   function draw() {
-    if (!document.body.classList.contains('bg-pattern-perlin-flow')) { window.removeEventListener('resize', _onResize); canvas.remove(); return; }
+    if (!canvas.isConnected || _effectMotion.matches || !document.body.classList.contains('bg-pattern-perlin-flow')) { window.removeEventListener('resize', _onResize); canvas.remove(); return; }
     requestAnimationFrame(draw);
     ctx.fillStyle = getFade();
     ctx.fillRect(0, 0, W, H);
@@ -1969,7 +1974,7 @@ function _initPetals() {
   window.addEventListener('resize', _onResize);
   function getColor() { const s = getComputedStyle(document.documentElement); return s.getPropertyValue('--bg-effect-color').trim() || s.getPropertyValue('--fg').trim() || '#9cdef2'; }
   function draw() {
-    if (!document.body.classList.contains('bg-pattern-petals')) { window.removeEventListener('resize', _onResize); canvas.remove(); return; }
+    if (!canvas.isConnected || _effectMotion.matches || !document.body.classList.contains('bg-pattern-petals')) { window.removeEventListener('resize', _onResize); canvas.remove(); return; }
     requestAnimationFrame(draw);
     ctx.clearRect(0, 0, W, H);
     const c = getColor();
@@ -2031,7 +2036,7 @@ function _initSparkles() {
     ctx.restore();
   }
   function draw() {
-    if (!document.body.classList.contains('bg-pattern-sparkles')) { window.removeEventListener('resize', _onResize); canvas.remove(); return; }
+    if (!canvas.isConnected || _effectMotion.matches || !document.body.classList.contains('bg-pattern-sparkles')) { window.removeEventListener('resize', _onResize); canvas.remove(); return; }
     requestAnimationFrame(draw);
     ctx.clearRect(0, 0, W, H);
     const c = getColor();
@@ -2097,7 +2102,7 @@ function _initEmbers() {
     return `rgba(${r},${g},${b},${a})`;
   }
   function draw() {
-    if (!document.body.classList.contains('bg-pattern-embers')) {
+    if (!canvas.isConnected || _effectMotion.matches || !document.body.classList.contains('bg-pattern-embers')) {
       window.removeEventListener('resize', _onResize);
       canvas.remove();
       return;
