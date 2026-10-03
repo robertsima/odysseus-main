@@ -10,13 +10,7 @@ import json
 
 import pytest
 
-from tests.helpers.static_app import SESSION_ID, StaticAppServer, settle
-
-ODYSSEUS_THEME = json.dumps({"name": "odysseus", "colors": {
-    "bg": "#211f1c", "fg": "#f2eee5", "panel": "#171614", "border": "#554b36", "red": "#c99a45"}})
-LIGHT_THEME = json.dumps({"name": "light", "colors": {
-    "bg": "#f0ebe3", "fg": "#5a5248", "panel": "#faf6f0", "border": "#d4cdc2", "red": "#c47d5a"}})
-
+from tests.helpers.static_app import SESSION_ID, StaticAppServer, wait_ready
 
 @pytest.fixture(scope="session")
 def _static_server():
@@ -46,11 +40,12 @@ def open_app(static_app, new_page):
         seed = []
         if workbench_prefs is not None:
             seed.append(f"localStorage.setItem('odysseus-workbench-prefs', {json.dumps(json.dumps(workbench_prefs))});")
+        # Seeds apply to the first load only: a test that changes the theme
+        # or style and reloads must see its own choice.
         if theme:
-            seed.append(f"localStorage.setItem('odysseus-theme', {json.dumps(theme)});")
+            seed.append(f"if (!localStorage.getItem('odysseus-theme')) "
+                        f"localStorage.setItem('odysseus-theme', {json.dumps(theme)});")
         if style:
-            # Only the first load: a test that switches style and reloads
-            # must see its own choice.
             value = json.dumps(json.dumps({"value": style, "updated_at": 1}))
             seed.append(f"if (!localStorage.getItem('odysseus-page-style-v1')) "
                         f"localStorage.setItem('odysseus-page-style-v1', {value});")
@@ -61,12 +56,3 @@ def open_app(static_app, new_page):
         return page
 
     return _open
-
-
-def wait_ready(page, chat: bool = True) -> None:
-    """The app's modules are loaded, the chat (if any) is drawn, nothing moves."""
-    if chat:
-        page.wait_for_function("document.querySelectorAll('#chat-history .msg').length >= 4")
-    page.wait_for_function("!!(window.agentsDashboard && window.workbenchModule)")
-    # The composer slides out of the welcome state with a 0.3 s transition.
-    settle(page, ".chat-input-bar")

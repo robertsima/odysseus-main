@@ -80,6 +80,14 @@ ACTIVITY = {
 }
 
 
+# Stored colourways (localStorage "odysseus-theme"). Both select the classic
+# page style; with none stored the app starts in the Agamemnon style.
+ODYSSEUS_THEME = json.dumps({"name": "odysseus", "colors": {
+    "bg": "#211f1c", "fg": "#f2eee5", "panel": "#171614", "border": "#554b36", "red": "#c99a45"}})
+LIGHT_THEME = json.dumps({"name": "light", "colors": {
+    "bg": "#f0ebe3", "fg": "#5a5248", "panel": "#faf6f0", "border": "#d4cdc2", "red": "#c47d5a"}})
+
+
 class StubState:
     """What the page sent us, for assertions (e.g. the saved soldier appearance),
     and the knobs a test may turn. One server serves a whole test process, so
@@ -394,6 +402,15 @@ def set_checkbox(page, selector: str, checked: bool) -> None:
 
 
 # ── Driving the app ─────────────────────────────────────────────────────────
+
+def wait_ready(page, chat: bool = True) -> None:
+    """The app's modules are loaded, the chat (if any) is drawn, nothing moves."""
+    if chat:
+        page.wait_for_function("document.querySelectorAll('#chat-history .msg').length >= 4")
+    page.wait_for_function("!!(window.agentsDashboard && window.workbenchModule)")
+    # The composer slides out of the welcome state with a 0.3 s transition.
+    settle(page, ".chat-input-bar")
+
 
 def visible_panels(page) -> list[str]:
     """The Workbench tab panels that are drawn."""
