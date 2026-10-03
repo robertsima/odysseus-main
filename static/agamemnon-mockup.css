@@ -21,8 +21,8 @@
   --ag-gold:var(--red,#d7b35a);
   --ag-coral:#e07b5a;
   --ag-text:var(--fg,#f7f8fa);
-  --ag-muted:color-mix(in srgb,var(--fg,#f7f8fa) 88%,var(--panel,#1b2127));
-  --ag-faint:color-mix(in srgb,var(--fg,#f7f8fa) 88%,var(--panel,#1b2127));
+  --ag-muted:color-mix(in srgb,var(--fg,#f7f8fa) 72%,var(--bg,#111417));
+  --ag-faint:color-mix(in srgb,var(--fg,#f7f8fa) 58%,var(--bg,#111417));
 }
 .ag-page-heading,.ag-context-rail,.ag-phalanx-title,.ag-phalanx-summary,.ag-workbench-title,.ag-run-control,.ag-run-detail{display:none}
 html[data-style="agamemnon"] body{font-family:'Space Grotesk',system-ui,sans-serif;background-color:var(--ag-bg);color:var(--ag-text)}
@@ -139,6 +139,7 @@ html[data-style="agamemnon"] body:has(#workbench-modal.modal-right-docked:not(.h
 html .ag-phalanx-title,html .ag-phalanx-summary,html .ag-workbench-title{display:inline}
 html[data-style="agamemnon"] .ody-agents-title,html[data-style="agamemnon"] .ody-agents-summary,html[data-style="agamemnon"] .ody-workbench-title{display:none}
 html[data-style="agamemnon"] .ag-phalanx-title,html[data-style="agamemnon"] .ag-phalanx-summary,html[data-style="agamemnon"] .ag-workbench-title{display:inline}
+html[data-style="agamemnon"] .agents-dashboard{--ag-muted:color-mix(in srgb,var(--fg) 88%,var(--panel));--ag-faint:color-mix(in srgb,var(--fg) 88%,var(--panel))}
 html[data-style="agamemnon"] .agents-dashboard,html[data-style="agamemnon"] #workbench-modal{--wb-muted:var(--ag-muted);--wb-faint:var(--ag-faint);--wb-line:var(--ag-border)}
 html[data-style="agamemnon"] .agents-modal-content,html[data-style="agamemnon"] .workbench-modal-content{font-family:'Space Grotesk';background:var(--ag-bg)!important;border-radius:0}
 /* The global Frosted Glass preference must not make these two overlapping
