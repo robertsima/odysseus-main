@@ -69,7 +69,8 @@ def test_nested_tree_and_round_duration_render(style, width):
                 page.wait_for(f"document.querySelector({json.dumps(toggle)})")
                 assert page.eval(f"document.querySelector({json.dumps(toggle)}).getAttribute('aria-expanded')") == 'false'
                 assert page.eval(f"!!document.getElementById(document.querySelector({json.dumps(toggle)}).getAttribute('aria-controls'))")
-                # The disclosure retains focus across the fleet re-render.
+                # Native button provides keyboard activation; focus survives
+                # the fleet re-render when it is activated.
                 page.eval(f"document.querySelector({json.dumps(toggle)}).focus()")
                 page.eval(f"document.querySelector({json.dumps(toggle)}).click()")
                 page.wait_for(f"document.querySelector({json.dumps(toggle)})?.getAttribute('aria-expanded') === 'true'")
