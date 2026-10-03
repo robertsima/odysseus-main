@@ -494,3 +494,12 @@ html[data-style="agamemnon"] #agents-dashboard :is(.ag-card,.ag-detail,.ag-launc
  html[data-style] #agents-dashboard #ag-panel-overview>.ag-appearance{order:-1;flex-shrink:0;margin-top:0}
 }
 html[data-style] #agents-dashboard .ag-soldier-context{display:none}
+/* Keep feed actions as a pair at the narrowest sheet/200% reflow width.
+   The status stays alongside Filters; expanding Filters gets its own row. */
+@media(max-width:400px){
+ html[data-style="agamemnon"] #workbench-modal .wb-panel[data-wb-panel="activity"]>.wb-toolbar{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));justify-content:stretch;align-items:center}
+ html[data-style="agamemnon"] #workbench-modal .wb-toolbar .wb-filter-options[open],
+ html[data-style="agamemnon"] #workbench-modal .wb-toolbar .wb-filter-options[open]~.wb-live{grid-column:1/-1}
+ html[data-style="agamemnon"] #workbench-modal .wb-toolbar .wb-live{min-width:0;overflow:hidden;text-overflow:ellipsis}
+ html[data-style="agamemnon"] #workbench-modal .wb-toolbar :is(#wb-pause,#wb-clear){width:100%;min-width:0}
+}

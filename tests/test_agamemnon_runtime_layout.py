@@ -673,7 +673,7 @@ def test_responsive_work_surfaces_and_run_states(open_app, server):
         server.state.run_status = 'running'
 
 
-@pytest.mark.parametrize('width', [390, 700])
+@pytest.mark.parametrize('width', [320, 390, 700])
 def test_compact_workbench_filters_keyboard_long_title_and_status(open_app, width):
     page = open_app(width)
     open_workbench(page)
@@ -685,6 +685,10 @@ def test_compact_workbench_filters_keyboard_long_title_and_status(open_app, widt
     assert tabs['height'] <= 50 and feed['top'] - page.probe('.workbench-modal-content')['top'] < 390, (tabs, feed)
     clear = page.probe('#wb-clear')
     assert clear['right'] <= page.probe('#wb-panel-activity')['right'] + 1, clear
+    if width == 320:
+        # Feed actions belong together: a lone Clear row is hard to scan.
+        pause = page.probe('#wb-pause')
+        assert abs(pause['top'] - clear['top']) <= 2, (pause, clear)
     assert summary['bottom'] < feed['top']
     assert page.eval("document.getElementById('ag-run-state').getAttribute('role')") == 'status'
     assert page.eval("document.getElementById('wb-tab-prs').getAttribute('aria-label')") == 'Pull Requests'
@@ -692,6 +696,9 @@ def test_compact_workbench_filters_keyboard_long_title_and_status(open_app, widt
     page.eval("document.querySelector('.wb-filter-options summary').focus(); document.activeElement.click()")
     assert page.eval("document.querySelector('.wb-filter-options').open")
     assert page.probe('#wb-scope')['visible'] and page.probe('#wb-filter')['visible']
+    if width == 320:
+        assert_no_sideways_scroll(page, '.workbench-modal-content')
+        assert abs(page.probe('#wb-pause')['top'] - page.probe('#wb-clear')['top']) <= 2
     page.eval("document.getElementById('wb-scope').value='all'; document.getElementById('wb-scope').dispatchEvent(new Event('change',{bubbles:true}))")
     assert page.eval("document.getElementById('wb-scope').value") == 'all'
     page.eval("document.querySelector('.wb-filter-options summary').click()")
@@ -751,14 +758,16 @@ def test_phone_phalanx_actions_and_muted_metadata(open_app):
     assert page.eval("document.activeElement.matches('.ag-fleet-compact .ag-card-actions button')")
 
 
-def test_workbench_200_percent_zoom_equivalent_keeps_actions(open_app):
-    # At desktop width with 200% CSS zoom, the effective layout viewport is
-    # 390px: exercise the same reflow and reachable controls as browser zoom.
-    page = open_app(390)
+@pytest.mark.parametrize('width', [320, 390])
+def test_workbench_200_percent_zoom_equivalent_keeps_actions(open_app, width):
+    # At 200% browser zoom on 640/780px screens, the effective layout viewport
+    # is 320/390px: exercise the same reflow and reachable controls.
+    page = open_app(width)
     open_workbench(page)
     assert_no_sideways_scroll(page, '.workbench-modal-content')
     for selector in ('#close-workbench-modal', '#wb-pause', '#wb-clear', '.wb-filter-options summary'):
         assert_usable(page, selector)
+    assert abs(page.probe('#wb-pause')['top'] - page.probe('#wb-clear')['top']) <= 2
 
 
 @pytest.mark.parametrize('width', [1440, 700, 390])
