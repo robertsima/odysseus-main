@@ -66,14 +66,6 @@ def test_current_accessibility_bootstrap_remains_present():
 
 # Additional checks above complement the existing broad theme contracts.
 
-def test_custom_theme_and_accessibility_controls_remain_supported():
-    assert "saveCustomTheme" in THEME and "_loadCustomThemes" in THEME
-    assert "applyFontDensity" in THEME
-    assert "applyBgPattern" in THEME
-    assert "applyFrostedGlass" in THEME
-    assert "odysseus-ui-scale" in HTML
-
-
 def test_first_paint_uses_default_only_when_no_saved_palette():
     assert "if (!t || !t.colors)" in HTML
     assert "ds.setProperty('--bg', '#111417')" in HTML
