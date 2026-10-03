@@ -599,6 +599,7 @@ def test_phone_phalanx_actions_and_muted_metadata(open_app):
                      '.ag-fleet-compact .ag-card-actions button[data-ag="stop-chat"]'):
         button = page.probe(selector)
         assert button['width'] >= 44 and button['height'] >= 44
+        assert page.contrast(selector) >= 4.5
     assert page.probe('.ag-fleet-compact .ag-row-latest')['color'] == page.probe('.ag-row-dur')['color']
     assert page.contrast('.ag-fleet-compact .ag-row-latest') >= 4.5
     page.eval("document.querySelector('.ag-fleet-compact .ag-card-actions button').focus()")

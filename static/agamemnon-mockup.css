@@ -510,7 +510,7 @@ html[data-style="agamemnon"] #agents-dashboard :is(.ag-card,.ag-detail,.ag-launc
     stranding them in a thin right-hand column. */
  html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-fleet-list .ag-bot-card{grid-template-columns:34px minmax(0,1fr);row-gap:0;padding:7px 10px}
  html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-fleet-list .ag-card-actions{grid-column:2;grid-row:2;justify-self:start}
- html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-card-actions .wb-icon-btn{color:var(--ag-muted);border:1px solid var(--ag-border-strong);padding-inline:10px}
+ html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-card-actions .wb-icon-btn{color:var(--ag-text);background:var(--ag-raised);border:1px solid var(--ag-border-strong);padding-inline:10px}
  html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-card-actions .wb-icon-btn:focus-visible{outline:2px solid var(--ag-gold);outline-offset:2px}
  html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-row-dur{font-size:10px}
 }
