@@ -71,4 +71,7 @@ def test_artwork_and_runtime_picker_contract():
     assert 'input[name="ag-appearance"]' in js
     assert 'aria-live="polite"' in js
     assert 'if (agent.parent_session) return' in js
-    assert "document.documentElement.dataset.theme !== 'dark'" in js
+    # 2026-10-03 (111b3bd2): the soldier sprite shows in every theme, so the
+    # picker must not be limited to dark mode.
+    handler = js.split("function onConfigChange", 1)[1].split("\nfunction ", 1)[0]
+    assert "dataset.theme" not in handler

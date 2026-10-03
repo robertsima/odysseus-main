@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -75,9 +76,19 @@ def test_layout_lives_in_one_agamemnon_file():
     # composer static under a fixed-height transcript. Behaviour is covered in
     # a real browser by tests/test_agamemnon_runtime_layout.py.
     fixes = (ROOT / 'static/agamemnon-critic-fixes.css').read_text()
+    # 2026-10-03: this used to be `container not in fixes`. The Classic-style
+    # contrast rules legitimately name `#agents-dashboard` and
+    # `.ag-fleet-compact`, so the check now looks at what a rule whose own
+    # target is a container declares: colour and tokens are fine, layout is not.
+    layout = re.compile(r'(?:^|;)\s*(?:display|position|inset|top|right|bottom|left|width|height|min-height|max-height|'
+                        r'overflow|order|flex|grid[\w-]*|float|z-index)\s*:')
     for container in ('.workbench-modal-body', '.wb-panel', '.wb-tabs', '.chat-input-bar', '.chat-container',
                       '.ag-body', '.ag-fleet', '.ag-card-grid', '.ag-context-rail', '#agents-dashboard', '#workbench-modal'):
-        assert container not in fixes, container
+        token = re.compile(re.escape(container) + r'(?![\w-])')
+        for selectors, body in re.findall(r'([^{}]+)\{([^{}]*)\}', fixes):
+            for selector in selectors.split(','):
+                target = re.split(r'[\s>+~]+', selector.strip())[-1]
+                assert not (token.search(target) and layout.search(body)), (container, selector.strip())
     assert 'max-width:1400px' not in fixes
     # Nothing in the Agamemnon layer may force a Workbench panel visible.
     assert 'wb-panel{display' not in CSS and 'wb-panel{display' not in fixes
@@ -85,10 +96,15 @@ def test_layout_lives_in_one_agamemnon_file():
 
 
 def test_full_page_tool_windows_yield_to_docking():
-    # The page treatment applies only while undocked, so the dock controller's
-    # geometry (and the chat beside a docked panel) still works.
+    # 2026-10-03 (111b3bd2): Phalanx and Workbench are floating windows again, so
+    # nothing may stretch an undocked window over the page. Rules that style the
+    # undocked window still carry the docked exclusions so the dock controller's
+    # geometry (and the chat beside a docked panel) keeps working.
+    undocked = ':not(.modal-right-docked):not(.modal-left-docked)'
     for window in ('#agents-dashboard', '#workbench-modal'):
-        assert f'html[data-style="agamemnon"] {window}:not(.modal-right-docked):not(.modal-left-docked){{' in CSS \
-            or f'html[data-style="agamemnon"] {window}:not(.modal-right-docked):not(.modal-left-docked),' in CSS
+        assert f'html[data-style="agamemnon"] {window}{undocked}' in CSS, window
+        for selectors, body in re.findall(r'([^{}]+)\{([^{}]*)\}', CSS):
+            if any(sel.strip().endswith(window + undocked) for sel in selectors.split(',')):
+                assert not re.search(r'(?:^|;)\s*inset\s*:', body), selectors.strip()
     assert 'html[data-style="agamemnon"] #ag-dock-left,html[data-style="agamemnon"] #ag-dock-right,html[data-style="agamemnon"] #wb-dock-right{display:none}' in CSS
     assert CSS.index('@media(max-width:900px)') < CSS.index('#ag-dock-left,html[data-style="agamemnon"] #ag-dock-right')

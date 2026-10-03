@@ -1,14 +1,14 @@
 """Cross-style navigation and persisted appearance in the real static app."""
 import json
 import pytest
-from tests.helpers.agamemnon_browser import Chromium, StaticAppServer, chromium_path
+from tests.helpers.agamemnon_browser import StaticAppServer, chromium_path, launch_chromium
 
 pytestmark = pytest.mark.skipif(not chromium_path(), reason='needs Chromium')
 
 @pytest.mark.parametrize('width', [1440, 700, 390])
 def test_command_and_style_independent_of_colorway(width):
     with StaticAppServer() as server:
-        browser = Chromium(chromium_path())
+        browser = launch_chromium()
         try:
             page = browser.page(width, 850)
             page.goto(server.url, settle=1)
@@ -45,7 +45,7 @@ def test_command_and_style_independent_of_colorway(width):
 
 def test_legacy_palette_preserved_and_rail_order_persists():
     with StaticAppServer() as server:
-        browser = Chromium(chromium_path())
+        browser = launch_chromium()
         try:
             page = browser.page(1440, 900)
             theme = {'name': 'light', 'colors': {'bg': '#f0ebe3', 'fg': '#5a5248', 'panel': '#faf6f0', 'border': '#d4cdc2', 'red': '#c47d5a'}}
@@ -69,7 +69,7 @@ def test_legacy_palette_preserved_and_rail_order_persists():
 
 def test_command_search_new_chat_email_and_keyboard_close():
     with StaticAppServer() as server:
-        browser = Chromium(chromium_path())
+        browser = launch_chromium()
         try:
             page = browser.page(1440, 900)
             page.goto(server.url, settle=1)

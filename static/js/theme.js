@@ -474,7 +474,12 @@ const _BG_CLASSES = ['bg-pattern-dots', 'bg-pattern-lattice',
 const _CANVAS_PATTERNS = { synapse: _initSynapse, rain: _initRain, constellations: _initConstellations,
   'perlin-flow': _initPerlinFlow,
   petals: _initPetals, sparkles: _initSparkles, embers: _initEmbers };
-const _effectMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+// 2026-10-03: window.matchMedia is absent when this module is loaded outside a
+// browser (the Node-driven tests, some embedded webviews). Treat that as no
+// reduced-motion preference rather than throwing at import time.
+const _effectMotion = (typeof window.matchMedia === 'function'
+  ? window.matchMedia('(prefers-reduced-motion: reduce)') : null)
+  || { matches: false, addEventListener() {} };
 _effectMotion.addEventListener('change', () => {
   const active = Object.keys(_CANVAS_PATTERNS).find(p => document.body.classList.contains('bg-pattern-' + p));
   if (active) applyBgPattern(active);

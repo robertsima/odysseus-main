@@ -90,7 +90,10 @@ def test_agamemnon_control_room_soldier_is_model_colored():
     assert 'data-soldier-variant="${soldierVariant}"' in AGENTS
     assert 'data-model-family="${modelIdentity.family}"' in AGENTS
     assert "--agent-model-color:${modelIdentity.color}" in AGENTS
-    assert ".ag-soldier-sprite { display: none;" in STYLE
+    # 2026-10-03 (111b3bd2): the soldier is the one identity image in every
+    # style; the old seal glyph is the hidden one.
+    assert ".ag-soldier-sprite { display: block;" in STYLE
+    assert ".ag-seal-mark { display: none;" in STYLE
 
 
 def test_steering_messages_show_their_state_and_age():

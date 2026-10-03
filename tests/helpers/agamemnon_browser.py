@@ -298,6 +298,9 @@ class BrowserError(RuntimeError):
     pass
 
 
+HANDSHAKE_TIMEOUT = 90
+
+
 class Chromium:
     """Headless Chromium over the DevTools protocol on a pipe (stdlib only).
 
@@ -342,7 +345,19 @@ class Chromium:
         self.events: list[dict] = []
         self._reader = threading.Thread(target=self._read, daemon=True)
         self._reader.start()
-        self.send("Target.setDiscoverTargets", {"discover": False})
+        # 2026-10-03: CI run 37137622943 failed 138 tests with
+        # "Target.setDiscoverTargets timed out" because the first command was
+        # given the default 30s on a cold runner. Wait for the browser to answer
+        # at all with a longer handshake budget, and release the process and
+        # profile if it never does so the failure surfaces as "could not start"
+        # (see launch_chromium) instead of leaking a hung browser.
+        try:
+            self.send("Browser.getVersion", timeout=HANDSHAKE_TIMEOUT)
+            self.send("Target.setDiscoverTargets", {"discover": False}, timeout=HANDSHAKE_TIMEOUT)
+        except BaseException:
+            self.proc.kill()
+            self.close()
+            raise
 
     def _read(self) -> None:
         buf = b""
@@ -407,6 +422,26 @@ class Chromium:
             except OSError:
                 pass
         shutil.rmtree(self._profile, ignore_errors=True)
+
+
+def launch_chromium(exe: str | None = None, attempts: int = 2) -> Chromium:
+    """Start Chromium, or skip the calling test/fixture when it cannot start.
+
+    Only a failed start-up skips. Anything the tests do with a running browser
+    still raises, so a real layout failure is never hidden. A second attempt
+    covers a one-off slow first launch on a shared runner.
+    """
+    import pytest
+    exe = exe or chromium_path()
+    if not exe:
+        pytest.skip("needs a Chromium binary (ODYSSEUS_TEST_CHROMIUM)")
+    last: Exception | None = None
+    for _ in range(attempts):
+        try:
+            return Chromium(exe)
+        except (BrowserError, OSError) as exc:
+            last = exc
+    pytest.skip(f"Chromium at {exe} could not start: {last}")
 
 
 class Page:

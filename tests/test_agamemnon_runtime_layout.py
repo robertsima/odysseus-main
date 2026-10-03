@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 
 from tests.helpers.agamemnon_browser import (
-    OTHER_ID, PARENT_ID, SESSION_ID, WORKER_ID, Chromium, StaticAppServer, chromium_path,
+    OTHER_ID, PARENT_ID, SESSION_ID, WORKER_ID, StaticAppServer, chromium_path, launch_chromium,
 )
 
 EXE = chromium_path()
@@ -45,7 +45,7 @@ def server():
 
 @pytest.fixture(scope="module")
 def browser():
-    b = Chromium(EXE)
+    b = launch_chromium(EXE)
     yield b
     b.close()
 
