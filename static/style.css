@@ -42106,6 +42106,7 @@ body.theme-frosted .modal {
 .wb-select { max-width: 220px; padding-right: 4px; cursor: pointer; }
 .wb-select option { background: var(--select-option-bg, var(--panel)); color: var(--select-option-fg, var(--fg)); }
 .wb-repo-select { max-width: min(440px, 50cqi); font-family: var(--wb-mono); font-size: 11.5px; }
+.wb-repo-suggestion { max-width: 100%; overflow: hidden; text-overflow: ellipsis; color: var(--wb-accent); border-color: color-mix(in srgb, var(--wb-accent) 40%, var(--border)); }
 .wb-input::placeholder { color: var(--wb-faint); }
 .wb-select:focus, .wb-input:focus { outline: none; border-color: var(--wb-accent); }
 .wb-base { width: 210px; }

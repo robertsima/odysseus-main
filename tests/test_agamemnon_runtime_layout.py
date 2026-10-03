@@ -54,8 +54,10 @@ def browser():
 def open_app(server, browser):
     pages = []
 
-    def _open(width: int, theme: str | None = None, style: str | None = None):
+    def _open(width: int, theme: str | None = None, style: str | None = None, workbench_prefs: dict | None = None):
         page = browser.page(width, VIEWPORTS[width])
+        if workbench_prefs is not None:
+            page.before_load(f"localStorage.setItem('odysseus-workbench-prefs', {json.dumps(json.dumps(workbench_prefs))});")
         if theme:
             page.before_load(f"localStorage.setItem('odysseus-theme', {json.dumps(theme)});")
         if style:
@@ -317,6 +319,26 @@ def test_workbench_suggests_latest_activity_without_overriding_selection(open_ap
         page.eval("document.querySelector('.wb-repo-select').value = '/repo/workbench'; document.querySelector('.wb-repo-select').dispatchEvent(new Event('change', {bubbles:true}))")
         page.wait_for("document.querySelector('.wb-repo-select')?.value === '/repo/workbench'")
         assert page.eval("JSON.parse(localStorage.getItem('odysseus-workbench-prefs')).repo") == '/repo/workbench'
+    finally:
+        server.state.repo_activity = (200, 100)
+
+
+@pytest.mark.parametrize('style,width', [('classic', 1440), ('agamemnon', 700), ('agamemnon', 390)])
+def test_workbench_existing_preference_sees_newer_checkout_without_forced_switch(open_app, server, style, width):
+    server.state.repo_activity = (200, 100)
+    try:
+        page = open_app(width, style=style, workbench_prefs={'repo': '/repo/main', 'tab': 'changes'})
+        open_workbench(page, activity=False)
+        page.click('[data-wb-tab="changes"]')
+        page.wait_for("document.querySelector('.wb-repo-suggestion')?.textContent.includes('agent/review')")
+        assert page.eval("document.querySelector('.wb-repo-select').value") == '/repo/main'
+        assert page.eval("JSON.parse(localStorage.getItem('odysseus-workbench-prefs')).repo") == '/repo/main'
+        assert_usable(page, '.wb-repo-suggestion')
+        shot(page, f'workbench-recent-suggestion-{style}-{width}')
+        page.click('.wb-repo-suggestion')
+        page.wait_for("document.querySelector('.wb-repo-select')?.value === '/repo/workbench'")
+        assert page.eval("JSON.parse(localStorage.getItem('odysseus-workbench-prefs')).repo") == '/repo/workbench'
+        assert not page.eval("!!document.querySelector('.wb-repo-suggestion')")
     finally:
         server.state.repo_activity = (200, 100)
 

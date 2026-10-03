@@ -891,7 +891,10 @@ function sourceControlHtml() {
   if (state.reposError) return `<span class="wb-meta-item wb-text-bad" title="${esc(state.reposError)}">Repositories unavailable</span>`;
   const suggested = state.repos.find((x) => x.activity_at > 0);
   const options = state.repos.map((x) => `<option value="${esc(x.path)}"${x.path === c.path ? ' selected' : ''}>${x === suggested ? 'Recent activity · ' : ''}${esc(x.branch || 'detached')} · ${esc(x.path.split(/[\\/]/).pop())}${x.kind === 'worktree' ? ' · worktree' : ''}</option>`).join('');
-  return `<label class="wb-branch-picker">Branch / worktree <select class="wb-select wb-repo-select" data-wb-change="repo" title="Select an active branch checkout" aria-label="Branch or worktree">${c.path ? '' : '<option value="">Choose a branch checkout…</option>'}${options}</select></label>`;
+  const current = state.repos.find((x) => x.path === c.path);
+  const newer = suggested && suggested.path !== c.path && suggested.activity_at > (current?.activity_at || 0);
+  const hint = newer ? `<button type="button" class="wb-btn wb-btn-sm wb-repo-suggestion" data-wb-act="suggest-repo" data-path="${esc(suggested.path)}" title="Recent activity in ${esc(suggested.path)}. Switch checkout without changing files.">Recent activity: ${esc(suggested.branch || 'detached')} · ${esc(suggested.path.split(/[\\/]/).pop())} →</button>` : '';
+  return `<label class="wb-branch-picker">Branch / worktree <select class="wb-select wb-repo-select" data-wb-change="repo" title="Select an active branch checkout" aria-label="Branch or worktree">${c.path ? '' : '<option value="">Choose a branch checkout…</option>'}${options}</select></label>${hint}`;
 }
 function renderChanges() {
   const box = $('wb-changes');
@@ -1632,6 +1635,7 @@ function onAction(b) {
     case 'mode': state.prefs.mode = b.dataset.mode; savePrefs(); renderChanges(); renderCommits(); renderPRs(); break;
     case 'refresh-changes': refreshChanges(); break;
     case 'refresh-commits': refreshCommits(); break;
+    case 'suggest-repo': if (state.repos.some((x) => x.path === b.dataset.path)) setRepo(b.dataset.path); break;
     case 'refresh-prs': refreshPRs(); break;
     case 'recheck-prs': loadPRConfig(); break;
     case 'pr-state': state.pr.stateFilter = b.dataset.state; state.pr.list = []; refreshPRs(); break;
