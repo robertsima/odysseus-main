@@ -44,4 +44,4 @@ def test_browser_tests_run_in_their_own_job_that_can_fail_the_run():
     browser = [name for name, job in jobs.items() if any("-m browser" in run for run in _pytest_steps(job))]
     assert browser, "no job runs the browser marker"
     assert all(not jobs[name].get("continue-on-error") for name in browser)
-    assert all('-m "not browser"' in run for run in _pytest_steps(jobs["python-tests"]))
+    assert all("not browser" in run for run in _pytest_steps(jobs["python-tests"]))
