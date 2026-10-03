@@ -50,6 +50,7 @@ def test_nested_tree_and_round_duration_render(style, width):
                 summary = page.eval("document.querySelector('#ag-window-summary').textContent")
                 assert '1 active · 2 waiting · 2 completed today' in summary
                 assert page.eval("[...document.querySelectorAll('#agents-dashboard .ag-seg')].map(b=>b.textContent.trim())") == ['Needs you2', 'Active1', 'Recent']
+                assert page.eval("document.querySelector('#agents-dashboard .ag-group-attn .wb-count').textContent.trim()") == '1 tree'
                 cards = page.eval("[...document.querySelectorAll('#agents-dashboard .ag-card')].map(c => ({id:c.dataset.sid,status:c.textContent,indent:c.getBoundingClientRect().left}))")
                 by_id = {c['id']: c for c in cards}
                 assert by_id['agent-grandchild']['indent'] > by_id[fixtures.WORKER_ID]['indent'] > by_id[fixtures.PARENT_ID]['indent']
