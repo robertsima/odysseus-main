@@ -1,4 +1,3 @@
-import pytest
 import asyncio
 import json
 import os
@@ -13,10 +12,6 @@ from mcp.client.stdio import stdio_client
 from src.builtin_mcp import _BUILTIN_SERVERS
 from src.lotus_checkins import LotusCheckinStore, owner_storage_key
 from src.mcp_manager import _BUILTIN_FUNCTION_CALLING_SERVERS, McpManager
-
-_REPORT_BACKLOG = pytest.mark.skip(
-    reason="Re-port backlog: uses fork-only internals replaced by upstream's agent core (website/upstream-sync-2026-09-18.md)"
-)
 
 ROOT = Path(__file__).resolve().parent.parent
 COMPOSE_FILES = (
@@ -141,63 +136,6 @@ def test_builtin_lotus_completes_mcp_handshake_with_safe_defaults(tmp_path):
     assert (
         tmp_path / "data" / "users" / owner_storage_key("bob") / "mood.db"
     ).is_file()
-
-
-@_REPORT_BACKLOG
-def test_lotus_private_filter_follows_owner_access_policy(monkeypatch, tmp_path):
-    monkeypatch.setenv("LOTUS_DATA_DIR", str(tmp_path / "lotus"))
-    from src.agent_loop import (
-        _LOTUS_MCP_TOOL_NAMES,
-        _LOTUS_NATIVE_TOOL_NAMES,
-        _apply_private_mcp_filter,
-    )
-
-    local_map: dict[str, set] = {}
-    local_disabled: set[str] = set()
-    _apply_private_mcp_filter(
-        "http://127.0.0.1:11434/v1/chat/completions",
-        local_map,
-        local_disabled,
-        owner="alice",
-    )
-    assert local_map == {}
-    assert local_disabled == set()
-
-    remote_map: dict[str, set] = {}
-    remote_disabled: set[str] = set()
-    _apply_private_mcp_filter(
-        "https://api.openai.com/v1/chat/completions",
-        remote_map,
-        remote_disabled,
-        owner="alice",
-    )
-    assert remote_map == {"lotus": _LOTUS_MCP_TOOL_NAMES}
-    assert remote_disabled == {
-        f"mcp__lotus__{name}" for name in _LOTUS_MCP_TOOL_NAMES
-    } | _LOTUS_NATIVE_TOOL_NAMES
-
-    LotusCheckinStore("alice").save_preferences({"access_api": True, "access_local": False})
-    api_map: dict[str, set] = {}
-    api_disabled: set[str] = set()
-    _apply_private_mcp_filter(
-        "https://api.openai.com/v1/chat/completions",
-        api_map,
-        api_disabled,
-        owner="alice",
-    )
-    assert api_map == {}
-    assert api_disabled == set()
-
-    denied_local_map: dict[str, set] = {}
-    denied_local_tools: set[str] = set()
-    _apply_private_mcp_filter(
-        "http://localhost:11434/v1/chat/completions",
-        denied_local_map,
-        denied_local_tools,
-        owner="alice",
-    )
-    assert denied_local_map == {"lotus": _LOTUS_MCP_TOOL_NAMES}
-    assert "manage_wellbeing" in denied_local_tools
 
 
 def test_lotus_tool_execution_injects_authenticated_owner(monkeypatch):

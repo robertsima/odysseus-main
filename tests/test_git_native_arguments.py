@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from src import tool_approvals, tool_execution
+from src import tool_execution
 from src.agent_loop import _resolve_tool_blocks
 from src.chatgpt_subscription import build_responses_tools
 from src.git_tool_contract import (
@@ -22,10 +22,6 @@ from src.git_tool_contract import (
     normalize_worktree_repo_arguments,
 )
 from src.tool_schemas import FUNCTION_TOOL_SCHEMAS, compact_function_tool_schemas
-
-_REPORT_BACKLOG = pytest.mark.skip(
-    reason="Re-port backlog: uses fork-only internals replaced by upstream's agent core (website/upstream-sync-2026-09-18.md)"
-)
 
 _NEUTRAL_GIT_PAYLOAD = {
     "repository": "",
@@ -304,89 +300,6 @@ async def test_expanded_pull_uses_only_permission_checked_integration_token(
     implementation.assert_awaited_once_with(
         action, "/repos/app", token="ghp_test_only_github_token" if allowed else None
     )
-
-
-@_REPORT_BACKLOG
-def test_one_use_approval_equates_sparse_and_provider_expanded_calls_only():
-    sparse = {
-        "action": "push",
-        "repository": "/repos/app",
-        "expected_head": "a" * 40,
-    }
-    expanded = {**_NEUTRAL_GIT_PAYLOAD, **sparse}
-    pending = tool_approvals.request(
-        "session", "manage_git", json.dumps(sparse), "pushes"
-    )
-    tool_approvals.decide("session", pending["id"], "once")
-    assert tool_approvals.has_once_grant("session", "manage_git", json.dumps(expanded))
-    assert tool_approvals.consume_once_grant(
-        "session", "manage_git", json.dumps(expanded)
-    )
-    assert not tool_approvals.has_once_grant(
-        "session", "manage_git", json.dumps(sparse)
-    )
-
-
-@_REPORT_BACKLOG
-@pytest.mark.parametrize("approve_expanded", [True, False])
-def test_legacy_repo_pull_approval_equates_neutral_fillers_but_not_targets(
-    approve_expanded,
-):
-    sparse = {"action": "repo_pull", "repository": "/repos/app"}
-    expanded = {
-        **sparse,
-        "name": "",
-        "branch": "",
-        "message": "",
-        "title": "",
-        "body": "",
-        "request_id": "",
-        "approval_code": "",
-    }
-    approved, retried = (expanded, sparse) if approve_expanded else (sparse, expanded)
-    pending = tool_approvals.request(
-        "session", "manage_agent_worktree", json.dumps(approved), "pulls"
-    )
-    tool_approvals.decide("session", pending["id"], "once")
-    for change in (
-        {"repository": "/repos/other"},
-        {"repository": "/repos/app "},
-        {"branch": "main"},
-    ):
-        assert not tool_approvals.has_once_grant(
-            "session", "manage_agent_worktree", json.dumps({**retried, **change})
-        )
-    assert tool_approvals.consume_grant(
-        "session", "manage_agent_worktree", json.dumps(retried)
-    )
-    assert not tool_approvals.consume_grant(
-        "session", "manage_agent_worktree", json.dumps(approved)
-    )
-
-
-@_REPORT_BACKLOG
-@pytest.mark.parametrize(
-    "change",
-    [
-        {"repository": "/repos/other"},
-        {"expected_head": "b" * 40},
-        {"remote_branch": "release"},
-    ],
-)
-def test_one_use_approval_never_equates_meaningful_target_changes(change):
-    approved = {
-        "action": "push",
-        "repository": "/repos/app",
-        "expected_head": "a" * 40,
-    }
-    pending = tool_approvals.request(
-        "session", "manage_git", json.dumps(approved), "pushes"
-    )
-    tool_approvals.decide("session", pending["id"], "once")
-    assert not tool_approvals.has_once_grant(
-        "session", "manage_git", json.dumps({**approved, **change})
-    )
-    assert tool_approvals.has_once_grant("session", "manage_git", json.dumps(approved))
 
 
 @pytest.mark.parametrize("name", ["manage_git", "manage_agent_worktree"])

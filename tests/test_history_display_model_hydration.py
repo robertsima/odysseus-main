@@ -3,10 +3,8 @@
 import json
 from datetime import datetime, timedelta
 
-import pytest
 from fastapi import APIRouter, FastAPI
 from fastapi.testclient import TestClient
-from starlette.requests import Request
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -14,14 +12,8 @@ from sqlalchemy.pool import StaticPool
 from core.database import Base, ChatMessage as DbChatMessage, Session as DbSession
 from core.models import ChatMessage, Session
 from core.session_manager import SessionManager
-from routes import chat_routes
 from routes.history import history_routes
 from routes import session_routes
-from src.request_models import ChatRequest
-
-_REPORT_BACKLOG = pytest.mark.skip(
-    reason="Re-port backlog: uses fork-only internals replaced by upstream's agent core (website/upstream-sync-2026-09-18.md)"
-)
 
 
 def _database():
@@ -387,168 +379,3 @@ def test_fork_after_restart_copies_the_real_transcript(monkeypatch):
         ]
     finally:
         engine.dispose()
-
-
-class _ContextBuildReached(Exception):
-    pass
-
-
-class _ToolPolicy:
-    block_all_tool_calls = False
-
-    def blocks(self, _tool_name):
-        return False
-
-
-class _ChatHandler:
-    async def handle_memory_command(self, _session, _message):
-        return None
-
-
-def _json_request(path, payload):
-    raw = json.dumps(payload).encode()
-    sent = False
-
-    async def receive():
-        nonlocal sent
-        if sent:
-            return {"type": "http.request", "body": b"", "more_body": False}
-        sent = True
-        return {"type": "http.request", "body": raw, "more_body": False}
-
-    scope = {
-        "type": "http",
-        "asgi": {"version": "3.0"},
-        "http_version": "1.1",
-        "method": "POST",
-        "scheme": "http",
-        "path": path,
-        "raw_path": path.encode(),
-        "root_path": "",
-        "query_string": b"",
-        "headers": [(b"content-type", b"application/json")],
-        "client": ("127.0.0.1", 1234),
-        "server": ("testserver", 80),
-    }
-    return Request(scope, receive)
-
-
-def _route_endpoint(router, path):
-    return next(route.endpoint for route in router.routes if route.path == path)
-
-
-@_REPORT_BACKLOG
-@pytest.mark.asyncio
-@pytest.mark.parametrize("path", ["/api/chat", "/api/chat_stream"])
-async def test_model_send_routes_hydrate_before_context_build(monkeypatch, path):
-    # A real SessionManager over a real (temp) DB — a stub here would only
-    # assert that the stub hydrates, not that SessionManager does.
-    engine, db_factory = _database()
-    _seed_session(db_factory, message_count=6, stored_count=8)
-    manager = _manager(db_factory, monkeypatch)
-    manager.load_sessions()  # restart state: metadata only, no messages cached
-    contexts_built = []
-
-    async def assert_complete_context(session, *_args, **_kwargs):
-        contexts_built.append(session)
-        assert [message.content for message in session.history] == [
-            f"content-{index}" for index in range(6)
-        ]
-        raise _ContextBuildReached
-
-    monkeypatch.setattr(chat_routes, "_set_user_time_from_request", lambda *_args: None)
-    monkeypatch.setattr(chat_routes, "_verify_session_owner", lambda *_args: None)
-    monkeypatch.setattr(chat_routes, "effective_user", lambda *_args: "alice")
-    monkeypatch.setattr(
-        chat_routes,
-        "_clear_orphaned_session_endpoint",
-        lambda *_args, **_kwargs: False,
-    )
-    monkeypatch.setattr(
-        chat_routes,
-        "_recover_empty_session_model",
-        lambda *_args, **_kwargs: False,
-    )
-    monkeypatch.setattr(chat_routes, "_enforce_chat_privileges", lambda *_args: None)
-    monkeypatch.setattr(
-        chat_routes,
-        "build_effective_tool_policy",
-        lambda **_kwargs: _ToolPolicy(),
-    )
-    monkeypatch.setattr(chat_routes, "build_chat_context", assert_complete_context)
-    monkeypatch.setattr(
-        chat_routes,
-        "_resolve_request_workspace",
-        lambda *_args: (None, False),
-    )
-    monkeypatch.setattr(chat_routes, "_classify_tool_intent", lambda *_args: None)
-    monkeypatch.setattr(
-        chat_routes,
-        "_is_contextual_web_followup",
-        lambda *_args: False,
-    )
-    monkeypatch.setattr(
-        chat_routes,
-        "_is_contextual_browser_followup",
-        lambda *_args: False,
-    )
-    monkeypatch.setattr(
-        chat_routes,
-        "_resolve_workspace_from_message_path",
-        lambda *_args: (None, None),
-    )
-    monkeypatch.setattr(
-        chat_routes,
-        "_reconcile_selected_route_from_request",
-        lambda *_args, **_kwargs: False,
-    )
-    monkeypatch.setattr(chat_routes, "resolve_session_auth", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(chat_routes, "get_session_mode", lambda *_args: "chat")
-    monkeypatch.setattr(
-        chat_routes,
-        "_is_image_generation_session",
-        lambda *_args, **_kwargs: False,
-    )
-    monkeypatch.setattr(chat_routes, "web_search_enabled_for_turn", lambda *_args: False)
-
-    router = chat_routes.setup_chat_routes(
-        manager,
-        _ChatHandler(),
-        object(),
-        object(),
-        object(),
-        object(),
-    )
-    endpoint = _route_endpoint(router, path)
-
-    async def send():
-        if path == "/api/chat":
-            await endpoint(
-                _json_request(path, {}),
-                ChatRequest(message="hello", session="session-1"),
-            )
-        else:
-            await endpoint(
-                _json_request(
-                    path,
-                    {"message": "hello", "session": "session-1"},
-                )
-            )
-
-    try:
-        with pytest.raises(_ContextBuildReached):
-            await send()
-        first_loads = manager.full_loads
-
-        # Second send on the now-warm session: the transcript is complete, so
-        # it must be served from RAM even though sessions.message_count is
-        # still drifted high in the DB.
-        with pytest.raises(_ContextBuildReached):
-            await send()
-    finally:
-        engine.dispose()
-
-    assert len(contexts_built) == 2
-    assert contexts_built[0] is contexts_built[1]
-    assert first_loads == 1
-    assert manager.full_loads == 1

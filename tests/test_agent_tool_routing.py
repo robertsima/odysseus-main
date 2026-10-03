@@ -12,10 +12,6 @@ import pytest
 
 from src.tool_index import ALWAYS_AVAILABLE, BUILTIN_TOOL_DESCRIPTIONS, ToolIndex
 
-_REPORT_BACKLOG = pytest.mark.skip(
-    reason="Re-port backlog: uses fork-only internals replaced by upstream's agent core (website/upstream-sync-2026-09-18.md)"
-)
-
 pytestmark = pytest.mark.area_unit
 
 
@@ -100,37 +96,6 @@ def test_log_lookalikes_do_not_reach_the_log_reader(query):
 # agent_loop keeps its own copy of this pass for when the embedding index is
 # unavailable — which, in practice, is exactly when it matters. That copy was
 # still matching raw substrings after ToolIndex moved to word boundaries.
-
-
-@_REPORT_BACKLOG
-@pytest.mark.parametrize(
-    "query",
-    [
-        # "pr" inside "project" pulled the whole source-control toolset in.
-        "look at the local project",
-        "tell me about the project",
-        # The hazards named in the ToolIndex comment.
-        "add a prefix to each line",
-        "the deadline is tomorrow",
-        "i want to reserve a table",
-        "that file is unreadable",
-    ],
-)
-def test_keyword_fallback_matches_the_index_pass_exactly(query):
-    from src.agent_loop import keyword_fallback_tools
-
-    assert keyword_fallback_tools(query) == keyword_tools(query)
-
-
-@_REPORT_BACKLOG
-def test_keyword_fallback_does_not_fire_on_substrings():
-    from src.agent_loop import keyword_fallback_tools
-
-    assert "manage_agent_worktree" not in keyword_fallback_tools(
-        "look at the local project"
-    )
-    # ...but the real word still routes.
-    assert "manage_agent_worktree" in keyword_fallback_tools("open a pr for this")
 
 
 @pytest.mark.parametrize(

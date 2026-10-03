@@ -129,9 +129,10 @@ the model.
 
   Without these the scheduled "Applied Job Status Tracker" run ended with
   "the email-audit tool/schema is not available in this run" (2026-09-19
-  logs). Covered by `tests/test_terminus_toolset_retention.py`; the rest of
+  logs). Covered by `tests/test_terminus_toolset_retention.py`. The rest of
   `tests/test_agent_self_blocking_toolsets.py` (missing-tool re-arm,
-  starved-domain repair) stays skipped and on the backlog.
+  starved-domain repair) is still on the backlog; see "Backlog tests removed
+  2026-10-03" below to restore it.
 
 - **Tool budget** (`agent_tool_budget`, default 40). Keyword domain seeding
   can offer most of the catalogue on a long message (80 tools, ~66k prompt
@@ -210,12 +211,58 @@ the model.
 | Knowledge-base and vault routing | Upstream's | `68646700`, `8dfacd08`, `4360acf2`, `98a4e3ff` |
 | Request self-heal, `site:` handling | Upstream's | `0611fa1e` |
 
-The fork tests for these features are skipped, at module level or per test,
-with a `Re-port backlog:` reason. Each follow-up PR re-enables the tests for
-the feature it brings back. `tests/test_agent_loop_fork.py` is the fork's
-whole loop suite, kept for reference while `tests/test_agent_loop.py` is
-upstream's.
+The fork tests for these features were skipped with a `Re-port backlog:`
+reason and then deleted on 2026-10-03, including
+`tests/test_agent_loop_fork.py`, the fork's whole loop suite
+(`tests/test_agent_loop.py` is upstream's). Each follow-up PR restores the
+tests for the feature it brings back, using the table below.
 
 Found along the way, not changed here: the bundled-skill seeder rewrites each
 installed `SKILL.md` through `Skill.to_markdown()`, which drops some section
 headings and the free-form body text (`body_extra`).
+
+## Backlog tests removed 2026-10-03
+
+Decision D13 of `website/testing-restructure-2026-10-03.md` deleted the
+skipped `Re-port backlog:` tests: 8 files skipped at module level (206 tests)
+and 119 tests skipped one by one in 25 other files, 325 test functions in all.
+`tests/test_capability_tool_gating.py` had no other tests, so it went too.
+Every file below is unchanged at `d2df387e` on `dev`. To bring a feature's tests back, run the command in the last column
+and copy out the tests that cover the feature. For a partly removed file, copy
+only the named tests and the helpers they use.
+
+| File | Tests removed | Restore with |
+|---|---|---|
+| `tests/test_agent_context_accounting.py` | Whole file, 6 tests | `git show d2df387e:tests/test_agent_context_accounting.py` |
+| `tests/test_agent_intent_dev_requests.py` | Whole file, 18 tests | `git show d2df387e:tests/test_agent_intent_dev_requests.py` |
+| `tests/test_agent_latest_user_skips_context.py` | Whole file, 8 tests | `git show d2df387e:tests/test_agent_latest_user_skips_context.py` |
+| `tests/test_agent_loop_fork.py` | Whole file, 73 tests | `git show d2df387e:tests/test_agent_loop_fork.py` |
+| `tests/test_agent_self_blocking_toolsets.py` | Whole file, 60 tests | `git show d2df387e:tests/test_agent_self_blocking_toolsets.py` |
+| `tests/test_agent_steering_routing.py` | Whole file, 3 tests | `git show d2df387e:tests/test_agent_steering_routing.py` |
+| `tests/test_agent_targeted_rearm.py` | Whole file, 22 tests | `git show d2df387e:tests/test_agent_targeted_rearm.py` |
+| `tests/test_capability_tool_gating.py` | Whole file, 14 tests | `git show d2df387e:tests/test_capability_tool_gating.py` |
+| `tests/test_knowledge_base_reach.py` | Whole file, 16 tests | `git show d2df387e:tests/test_knowledge_base_reach.py` |
+| `tests/test_agent_log_hygiene.py` | `test_tool_set_diff_line_is_info_only_when_the_set_changes`, `test_an_unchanged_tool_name_logs_at_debug`, `test_image_generation_off_disables_generate_image_in_the_selection` | `git show d2df387e:tests/test_agent_log_hygiene.py` |
+| `tests/test_agent_self_unblock_budget.py` | `test_recovery_paths_admit_as_named_requests_not_guesses`, `test_a_refused_late_addition_is_logged_not_silent`, `test_persisted_tool_events_count_as_tools_the_conversation_used`, `test_only_the_previous_tool_using_turn_is_continued`, `test_known_names_filter_what_is_continued`, `test_ok_continue_resumes_with_the_tool_the_last_turn_was_using` | `git show d2df387e:tests/test_agent_self_unblock_budget.py` |
+| `tests/test_agent_tool_routing.py` | `test_keyword_fallback_matches_the_index_pass_exactly`, `test_keyword_fallback_does_not_fire_on_substrings` | `git show d2df387e:tests/test_agent_tool_routing.py` |
+| `tests/test_agent_turn_lifecycle.py` | `TestSteerIsObservable::test_persisted_steering_keeps_human_and_peer_attribution` | `git show d2df387e:tests/test_agent_turn_lifecycle.py` |
+| `tests/test_agents_dashboard_routes.py` | `test_agent_routing_uses_the_human_request_not_injected_context`, `test_overview_is_owner_scoped_and_grouped` | `git show d2df387e:tests/test_agents_dashboard_routes.py` |
+| `tests/test_chat_route_tool_policy.py` | `test_semantic_browser_hit_does_not_expand_the_whole_server`, `test_explicit_browser_intent_still_expands_connected_tools`, `test_conversation_tool_retention_still_defers_to_route_policy` | `git show d2df387e:tests/test_chat_route_tool_policy.py` |
+| `tests/test_chat_settings_routes.py` | `test_settings_and_approval_routes` | `git show d2df387e:tests/test_chat_settings_routes.py` |
+| `tests/test_claude_code_consolidation.py` | `test_agent_loop_tool_ceiling_is_500_and_zero_disables` | `git show d2df387e:tests/test_claude_code_consolidation.py` |
+| `tests/test_git_native_arguments.py` | `test_one_use_approval_equates_sparse_and_provider_expanded_calls_only`, `test_legacy_repo_pull_approval_equates_neutral_fillers_but_not_targets`, `test_one_use_approval_never_equates_meaningful_target_changes` | `git show d2df387e:tests/test_git_native_arguments.py` |
+| `tests/test_git_tool_failures.py` | `test_an_approved_call_is_returned_exactly_until_it_runs`, `test_a_denied_or_foreign_approval_is_never_handed_back`, `test_a_truncated_command_is_not_offered_because_it_could_never_match`, `test_the_loop_prechecks_before_it_holds`, `test_a_retired_approval_is_not_handed_back`, `test_running_an_approved_but_invalid_call_retires_its_approval` | `git show d2df387e:tests/test_git_tool_failures.py` |
+| `tests/test_harness_routing_integration.py` | `test_direct_greeting_path_applies_only_that_sessions_persona`, `test_initial_schemas_match_effective_private_execution_grant`, `test_local_git_sync_is_bound_without_semantic_hit_or_private_grant`, `test_pasted_git_https_auth_failure_binds_diagnostic_tool`, `test_generic_github_login_questions_are_not_local_git_diagnostics`, `test_git_push_emits_confirmation_before_execution_even_in_auto`, `test_complete_round_selection_is_exact_and_stably_sorted`, `test_selected_base_prompt_does_not_reexpand_all_admin_tools`, `test_selected_mcp_prompt_is_bounded_and_native_prompt_has_no_duplicate`, `test_native_round_one_discovers_and_round_two_attaches_and_executes`, `test_fenced_round_two_prompt_contains_discovered_tool_signature`, `test_fenced_dynamic_mcp_discovery_attaches_parses_and_dispatches`, `test_small_connected_mcp_is_deferred_on_unrelated_turn_but_discoverable`, `test_global_revocation_removes_next_round_schema_and_blocks_stale_call`, `test_runtime_profile_ceiling_controls_discovery`, `test_concurrent_live_loops_isolate_round_two_and_preserve_shared_caller_set` | `git show d2df387e:tests/test_harness_routing_integration.py` |
+| `tests/test_history_display_model_hydration.py` | `test_model_send_routes_hydrate_before_context_build` | `git show d2df387e:tests/test_history_display_model_hydration.py` |
+| `tests/test_intent_assessment.py` | `test_agent_compatibility_classifier_preserves_domain_free_discovery`, `test_agent_classifier_keeps_file_intent_when_url_grounds_git_request`, `test_agent_classifier_does_not_turn_mcp_use_feedback_into_settings_admin` | `git show d2df387e:tests/test_intent_assessment.py` |
+| `tests/test_kv_cache_invalidation_2927.py` | `test_agent_cached_prefix_hash_ignores_turn_tail_and_detects_real_prefix_changes`, `test_agent_history_prefix_continuity_detects_mid_history_mutation` | `git show d2df387e:tests/test_kv_cache_invalidation_2927.py` |
+| `tests/test_lotus_builtin.py` | `test_lotus_private_filter_follows_owner_access_policy` | `git show d2df387e:tests/test_lotus_builtin.py` |
+| `tests/test_lotus_notifications.py` | `test_wellbeing_tool_is_wired_into_the_agent_surfaces` | `git show d2df387e:tests/test_lotus_notifications.py` |
+| `tests/test_manage_git.py` | `test_routine_ask_all_once_grant_is_consumed_by_handler`, `test_risky_action_requires_session_exact_once_grant_and_revision_proof`, `test_grant_is_not_canonicalized_across_whitespace_in_path`, `test_manage_git_always_never_authorizes_a_future_push`, `test_manage_git_always_covers_local_history_work`, `test_risky_approval_overrides_auto_and_fenced_routing_is_exact`, `test_history_rewrites_always_require_exact_call_confirmation` | `git show d2df387e:tests/test_manage_git.py` |
+| `tests/test_mcp_tool_binding.py` | `test_connected_external_mcp_tools_survive_a_rag_miss`, `test_admin_intent_no_longer_hides_the_real_tools_behind_manage_mcp`, `test_large_embedded_catalogs_still_require_retrieval_relevance`, `test_gated_tool_shows_once_actually_retrieved`, `test_disabled_external_tool_stays_hidden_even_though_unconditionally_bound`, `test_tool_availability_is_stable_across_rounds_regardless_of_retry_state`, `test_mcp_mgr_none_yields_no_mcp_schemas_without_raising`, `test_oversized_server_is_demoted_while_its_small_peers_stay_bound`, `test_many_small_servers_are_trimmed_largest_first_to_the_total_cap`, `test_demoted_tool_is_still_reachable_once_retrieval_surfaces_it`, `test_demoted_server_stays_listed_in_the_prompt_with_a_way_back`, `test_agent_debug_line_names_the_demoted_servers`, `test_the_note_speaks_the_phrase_the_self_unblock_listens_for` | `git show d2df387e:tests/test_mcp_tool_binding.py` |
+| `tests/test_prompt_injection_audit.py` | `test_per_agent_customization_is_scoped_and_security_precedes_it` | `git show d2df387e:tests/test_prompt_injection_audit.py` |
+| `tests/test_repository_local.py` | `test_expanded_merge_preserves_required_empty_ref` | `git show d2df387e:tests/test_repository_local.py` |
+| `tests/test_repository_sync_tool.py` | `test_repository_approval_distinguishes_inspection_from_pull` | `git show d2df387e:tests/test_repository_sync_tool.py` |
+| `tests/test_research_workflow_routing.py` | `test_exact_user_wording_routes_to_real_launcher_and_authorizes_delegation`, `test_information_requests_or_agent_tools_and_tests_do_not_authorize_delegation`, `test_genuine_human_continuation_retains_explicit_delegation`, `test_new_information_request_does_not_inherit_old_launch_authority`, `test_worker_tool_and_runtime_text_cannot_grant_delegation_on_continue`, `test_real_loop_exposes_workflow_launcher_and_passes_delegation_authority`, `test_real_loop_retains_human_continuation_authority_ignoring_peer_text`, `test_continue_uses_durable_workflow_receipt_without_nudging_duplicate_start`, `test_continue_cannot_adopt_another_owners_or_chats_durable_receipt`, `test_new_explicit_request_cannot_claim_older_completed_workflow_as_current_execution`, `test_ordinary_question_cannot_start_workflows_even_if_retrieval_selected_launcher`, `test_zero_tool_calls_suppress_long_false_completion_and_return_deterministic_not_run`, `test_running_workflow_receipt_cannot_be_presented_as_completed`, `test_completed_wait_receipt_replaces_running_receipt_and_allows_answer`, `test_loading_skill_procedure_does_not_count_as_execution`, `test_lifecycle_request_never_authorizes_or_nudges_new_launch`, `test_loop_does_not_call_model_when_policy_storage_fails`, `test_restart_after_a_failed_run_still_authorizes_specialists`, `test_real_prohibitions_and_workflow_controls_still_refuse`, `test_skill_toolsets_resolve_mcp_server_names_and_flag_only_real_prose`, `test_a_resolvable_toolset_switched_off_is_not_reported_as_bad_metadata`, `test_scoped_workers_do_not_warn_about_domains_they_were_never_given`, `test_delegation_recognisers_stay_linear_on_hostile_text`, `test_delegation_authorization_is_standing_for_the_chat_not_per_message`, `test_a_chat_that_never_asked_for_agents_is_still_refused`, `test_failing_to_persist_the_grant_does_not_refuse_the_turn`, `test_a_round_budget_does_not_truncate_a_run_that_is_still_working` | `git show d2df387e:tests/test_research_workflow_routing.py` |
+| `tests/test_task_run_now_foreground.py` | `test_placeholder_delta_does_not_mask_a_stream_error`, `test_placeholder_alone_fails_the_run` | `git show d2df387e:tests/test_task_run_now_foreground.py` |
+| `tests/test_workspace_confine.py` | `test_workspace_coding_request_surfaces_only_permitted_edit_and_verify_tools` | `git show d2df387e:tests/test_workspace_confine.py` |

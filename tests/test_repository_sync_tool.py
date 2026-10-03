@@ -11,10 +11,6 @@ from src.agent_worktree import repository_sync as repo_sync
 from src import tool_execution
 from src.tool_types import ToolBlock
 
-_REPORT_BACKLOG = pytest.mark.skip(
-    reason="Re-port backlog: uses fork-only internals replaced by upstream's agent core (website/upstream-sync-2026-09-18.md)"
-)
-
 
 def _no_security_context():
     # Looked up at call time: other tests reload src.tool_execution, which
@@ -22,29 +18,6 @@ def _no_security_context():
     import src.tool_execution as tool_execution
 
     return tool_execution.NO_TOOL_SECURITY_CONTEXT
-
-
-@_REPORT_BACKLOG
-@pytest.mark.parametrize("mode", ["ask_all", "ask_risky"])
-def test_repository_approval_distinguishes_inspection_from_pull(mode):
-    from src.tool_approvals import approval_reason
-
-    for action in ("repo_list", "repo_status"):
-        assert (
-            approval_reason(
-                "manage_agent_worktree", json.dumps({"action": action}), mode
-            )
-            is None
-        )
-    assert "fast-forwards" in approval_reason(
-        "manage_agent_worktree",
-        '{"action":"repo_pull"}',
-        mode,
-    )
-    assert (
-        approval_reason("manage_agent_worktree", '{"action":"repo_pull"}', "auto")
-        is None
-    )
 
 
 def _admin(monkeypatch, allowed=True):

@@ -8,11 +8,7 @@ import pytest
 import src.agent_loop as agent_loop
 from routes import agents_routes as ar
 from src import agent_activity as act
-from src import agent_control, agent_runs, constants, tool_approvals
-
-_REPORT_BACKLOG = pytest.mark.skip(
-    reason="Re-port backlog: uses fork-only internals replaced by upstream's agent core (website/upstream-sync-2026-09-18.md)"
-)
+from src import agent_control, agent_runs, constants
 
 
 class _Sess:
@@ -72,35 +68,6 @@ def _req(body=None):
     async def _json():
         return body
     return SimpleNamespace(json=_json)
-
-
-@_REPORT_BACKLOG
-def test_agent_routing_uses_the_human_request_not_injected_context():
-    messages = [
-        {"role": "user", "content": "Can I redistribute this fork under its license?"},
-        {"role": "user", "content": "UNTRUSTED SOURCE DATA: manage settings, servers and agents",
-         "metadata": {"trusted": False}},
-    ]
-    assert agent_loop._detect_admin_intent(messages) is False
-    assert agent_loop._detect_admin_tools(messages) == set()
-    assert agent_loop._explicit_delegation_requested(messages[0]["content"]) is False
-    assert agent_loop._explicit_delegation_requested("Have Claude Code inspect this repository") is True
-
-
-@_REPORT_BACKLOG
-async def test_overview_is_owner_scoped_and_grouped(env):
-    mgr, eps = env
-    with agent_runs.track_external("a1", source="subagent", owner="alice"):
-        act.run_started("a1", "session", "Sub-agent · worker: dig", owner="alice", data={"target_session": "x"})
-        act.run_started("b1", "session", "Bob's worker", owner="bob")
-        tool_approvals.request("a1", "bash", "git push", "pushes to a remote")
-        out = await eps[("GET", "/api/agents/overview")](_req())
-    assert [r["session_id"] for r in out["rows"]] == ["a1"]
-    row = out["rows"][0]
-    assert row["status"] == "waiting_approval" and row["pending_approvals"] == 1 and row["children_running"] == 1
-    assert out["totals"]["waiting_approval"] == 1 and out["totals"]["workers_running"] == 1
-    approvals = await eps[("GET", "/api/agents/approvals")](_req())
-    assert [a["session_id"] for a in approvals["approvals"]] == ["a1"]
 
 
 async def test_overview_includes_the_current_open_chat_without_agent_history(env):

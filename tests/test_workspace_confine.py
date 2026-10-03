@@ -30,10 +30,6 @@ from src.tool_execution import (
     get_active_workspace,
 )
 
-_REPORT_BACKLOG = pytest.mark.skip(
-    reason="Re-port backlog: the fork's agent-loop routing (website/upstream-sync-2026-09-18.md)"
-)
-
 
 async def execute_tool_block(*args, **kwargs):
     kwargs.setdefault("security_context", NO_TOOL_SECURITY_CONTEXT)
@@ -366,27 +362,6 @@ def test_low_signal_with_workspace_surfaces_readonly_file_tools(monkeypatch):
     assert "edit_file" not in names
     assert "bash" not in names
     assert "python" not in names
-
-
-@_REPORT_BACKLOG
-@pytest.mark.parametrize("private_grant", [False, True])
-def test_workspace_coding_request_surfaces_only_permitted_edit_and_verify_tools(monkeypatch, private_grant):
-    names = _sent_tool_names(
-        monkeypatch,
-        workspace="/tmp",
-        message="fix the failing frontend test in this repo",
-        force_keyword_fallback=True,
-        private_grant=private_grant,
-    )
-    assert "get_workspace" in names
-    assert "read_file" in names
-    assert "grep" in names
-    assert "edit_file" in names
-    assert "write_file" in names
-    assert "apply_patch" in names
-    assert "todowrite" in names
-    assert ("bash" in names) is private_grant
-    assert ("python" in names) is private_grant
 
 
 def test_low_signal_without_workspace_excludes_file_tools(monkeypatch):

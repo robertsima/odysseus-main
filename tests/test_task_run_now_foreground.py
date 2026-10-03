@@ -23,10 +23,6 @@ import pytest
 from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text, create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
-_REPORT_BACKLOG = pytest.mark.skip(
-    reason="Re-port backlog: uses fork-only internals replaced by upstream's agent core (website/upstream-sync-2026-09-18.md)"
-)
-
 
 @pytest.fixture(autouse=True)
 def _reset_foreground_gate():
@@ -443,68 +439,6 @@ _OVERLOAD_FRAME = (
     'event: error\n'
     'data: {"status": 502, "text": "Our servers are currently overloaded. Please try again later."}\n\n'
 )
-
-
-@_REPORT_BACKLOG
-async def test_placeholder_delta_does_not_mask_a_stream_error(monkeypatch):
-    """The production shape: HTTP 200, then a 502 error event, then the
-    synthesized "model returned an empty response" delta.
-
-    That placeholder made full_text non-empty, so the run was recorded as a
-    success carrying a message the user could do nothing with, and the fallback
-    endpoints were never tried.
-    """
-    import json as _json
-
-    from src.agent_loop import EMPTY_RESPONSE_MESSAGE
-
-    task = _stub_llm_task_deps(monkeypatch)
-
-    async def _stub_stream(**kwargs):
-        yield _OVERLOAD_FRAME
-        yield 'data: ' + _json.dumps({"delta": EMPTY_RESPONSE_MESSAGE}) + '\n\n'
-
-    monkeypatch.setattr("src.agent_loop.stream_agent_loop", _stub_stream)
-
-    import src.task_endpoint as _te
-
-    async def _fallback(messages, **kw):
-        return "recovered on the fallback endpoint"
-
-    monkeypatch.setattr(_te, "task_llm_call_async", _fallback)
-
-    from src.task_scheduler import TaskScheduler
-
-    result = await TaskScheduler(session_manager=None)._execute_llm_task(task, db=None)
-    assert result == "recovered on the fallback endpoint"
-    assert EMPTY_RESPONSE_MESSAGE not in result
-
-
-@_REPORT_BACKLOG
-async def test_placeholder_alone_fails_the_run(monkeypatch):
-    """No upstream error, but the model said nothing — still not a result."""
-    import json as _json
-
-    from src.agent_loop import EMPTY_RESPONSE_MESSAGE
-
-    task = _stub_llm_task_deps(monkeypatch)
-
-    async def _stub_stream(**kwargs):
-        yield 'data: ' + _json.dumps({"delta": EMPTY_RESPONSE_MESSAGE}) + '\n\n'
-
-    monkeypatch.setattr("src.agent_loop.stream_agent_loop", _stub_stream)
-
-    import src.task_endpoint as _te
-
-    async def _fallback(messages, **kw):
-        return ""
-
-    monkeypatch.setattr(_te, "task_llm_call_async", _fallback)
-
-    from src.task_scheduler import TaskScheduler
-
-    with pytest.raises(RuntimeError, match="no output"):
-        await TaskScheduler(session_manager=None)._execute_llm_task(task, db=None)
 
 
 async def test_dead_stream_tool_output_is_not_delivered_as_a_result(monkeypatch):

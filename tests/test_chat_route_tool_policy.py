@@ -21,10 +21,6 @@ from src.tool_policy import (
     web_search_enabled_for_turn,
 )
 
-_REPORT_BACKLOG = pytest.mark.skip(
-    reason="Re-port backlog: the fork's agent-loop routing (website/upstream-sync-2026-09-18.md)"
-)
-
 _CHAT_ROUTES = Path(__file__).resolve().parent.parent / "routes" / "chat_routes.py"
 
 
@@ -113,26 +109,6 @@ class _FakeBrowserManager:
         ]
 
 
-@_REPORT_BACKLOG
-def test_semantic_browser_hit_does_not_expand_the_whole_server():
-    from src.agent_loop import _expand_browser_mcp_tools
-
-    selected = {"ask_user", "mcp__builtin_browser__browser_wait_for"}
-    assert _expand_browser_mcp_tools(selected, _FakeBrowserManager()) == selected
-
-
-@_REPORT_BACKLOG
-def test_explicit_browser_intent_still_expands_connected_tools():
-    from src.agent_loop import _expand_browser_mcp_tools
-
-    selected = {"mcp__builtin_browser__browser_navigate"}
-    expanded = _expand_browser_mcp_tools(
-        selected, _FakeBrowserManager(), expand_all=True,
-    )
-    assert "mcp__builtin_browser__browser_snapshot" in expanded
-    assert "mcp__builtin_browser__browser_wait_for" in expanded
-
-
 def test_browser_sentinel_always_expands_connected_tools():
     from src.agent_loop import _expand_browser_mcp_tools
 
@@ -160,30 +136,6 @@ def test_disabled_tools_respects_missing_vs_explicit_toggles():
     )
     assert "_forced_tools = set(WEB_TOOL_NAMES)" in source, (
         "web tools should only be forced visible from the explicit web setting"
-    )
-
-
-@_REPORT_BACKLOG
-def test_conversation_tool_retention_still_defers_to_route_policy():
-    """Tools kept from earlier rounds must not outrank the route's disabled set.
-
-    agent_loop re-adds tools the conversation has already called, so a
-    follow-up turn whose literal text names no domain ("Continue searching
-    there should be at least a hundred applications total") doesn't lose the
-    email tools mid-audit. That retention must subtract `disabled_tools`, or it
-    would quietly hand back a tool the chat route deliberately switched off
-    (bash without the privilege, web without the per-turn opt-in), and it must
-    run before the deliberate prunes so those still win.
-    """
-    source = (Path(__file__).resolve().parent.parent / "src" / "agent_loop.py").read_text(encoding="utf-8")
-
-    assert "def _tools_used_in_conversation" in source
-    retention = source.index("_tools_used_in_conversation(messages, _known_names)")
-    assert "if t not in disabled_tools" in source[retention:retention + 400], (
-        "retention must exclude route-disabled tools"
-    )
-    assert retention < source.index("active email draft pruned fetch tools"), (
-        "retention has to run before the deliberate prunes so they still win"
     )
 
 

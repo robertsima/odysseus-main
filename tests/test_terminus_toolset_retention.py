@@ -17,9 +17,10 @@ tool/schema is not available in this run". Two mechanisms conspired:
    and the system prompt it installs tells the model not to use email tools.
 
 Both were fixed in the fork (`f8882905`, `3e2a0eb5`, `5181684e`) and lost in
-the 2026-09-18 upstream sync; this re-ports them. The wider fork machinery in
-tests/test_agent_self_blocking_toolsets.py (missing-tool re-arm,
-starved-domain repair) is still on the backlog and stays skipped.
+the 2026-09-18 upstream sync; this re-ports them. The wider fork machinery
+(missing-tool re-arm, starved-domain repair) is still on the backlog; its tests
+were in tests/test_agent_self_blocking_toolsets.py, deleted 2026-10-03 (see
+website/upstream-sync-2026-09-18.md to restore them).
 """
 
 import os

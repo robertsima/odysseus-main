@@ -6,13 +6,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.agent_tools.git_tools import GitTool, _write_token
-from src import tool_approvals, tool_execution
+from src import tool_execution
 from src.tool_types import ToolBlock
-from src.tool_parsing import parse_tool_blocks
-
-_REPORT_BACKLOG = pytest.mark.skip(
-    reason="Re-port backlog: uses fork-only internals replaced by upstream's agent core (website/upstream-sync-2026-09-18.md)"
-)
 
 
 def _no_security_context():
@@ -57,122 +52,6 @@ async def test_routine_action_dispatches_without_approval(monkeypatch):
     result = await GitTool().execute(content, {"owner": "admin", "session_id": "s1"})
     assert result == {"exit_code": 0, "result": {"clean": True}}
     implementation.assert_awaited_once_with("status", "/repos/app")
-
-
-@_REPORT_BACKLOG
-@pytest.mark.asyncio
-async def test_routine_ask_all_once_grant_is_consumed_by_handler(monkeypatch):
-    _admin(monkeypatch)
-    implementation = AsyncMock(return_value={"paths": ["README.md"]})
-    monkeypatch.setattr(
-        "src.agent_worktree.repository_local.execute_local", implementation
-    )
-    content = json.dumps(
-        {"action": "stage", "repository": "/repos/app", "paths": ["README.md"]}
-    )
-    pending = tool_approvals.request("s1", "manage_git", content, "changes files")
-    tool_approvals.decide("s1", pending["id"], "once")
-    assert tool_approvals.has_once_grant("s1", "manage_git", content)
-    assert (await GitTool().execute(content, {"owner": "admin", "session_id": "s1"}))[
-        "exit_code"
-    ] == 0
-    assert not tool_approvals.has_once_grant("s1", "manage_git", content)
-
-
-@_REPORT_BACKLOG
-@pytest.mark.asyncio
-async def test_risky_action_requires_session_exact_once_grant_and_revision_proof(
-    monkeypatch,
-):
-    _admin(monkeypatch)
-    implementation = AsyncMock(return_value={"updated": True})
-    monkeypatch.setattr(
-        "src.agent_worktree.repository_remote.execute_remote", implementation
-    )
-    args = {
-        "action": "merge",
-        "repository": "/repos/app",
-        "ref": "topic",
-        "expected_head": "a" * 40,
-        "expected_target": "b" * 40,
-    }
-    content = json.dumps(args)
-    no_session = await GitTool().execute(content, {"owner": "admin"})
-    assert no_session["code"] == "approval_required"
-    missing = dict(args)
-    missing.pop("expected_target")
-    assert (
-        await GitTool().execute(
-            json.dumps(missing), {"owner": "admin", "session_id": "s1"}
-        )
-    )["code"] == "missing_revision"
-    pending = tool_approvals.request("s1", "manage_git", content, "merge")
-    assert tool_approvals.decide("s1", pending["id"], "once")["decision"] == "once"
-    assert (await GitTool().execute(content, {"owner": "admin", "session_id": "s1"}))[
-        "exit_code"
-    ] == 0
-    assert (await GitTool().execute(content, {"owner": "admin", "session_id": "s1"}))[
-        "code"
-    ] == "approval_required"
-
-
-@_REPORT_BACKLOG
-@pytest.mark.asyncio
-async def test_grant_is_not_canonicalized_across_whitespace_in_path(monkeypatch):
-    _admin(monkeypatch)
-    base = {"action": "push", "repository": "/repos/app", "expected_head": "a" * 40}
-    content = json.dumps(base)
-    pending = tool_approvals.request("s1", "manage_git", content, "push")
-    tool_approvals.decide("s1", pending["id"], "once")
-    changed = json.dumps({**base, "repository": "/repos/app "})
-    result = await GitTool().execute(changed, {"owner": "admin", "session_id": "s1"})
-    assert result["code"] == "approval_required"
-    assert tool_approvals.has_once_grant("s1", "manage_git", content)
-
-
-@_REPORT_BACKLOG
-def test_manage_git_always_never_authorizes_a_future_push():
-    """The invariant: "Always allow manage_git" must not become a standing
-    licence to publish. It used to be enforced by silently downgrading
-    "always" to "once" — which also made the button a lie for every local
-    merge, stash and switch, so the user was asked again and again. Now the
-    publication actions are carved out and everything else is honoured."""
-    content = json.dumps(
-        {"action": "push", "repository": "/r", "expected_head": "a" * 40}
-    )
-    pending = tool_approvals.request("s1", "manage_git", content, "push")
-    decided = tool_approvals.decide("s1", pending["id"], "always")
-    assert decided["decision"] == "always"
-    # No blanket tool grant exists.
-    assert "manage_git" not in tool_approvals.chat_grants("s1")
-    # The push the user actually approved runs once...
-    assert tool_approvals.consume_once_grant("s1", "manage_git", content)
-    assert not tool_approvals.consume_once_grant("s1", "manage_git", content)
-    # ...and no other push is covered by the standing grant.
-    for action in sorted(tool_approvals.GIT_PUBLISH_ACTIONS):
-        other = json.dumps({"action": action, "repository": "/r", "expected_head": "b" * 40})
-        assert not tool_approvals.git_standing_grant_allows("s1", other), action
-
-
-@_REPORT_BACKLOG
-def test_manage_git_always_covers_local_history_work():
-    """What the user asked for when they clicked it: stop asking about merges,
-    stashes and switches in this chat."""
-    content = json.dumps({"action": "merge", "repository": "/r", "ref": "upstream/dev",
-                          "expected_head": "a" * 40, "expected_target": "c" * 40})
-    pending = tool_approvals.request("s2", "manage_git", content, "merges")
-    tool_approvals.decide("s2", pending["id"], "always")
-
-    for action in ("merge", "rebase", "reset", "stash_pop", "stash_drop", "delete_branch"):
-        later = json.dumps({"action": action, "repository": "/r",
-                            "expected_head": "d" * 40, "expected_target": "e" * 40})
-        assert tool_approvals.git_standing_grant_allows("s2", later), action
-    assert "manage_git (local; pushes still ask)" in tool_approvals.chat_grants("s2")
-    # And it is scoped to that chat.
-    assert not tool_approvals.git_standing_grant_allows("other-chat", content)
-    # Revoking the chat's grants removes it.
-    tool_approvals.revoke_chat_grants("s2")
-    assert not tool_approvals.git_standing_grant_allows("s2", content)
 
 
 @pytest.mark.asyncio
@@ -249,43 +128,6 @@ async def test_dispatcher_enforces_profile_and_active_revocation(monkeypatch):
     )
     assert revoked["exit_code"] == 1 and "disabled by user" in revoked["error"]
     handler.assert_not_awaited()
-
-
-@_REPORT_BACKLOG
-def test_risky_approval_overrides_auto_and_fenced_routing_is_exact():
-    risky = json.dumps(
-        {
-            "action": "delete_branch",
-            "repository": "/r",
-            "name": "old",
-            "expected_head": "a" * 40,
-            "expected_target": "b" * 40,
-        }
-    )
-    assert "deletes" in tool_approvals.approval_reason("manage_git", risky, "auto")
-    assert (
-        tool_approvals.approval_reason(
-            "manage_git", '{"action":"status","repository":"/r"}', "auto"
-        )
-        is None
-    )
-    blocks = parse_tool_blocks(f"```manage_git\n{risky}\n```")
-    assert [(b.tool_type, b.content) for b in blocks] == [("manage_git", risky)]
-
-
-@_REPORT_BACKLOG
-@pytest.mark.parametrize("action", ["reset", "rebase", "force_push_with_lease"])
-def test_history_rewrites_always_require_exact_call_confirmation(action):
-    content = json.dumps(
-        {
-            "action": action,
-            "repository": "/r",
-            "ref": "main" if action != "force_push_with_lease" else "",
-            "expected_head": "a" * 40,
-            "expected_target": "b" * 40,
-        }
-    )
-    assert tool_approvals.approval_reason("manage_git", content, "auto")
 
 
 def test_native_routing_preserves_exact_manage_git_arguments():

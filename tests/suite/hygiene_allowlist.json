@@ -1,7 +1,6 @@
 {
   "sys_modules_module_scope": {
     "tests/test_agent_loop.py": "stubs modules at import time; move the stub into a fixture with monkeypatch.setitem (D12)",
-    "tests/test_agent_loop_fork.py": "stubs modules at import time; move the stub into a fixture with monkeypatch.setitem (D12)",
     "tests/test_blind_compare_redaction.py": "stubs modules at import time; move the stub into a fixture with monkeypatch.setitem (D12)",
     "tests/test_chat_image_routing.py": "stubs modules at import time; move the stub into a fixture with monkeypatch.setitem (D12)",
     "tests/test_compact_truncate_tool_call_args.py": "stubs modules at import time; move the stub into a fixture with monkeypatch.setitem (D12)",
@@ -45,7 +44,6 @@
   "raw_environ_write": {
     "tests/test_add_directory_event_loop.py": "writes os.environ outside monkeypatch (D12)",
     "tests/test_agent_files_domain_filenames.py": "writes os.environ outside monkeypatch (D12)",
-    "tests/test_agent_self_blocking_toolsets.py": "writes os.environ outside monkeypatch (D12)",
     "tests/test_agent_turn_cost.py": "writes os.environ outside monkeypatch (D12)",
     "tests/test_cache_and_routing_2026_10_02.py": "writes os.environ outside monkeypatch (D12)",
     "tests/test_chatgpt_responses_tools.py": "writes os.environ outside monkeypatch (D12)",
@@ -114,8 +112,6 @@
     "tests/test_agent_room_consistency.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_agent_round_model_provenance_ui.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_agent_runs_stop_and_wait.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
-    "tests/test_agent_self_unblock_budget.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
-    "tests/test_agent_targeted_rearm.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_agent_thread_dot_alignment_css.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_agent_tool_budget_nonnumeric.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_agent_tools_file_groups_static.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
@@ -198,7 +194,6 @@
     "tests/test_gallery_filename_confinement.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_gallery_image_privileges.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_generated_image_confinement.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
-    "tests/test_git_tool_failures.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_group_character_dropdown.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_group_chat_storage.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_harness_efficiency_specs.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
@@ -217,7 +212,6 @@
     "tests/test_lotus_notifications.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_markdown_dom_xss_helpers.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_markdown_lazy_lib_loading_js.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
-    "tests/test_mcp_tool_binding.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_mcp_update_server.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_memory_add_submit_regression.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_memory_audit_timeout.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",

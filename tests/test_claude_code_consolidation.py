@@ -17,10 +17,6 @@ import pytest
 from src.agent_tools import claude_code_tools as cct
 from src.agent_tools.claude_code_tools import ClaudeCodeTool, ClaudeCodeTaskRunner
 
-_REPORT_BACKLOG = pytest.mark.skip(
-    reason="Re-port backlog: uses fork-only internals replaced by upstream's agent core (website/upstream-sync-2026-09-18.md)"
-)
-
 pytestmark = pytest.mark.area_security
 
 
@@ -466,19 +462,6 @@ def test_settings_keys_are_registered_and_validated():
         assert key in DEFAULT_SETTINGS, key
     assert DEFAULT_SETTINGS["agent_max_tool_calls"] == 500
     assert DEFAULT_SETTINGS["claude_code_repository_roots"] == []
-
-
-@_REPORT_BACKLOG
-def test_agent_loop_tool_ceiling_is_500_and_zero_disables():
-    import ast
-    from src import agent_loop
-
-    assert agent_loop.DEFAULT_MAX_TOOL_CALLS_PER_RUN == 500
-    src = Path(agent_loop.__file__).read_text(encoding="utf-8")
-    # The old `get_setting(...) or DEFAULT` turned the documented "0 = no
-    # ceiling" into the default; make sure that pattern does not come back.
-    assert 'get_setting("agent_max_tool_calls", DEFAULT_MAX_TOOL_CALLS_PER_RUN)\n                             or DEFAULT_MAX_TOOL_CALLS_PER_RUN' not in src
-    ast.parse(src)
 
 
 # ── Routing: "claude" means the coding agent, not a chat model ──
