@@ -18,8 +18,9 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text, create_engine
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text
+from sqlalchemy.orm import declarative_base
+from sqlalchemy.pool import QueuePool
 
 from src.task_scheduler import (
     LANE_EXTERNAL,
@@ -30,7 +31,7 @@ from src.task_scheduler import (
 
 
 @pytest.fixture
-def task_db(tmp_path, monkeypatch):
+def task_db(make_test_db, monkeypatch):
     import core.database as cd
 
     base = declarative_base()
@@ -65,9 +66,7 @@ def task_db(tmp_path, monkeypatch):
         error = Column(Text)
         model = Column(String)
 
-    engine = create_engine(f"sqlite:///{tmp_path / 'lanes.db'}")
-    base.metadata.create_all(engine)
-    session_local = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+    session_local = make_test_db(base.metadata, poolclass=QueuePool).SessionLocal
     monkeypatch.setattr(cd, "SessionLocal", session_local)
     monkeypatch.setattr(cd, "ScheduledTask", ScheduledTask)
     monkeypatch.setattr(cd, "TaskRun", TaskRun)

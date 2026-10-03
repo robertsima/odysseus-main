@@ -1,10 +1,11 @@
 import asyncio
 
-from sqlalchemy import Column, DateTime, String, Text, create_engine
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy import Column, DateTime, String, Text
+from sqlalchemy.orm import declarative_base
+from sqlalchemy.pool import QueuePool
 
 
-def _setup_db(tmp_path, monkeypatch):
+def _setup_db(make_test_db, monkeypatch):
     import core.database as cd
 
     base = declarative_base()
@@ -31,17 +32,15 @@ def _setup_db(tmp_path, monkeypatch):
         error = Column(Text)
         model = Column(String)
 
-    engine = create_engine(f"sqlite:///{tmp_path / 'tasks.db'}")
-    base.metadata.create_all(engine)
-    session_local = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+    session_local = make_test_db(base.metadata, poolclass=QueuePool).SessionLocal
     monkeypatch.setattr(cd, "SessionLocal", session_local)
     monkeypatch.setattr(cd, "ScheduledTask", ScheduledTask)
     monkeypatch.setattr(cd, "TaskRun", TaskRun)
     return session_local, ScheduledTask, TaskRun
 
 
-def test_stop_task_cleans_up_queued_handle_and_run(tmp_path, monkeypatch):
-    session_local, ScheduledTask, TaskRun = _setup_db(tmp_path, monkeypatch)
+def test_stop_task_cleans_up_queued_handle_and_run(make_test_db, monkeypatch):
+    session_local, ScheduledTask, TaskRun = _setup_db(make_test_db, monkeypatch)
 
     db = session_local()
     db.add(ScheduledTask(

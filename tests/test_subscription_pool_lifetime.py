@@ -5,7 +5,7 @@ import threading
 import time
 
 import pytest
-from sqlalchemy import Column, String, create_engine, event
+from sqlalchemy import Column, String, event
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.pool import QueuePool
 
@@ -17,7 +17,7 @@ def _jwt(exp):
     return f"x.{payload}.x"
 
 
-def test_concurrent_refresh_does_not_hold_queuepool_connections(monkeypatch, tmp_path):
+def test_concurrent_refresh_does_not_hold_queuepool_connections(monkeypatch, make_test_db):
     """Network refreshes must not occupy the application's scarce DB pool."""
     mapped = declarative_base()
 
@@ -32,9 +32,8 @@ def test_concurrent_refresh_does_not_hold_queuepool_connections(monkeypatch, tmp
         auth_mode = Column(String)
         last_refresh = Column(String)
 
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'pool.db'}",
-        connect_args={"check_same_thread": False},
+    engine = make_test_db(
+        mapped.metadata,
         poolclass=QueuePool,
         pool_size=1,
         max_overflow=0,
@@ -44,8 +43,7 @@ def test_concurrent_refresh_does_not_hold_queuepool_connections(monkeypatch, tmp
         # wrong. The hold itself is asserted directly below, not inferred from
         # a checkout timing out.
         pool_timeout=10,
-    )
-    mapped.metadata.create_all(engine)
+    ).engine
     factory = sessionmaker(bind=engine)
 
     # Which thread currently holds each checked-out pool connection.
@@ -100,10 +98,9 @@ def test_concurrent_refresh_does_not_hold_queuepool_connections(monkeypatch, tmp
 
     assert held_during_refresh == []
     assert engine.pool.checkedout() == 0
-    engine.dispose()
 
 
-def test_same_auth_waiters_release_pool_and_refresh_once(monkeypatch, tmp_path):
+def test_same_auth_waiters_release_pool_and_refresh_once(monkeypatch, make_test_db):
     """Waiters on one rotating credential neither pin the pool nor refresh twice."""
     import src.chatgpt_subscription as legacy
 
@@ -120,11 +117,9 @@ def test_same_auth_waiters_release_pool_and_refresh_once(monkeypatch, tmp_path):
         auth_mode = Column(String)
         last_refresh = Column(String)
 
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'same.db'}", connect_args={"check_same_thread": False},
-        poolclass=QueuePool, pool_size=1, max_overflow=0, pool_timeout=0.15,
-    )
-    mapped.metadata.create_all(engine)
+    engine = make_test_db(
+        mapped.metadata, poolclass=QueuePool, pool_size=1, max_overflow=0, pool_timeout=0.15,
+    ).engine
     factory = sessionmaker(bind=engine)
     with factory() as db:
         db.add(Auth(id="shared", provider=legacy.CHATGPT_SUBSCRIPTION_PROVIDER, owner="owner", access_token="spent",
@@ -153,10 +148,9 @@ def test_same_auth_waiters_release_pool_and_refresh_once(monkeypatch, tmp_path):
     assert engine.pool.checkedout() == 0
     with pytest.raises(legacy.ChatGPTSubscriptionAuthNotFound):
         legacy.resolve_runtime_credentials("shared", "different-owner")
-    engine.dispose()
 
 
-def test_chatgpt_endpoint_resolution_releases_single_connection(monkeypatch, tmp_path):
+def test_chatgpt_endpoint_resolution_releases_single_connection(monkeypatch, make_test_db):
     """Exercise the production ChatGPT adapter through resolve_endpoint."""
     import src.chatgpt_subscription as legacy
     import src.endpoint_resolver as er
@@ -189,11 +183,9 @@ def test_chatgpt_endpoint_resolution_releases_single_connection(monkeypatch, tmp
         hidden_models = Column(String)
         is_enabled = Column(String)
 
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'endpoint.db'}", connect_args={"check_same_thread": False},
-        poolclass=QueuePool, pool_size=1, max_overflow=0, pool_timeout=0.15,
-    )
-    mapped.metadata.create_all(engine)
+    engine = make_test_db(
+        mapped.metadata, poolclass=QueuePool, pool_size=1, max_overflow=0, pool_timeout=0.15,
+    ).engine
     factory = sessionmaker(bind=engine)
     with factory() as db:
         db.add(Auth(id="auth", provider=legacy.CHATGPT_SUBSCRIPTION_PROVIDER, owner="alice",
@@ -217,4 +209,3 @@ def test_chatgpt_endpoint_resolution_releases_single_connection(monkeypatch, tmp
     assert url and model == "codex"
     assert "Bearer" in headers.get("Authorization", "")
     assert engine.pool.checkedout() == 0
-    engine.dispose()

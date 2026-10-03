@@ -11,7 +11,6 @@ import pytest
 from fastapi import HTTPException
 
 from core.database import (
-    Base,
     ChatMessage as DbChatMessage,
     CalendarCal,
     CalendarEvent,
@@ -29,7 +28,6 @@ from src.upload_handler import (
     reserve_message_upload_references,
     reserve_upload_references,
 )
-from tests.helpers.sqlite_db import make_temp_sqlite
 from tests.helpers.fake_notes_store import FakeNotesStore
 
 
@@ -105,10 +103,10 @@ def _manual_cleanup_endpoint(handler: UploadHandler, monkeypatch):
     }["manual_cleanup"]
 
 
-def _reference_database(monkeypatch, *, upload_id: str, gallery_hash: str = None):
+def _reference_database(app_db, monkeypatch, *, upload_id: str, gallery_hash: str = None):
     from routes import upload_routes
 
-    SessionLocal, engine, tmpfile = make_temp_sqlite(Base.metadata)
+    SessionLocal = app_db.SessionLocal
     db = SessionLocal()
     try:
         db.add(DbSession(
@@ -145,12 +143,12 @@ def _reference_database(monkeypatch, *, upload_id: str, gallery_hash: str = None
         db.close()
 
     monkeypatch.setattr(upload_routes, "SessionLocal", SessionLocal)
-    return engine, tmpfile
 
 
 def test_admin_cleanup_preserves_referenced_upload_and_reconciles_deleted_row(
     tmp_path,
     monkeypatch,
+    app_db,
 ):
     handler = _make_handler(tmp_path)
     referenced_id = "a" * 32 + ".png"
@@ -174,23 +172,16 @@ def test_admin_cleanup_preserves_referenced_upload_and_reconciles_deleted_row(
             "mime": "image/png",
         },
     ])
-    engine, tmpfile = _reference_database(
+    _reference_database(
+        app_db,
         monkeypatch,
         upload_id=referenced_id,
         gallery_hash=gallery_hash,
     )
 
-    try:
-        response = asyncio.run(
-            _manual_cleanup_endpoint(handler, monkeypatch)(_AdminRequest())
-        )
-    finally:
-        engine.dispose()
-        tmpfile.close()
-        try:
-            os.unlink(tmpfile.name)
-        except OSError:
-            pass
+    response = asyncio.run(
+        _manual_cleanup_endpoint(handler, monkeypatch)(_AdminRequest())
+    )
 
     assert response == {"status": "success", "files_cleaned": 1}
     assert paths[referenced_id].is_file()
@@ -472,6 +463,7 @@ def test_cleanup_with_missing_live_index_fails_closed(tmp_path):
 
 def test_reference_discovery_covers_all_durable_upload_stores(
     monkeypatch,
+    app_db,
 ):
     from routes import upload_routes
 
@@ -485,7 +477,7 @@ def test_reference_discovery_covers_all_durable_upload_stores(
     event_description_id = "7" * 32 + ".txt"
     event_location_id = "8" * 32 + ".png"
     gallery_hash = "6" * 64
-    SessionLocal, engine, tmpfile = make_temp_sqlite(Base.metadata)
+    SessionLocal = app_db.SessionLocal
     db = SessionLocal()
     try:
         db.add(DbSession(
@@ -551,17 +543,9 @@ def test_reference_discovery_covers_all_durable_upload_stores(
             content=f"odysseus://attachment/{markdown_note_id}",
         )
     ))
-    try:
-        referenced_ids, referenced_hashes = (
-            upload_routes._collect_persisted_upload_references()
-        )
-    finally:
-        engine.dispose()
-        tmpfile.close()
-        try:
-            os.unlink(tmpfile.name)
-        except OSError:
-            pass
+    referenced_ids, referenced_hashes = (
+        upload_routes._collect_persisted_upload_references()
+    )
 
     assert {
         document_id,
@@ -637,7 +621,7 @@ def test_reservation_never_uses_admin_override(tmp_path):
     ) == upload_id
 
 
-def test_remaining_durable_writers_reserve_before_commit(monkeypatch):
+def test_remaining_durable_writers_reserve_before_commit(monkeypatch, app_db):
     import core.database as database
     import core.session_manager as session_manager_module
     import src.database as legacy_database
@@ -657,7 +641,7 @@ def test_remaining_durable_writers_reserve_before_commit(monkeypatch):
     handler = RejectingHandler()
     monkeypatch.setattr(tool_utils, "_upload_handler", handler)
 
-    SessionLocal, engine, tmpfile = make_temp_sqlite(Base.metadata)
+    SessionLocal = app_db.SessionLocal
     monkeypatch.setattr(database, "SessionLocal", SessionLocal)
     monkeypatch.setattr(legacy_database, "SessionLocal", SessionLocal)
     monkeypatch.setattr(legacy_database, "Document", Document, raising=False)
@@ -741,12 +725,6 @@ def test_remaining_durable_writers_reserve_before_commit(monkeypatch):
             verify.close()
     finally:
         db.close()
-        engine.dispose()
-        tmpfile.close()
-        try:
-            os.unlink(tmpfile.name)
-        except OSError:
-            pass
 
 
 def test_note_calendar_and_document_routes_reserve_before_database_writes(monkeypatch):

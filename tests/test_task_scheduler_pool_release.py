@@ -2,28 +2,24 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import QueuePool
 
 
-def _database(tmp_path, monkeypatch):
+def _database(make_test_db, monkeypatch):
     import core.database as cd
 
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'tiny-pool.db'}",
-        connect_args={"check_same_thread": False},
+    db = make_test_db(
         poolclass=QueuePool,
         pool_size=1,
         max_overflow=0,
         pool_timeout=0.15,
     )
+    engine = db.engine
     with engine.connect() as connection:
         assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
-    cd.Base.metadata.create_all(engine)
     # Match core.database.SessionLocal exactly where lifecycle semantics matter:
     # expire_on_commit defaults True, while autoflush is explicitly disabled.
-    sessions = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+    sessions = db.SessionLocal
     monkeypatch.setattr(cd, "SessionLocal", sessions)
     return cd, engine, sessions
 
@@ -79,10 +75,10 @@ def _read(sessions, cd, task_id="task"):
     return task, run
 
 
-def test_jobs_waiting_for_idle_do_not_exhaust_database_pool(tmp_path, monkeypatch):
+def test_jobs_waiting_for_idle_do_not_exhaust_database_pool(make_test_db, monkeypatch):
     import src.interactive_gate as gate
 
-    cd, engine, sessions = _database(tmp_path, monkeypatch)
+    cd, engine, sessions = _database(make_test_db, monkeypatch)
     scheduler = _scheduler(monkeypatch)
     entered, all_waiting, release = 0, asyncio.Event(), asyncio.Event()
     for n in range(3):
@@ -117,11 +113,11 @@ def test_jobs_waiting_for_idle_do_not_exhaust_database_pool(tmp_path, monkeypatc
 
 
 def test_direct_cancellation_during_idle_wait_persists_aborted_run(
-    tmp_path, monkeypatch
+    make_test_db, monkeypatch
 ):
     import src.interactive_gate as gate
 
-    cd, engine, sessions = _database(tmp_path, monkeypatch)
+    cd, engine, sessions = _database(make_test_db, monkeypatch)
     scheduler = _scheduler(monkeypatch)
     run_id = _seed(sessions, cd)
     entered = asyncio.Event()
@@ -146,9 +142,9 @@ def test_direct_cancellation_during_idle_wait_persists_aborted_run(
 
 
 def test_action_and_delivery_release_pool_and_persist_success_session(
-    tmp_path, monkeypatch
+    make_test_db, monkeypatch
 ):
-    cd, engine, sessions = _database(tmp_path, monkeypatch)
+    cd, engine, sessions = _database(make_test_db, monkeypatch)
     scheduler, run_id = _scheduler(monkeypatch), _seed(sessions, cd)
     action_entered, action_release = asyncio.Event(), asyncio.Event()
     delivery_entered, delivery_release = asyncio.Event(), asyncio.Event()
@@ -194,9 +190,9 @@ def test_action_and_delivery_release_pool_and_persist_success_session(
     ],
 )
 def test_model_work_releases_pool_during_execution(
-    tmp_path, monkeypatch, task_type, method_name
+    make_test_db, monkeypatch, task_type, method_name
 ):
-    cd, engine, sessions = _database(tmp_path, monkeypatch)
+    cd, engine, sessions = _database(make_test_db, monkeypatch)
     scheduler = _scheduler(monkeypatch)
     run_id = _seed(sessions, cd, task_type=task_type)
     entered, release = asyncio.Event(), asyncio.Event()
@@ -236,11 +232,11 @@ def test_model_work_releases_pool_during_execution(
     "outcome,expected", [("noop", "skipped"), ("error", "error"), ("cancel", "aborted")]
 )
 def test_action_terminal_outcomes_are_persisted(
-    tmp_path, monkeypatch, outcome, expected
+    make_test_db, monkeypatch, outcome, expected
 ):
     from src.builtin_actions import TaskNoop
 
-    cd, engine, sessions = _database(tmp_path, monkeypatch)
+    cd, engine, sessions = _database(make_test_db, monkeypatch)
     scheduler, run_id = _scheduler(monkeypatch), _seed(sessions, cd)
     entered = asyncio.Event()
 
@@ -273,8 +269,8 @@ def test_action_terminal_outcomes_are_persisted(
     assert run.status == expected and run.finished_at is not None
 
 
-def test_raised_action_error_releases_pool_and_persists_error(tmp_path, monkeypatch):
-    cd, engine, sessions = _database(tmp_path, monkeypatch)
+def test_raised_action_error_releases_pool_and_persists_error(make_test_db, monkeypatch):
+    cd, engine, sessions = _database(make_test_db, monkeypatch)
     scheduler, run_id = _scheduler(monkeypatch), _seed(sessions, cd)
     entered, release = asyncio.Event(), asyncio.Event()
 
@@ -302,10 +298,10 @@ def test_raised_action_error_releases_pool_and_persists_error(tmp_path, monkeypa
     assert run.finished_at is not None
 
 
-def test_deferred_action_removes_run_and_reschedules(tmp_path, monkeypatch):
+def test_deferred_action_removes_run_and_reschedules(make_test_db, monkeypatch):
     from src.builtin_actions import TaskDeferred
 
-    cd, _engine, sessions = _database(tmp_path, monkeypatch)
+    cd, _engine, sessions = _database(make_test_db, monkeypatch)
     scheduler, run_id = _scheduler(monkeypatch), _seed(sessions, cd)
 
     async def action(_task, **_kw):
@@ -318,9 +314,9 @@ def test_deferred_action_removes_run_and_reschedules(tmp_path, monkeypatch):
 
 
 def test_checkin_accepts_scheduler_scalar_snapshot_and_has_no_checkout(
-    tmp_path, monkeypatch
+    make_test_db, monkeypatch
 ):
-    cd, engine, sessions = _database(tmp_path, monkeypatch)
+    cd, engine, sessions = _database(make_test_db, monkeypatch)
     scheduler = _scheduler(monkeypatch)
     db = sessions()
     db.add(
@@ -364,11 +360,11 @@ def test_checkin_accepts_scheduler_scalar_snapshot_and_has_no_checkout(
 
 @pytest.mark.parametrize("existing_session", [False, True])
 def test_real_llm_setup_releases_before_tools_headers_and_agent_loop(
-    tmp_path, monkeypatch, existing_session
+    make_test_db, monkeypatch, existing_session
 ):
     import src.tool_index as tool_index
 
-    cd, engine, sessions = _database(tmp_path, monkeypatch)
+    cd, engine, sessions = _database(make_test_db, monkeypatch)
     scheduler = _scheduler(monkeypatch)
     _seed(sessions, cd)
     db = sessions()
@@ -438,11 +434,11 @@ def test_real_llm_setup_releases_before_tools_headers_and_agent_loop(
     assert persisted.session_id
 
 
-def test_research_releases_pool_and_persists_output_session(tmp_path, monkeypatch):
+def test_research_releases_pool_and_persists_output_session(tmp_path, monkeypatch, make_test_db):
     import src.deep_research as deep_research
     import src.research_handler as research_handler
 
-    cd, engine, sessions = _database(tmp_path, monkeypatch)
+    cd, engine, sessions = _database(make_test_db, monkeypatch)
     scheduler = _scheduler(monkeypatch)
     ensured = []
 

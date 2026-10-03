@@ -18,8 +18,9 @@ import time
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text, create_engine
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text
+from sqlalchemy.orm import declarative_base
+from sqlalchemy.pool import QueuePool
 
 from src.task_scheduler import _utcnow
 
@@ -38,7 +39,7 @@ def _reset_foreground_gate():
     _clear()
 
 
-def _setup_db(tmp_path, monkeypatch, *, record_threads=None):
+def _setup_db(make_test_db, monkeypatch, *, record_threads=None):
     import core.database as cd
 
     base = declarative_base()
@@ -74,12 +75,7 @@ def _setup_db(tmp_path, monkeypatch, *, record_threads=None):
         error = Column(Text)
         model = Column(String)
 
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'tasks.db'}",
-        connect_args={"check_same_thread": False},
-    )
-    base.metadata.create_all(engine)
-    maker = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+    maker = make_test_db(base.metadata, poolclass=QueuePool).SessionLocal
 
     if record_threads is not None:
         def session_local():
@@ -141,9 +137,9 @@ def _load(maker, ScheduledTask, TaskRun, task_id="t1"):
 # ── 1. due-task check off the event loop ───────────────────────────────────
 
 
-def test_deferral_commit_runs_off_the_event_loop(tmp_path, monkeypatch):
+def test_deferral_commit_runs_off_the_event_loop(make_test_db, monkeypatch):
     threads = []
-    maker, ScheduledTask, TaskRun = _setup_db(tmp_path, monkeypatch, record_threads=threads)
+    maker, ScheduledTask, TaskRun = _setup_db(make_test_db, monkeypatch, record_threads=threads)
     was_due = _utcnow() - timedelta(minutes=1)
     _seed(maker, ScheduledTask, next_run=was_due)
     scheduler = _make_scheduler(monkeypatch)
@@ -183,8 +179,8 @@ def test_deferral_commit_runs_off_the_event_loop(tmp_path, monkeypatch):
     assert kw["data"]["was_due_at"] == was_due.isoformat()
 
 
-def test_due_task_is_claimed_and_dispatched_when_idle(tmp_path, monkeypatch):
-    maker, ScheduledTask, TaskRun = _setup_db(tmp_path, monkeypatch)
+def test_due_task_is_claimed_and_dispatched_when_idle(make_test_db, monkeypatch):
+    maker, ScheduledTask, TaskRun = _setup_db(make_test_db, monkeypatch)
     _seed(maker, ScheduledTask, "due", next_run=_utcnow() - timedelta(minutes=1))
     _seed(maker, ScheduledTask, "busy", next_run=_utcnow() - timedelta(minutes=1))
     _seed(maker, ScheduledTask, "later", next_run=_utcnow() + timedelta(hours=1))
@@ -212,9 +208,9 @@ def test_due_task_is_claimed_and_dispatched_when_idle(tmp_path, monkeypatch):
     assert task.next_run < _utcnow()  # dispatch does not move next_run here
 
 
-def test_loop_sleep_computation_is_off_the_event_loop(tmp_path, monkeypatch):
+def test_loop_sleep_computation_is_off_the_event_loop(make_test_db, monkeypatch):
     threads = []
-    maker, ScheduledTask, _TaskRun = _setup_db(tmp_path, monkeypatch, record_threads=threads)
+    maker, ScheduledTask, _TaskRun = _setup_db(make_test_db, monkeypatch, record_threads=threads)
     _seed(maker, ScheduledTask, next_run=_utcnow() + timedelta(seconds=30))
     from src.task_scheduler import TaskScheduler
 
@@ -245,8 +241,8 @@ def _patch_llm_executor(scheduler, monkeypatch, endpoint, started, release):
     monkeypatch.setattr(scheduler, "_execute_llm_task", _fake_llm, raising=False)
 
 
-def test_started_remote_run_survives_the_heartbeat_sweep_and_monitor(tmp_path, monkeypatch):
-    maker, ScheduledTask, TaskRun = _setup_db(tmp_path, monkeypatch)
+def test_started_remote_run_survives_the_heartbeat_sweep_and_monitor(make_test_db, monkeypatch):
+    maker, ScheduledTask, TaskRun = _setup_db(make_test_db, monkeypatch)
     _seed(maker, ScheduledTask)
     scheduler = _make_scheduler(monkeypatch)
 
@@ -282,8 +278,8 @@ def test_started_remote_run_survives_the_heartbeat_sweep_and_monitor(tmp_path, m
 
 
 @pytest.mark.parametrize("endpoint", [LAN, "http://localhost:11434/v1/chat/completions"])
-def test_started_local_run_is_still_preempted(tmp_path, monkeypatch, endpoint):
-    maker, ScheduledTask, TaskRun = _setup_db(tmp_path, monkeypatch)
+def test_started_local_run_is_still_preempted(make_test_db, monkeypatch, endpoint):
+    maker, ScheduledTask, TaskRun = _setup_db(make_test_db, monkeypatch)
     _seed(maker, ScheduledTask)
     scheduler = _make_scheduler(monkeypatch)
 
@@ -332,9 +328,9 @@ def test_scope_is_reclassified_and_unknown_is_not_exempt():
     assert scheduler._foreground_preemption_exempt("never-started") is False
 
 
-def test_not_started_remote_task_is_still_deferred(tmp_path, monkeypatch):
+def test_not_started_remote_task_is_still_deferred(make_test_db, monkeypatch):
     """Only started runs are exempt: a due task still waits for quiet."""
-    maker, ScheduledTask, TaskRun = _setup_db(tmp_path, monkeypatch)
+    maker, ScheduledTask, TaskRun = _setup_db(make_test_db, monkeypatch)
     _seed(maker, ScheduledTask, next_run=_utcnow() - timedelta(minutes=1))
     scheduler = _make_scheduler(monkeypatch)
     monkeypatch.setattr("src.task_scheduler._note_scheduler_event", lambda *a, **kw: None)

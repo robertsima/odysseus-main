@@ -1,34 +1,17 @@
 """Real-SQLite regressions for session discovery with stale derived counts."""
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import NullPool
-
 import core.session_manager as session_manager
 
 
-def _make_manager(db_path, monkeypatch):
-    engine = create_engine(
-        f"sqlite:///{db_path}",
-        connect_args={"check_same_thread": False},
-        poolclass=NullPool,
-    )
-    session_manager.DbSession.metadata.create_all(bind=engine)
-    session_local = sessionmaker(
-        bind=engine,
-        autoflush=False,
-        autocommit=False,
-    )
-    monkeypatch.setattr(session_manager, "SessionLocal", session_local)
+def _make_manager(app_db, monkeypatch):
+    monkeypatch.setattr(session_manager, "SessionLocal", app_db.SessionLocal)
     return session_manager.SessionManager(), session_manager
 
 
-def test_discovery_uses_persisted_rows_and_repairs_cached_count(tmp_path, monkeypatch):
+def test_discovery_uses_persisted_rows_and_repairs_cached_count(app_db, monkeypatch):
     from core.models import ChatMessage
 
-    manager, session_manager = _make_manager(
-        tmp_path / "session-discovery.db", monkeypatch
-    )
+    manager, session_manager = _make_manager(app_db, monkeypatch)
     for session_id in ("stale-low", "empty", "stale-high"):
         manager.create_session(
             session_id=session_id,

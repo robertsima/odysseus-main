@@ -19,11 +19,7 @@ from pathlib import Path
 
 import pytest
 from fastapi import APIRouter
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import NullPool
 
-import core.database as cdb
 from core.database import GalleryImage
 from src.upload_handler import count_recent_uploads, UploadHandler
 import routes.upload_routes as up
@@ -174,14 +170,8 @@ def test_six_file_batch_is_not_rate_limited(tmp_path):
     assert saved == 6
 
 
-async def test_chat_image_upload_is_added_to_gallery(tmp_path, monkeypatch):
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'gallery.db'}",
-        connect_args={"check_same_thread": False},
-        poolclass=NullPool,
-    )
-    cdb.Base.metadata.create_all(engine)
-    TestingSession = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+async def test_chat_image_upload_is_added_to_gallery(tmp_path, monkeypatch, app_db):
+    TestingSession = app_db.SessionLocal
     gallery_dir = tmp_path / "generated_images"
 
     monkeypatch.setattr(up, "SessionLocal", TestingSession)
@@ -207,14 +197,8 @@ async def test_chat_image_upload_is_added_to_gallery(tmp_path, monkeypatch):
         db.close()
 
 
-async def test_non_image_chat_upload_is_not_added_to_gallery(tmp_path, monkeypatch):
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'gallery.db'}",
-        connect_args={"check_same_thread": False},
-        poolclass=NullPool,
-    )
-    cdb.Base.metadata.create_all(engine)
-    TestingSession = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+async def test_non_image_chat_upload_is_not_added_to_gallery(tmp_path, monkeypatch, app_db):
+    TestingSession = app_db.SessionLocal
     monkeypatch.setattr(up, "SessionLocal", TestingSession)
     monkeypatch.setattr(up, "GENERATED_IMAGES_DIR", str(tmp_path / "generated_images"))
 

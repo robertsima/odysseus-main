@@ -7,7 +7,6 @@ turn, leaving the browser pointed at a session id that no longer exists.
 import asyncio
 from datetime import timedelta
 import sys
-import tempfile
 import uuid
 
 import pytest
@@ -16,25 +15,9 @@ sqlalchemy = pytest.importorskip("sqlalchemy")
 if type(sqlalchemy).__name__ == "MagicMock":
     pytest.skip("sqlalchemy is stubbed in this environment", allow_module_level=True)
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import NullPool
-
 import core.database as cdb
 from core.database import ChatMessage as DbMessage, Session as DbSession, utcnow_naive
 import src.session_actions as session_actions
-
-
-def _make_session_factory():
-    tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-    tmp.close()
-    engine = create_engine(
-        f"sqlite:///{tmp.name}",
-        connect_args={"check_same_thread": False},
-        poolclass=NullPool,
-    )
-    DbSession.metadata.create_all(bind=engine)
-    return sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 
 def _install_session_factory(monkeypatch, session_factory):
@@ -57,8 +40,8 @@ def _add_message(db, sid, role, content, timestamp):
     )
 
 
-def test_auto_sort_keeps_fresh_chat_with_completed_first_turn(monkeypatch):
-    session_factory = _make_session_factory()
+def test_auto_sort_keeps_fresh_chat_with_completed_first_turn(monkeypatch, app_db):
+    session_factory = app_db.SessionLocal
     _install_session_factory(monkeypatch, session_factory)
 
     sid = "s-" + uuid.uuid4().hex
@@ -93,8 +76,8 @@ def test_auto_sort_keeps_fresh_chat_with_completed_first_turn(monkeypatch):
         db.close()
 
 
-def test_auto_sort_keeps_fresh_session_while_first_response_is_pending(monkeypatch):
-    session_factory = _make_session_factory()
+def test_auto_sort_keeps_fresh_session_while_first_response_is_pending(monkeypatch, app_db):
+    session_factory = app_db.SessionLocal
     _install_session_factory(monkeypatch, session_factory)
 
     sid = "s-" + uuid.uuid4().hex
@@ -128,8 +111,8 @@ def test_auto_sort_keeps_fresh_session_while_first_response_is_pending(monkeypat
         db.close()
 
 
-def test_auto_sort_still_deletes_old_throwaway_sessions(monkeypatch):
-    session_factory = _make_session_factory()
+def test_auto_sort_still_deletes_old_throwaway_sessions(monkeypatch, app_db):
+    session_factory = app_db.SessionLocal
     _install_session_factory(monkeypatch, session_factory)
 
     old_time = utcnow_naive() - timedelta(hours=2)
