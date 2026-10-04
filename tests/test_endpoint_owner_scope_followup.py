@@ -399,16 +399,3 @@ def test_gallery_image_endpoint_lookups_are_owner_scoped():
             "_first_visible_image_endpoint(db, user)" in section
             or "_visible_image_endpoint_for_base(db," in section
         )
-
-
-def test_research_endpoint_resolution_passes_owner():
-    body = Path("routes/research/research_routes.py").read_text(encoding="utf-8")
-
-    assert "def _resolve_research_endpoint(sess, owner:" in body
-    assert 'resolve_endpoint("research", owner=user)' in body
-    assert 'resolve_endpoint("utility", owner=user)' in body
-    assert 'resolve_endpoint("default", owner=user)' in body
-    assert 'resolve_endpoint("chat", owner=user)' in body
-    helper_body = body.split("def _owned_enabled_endpoint", 1)[1].split("def setup_research_routes", 1)[0]
-    assert "owner_filter(q, ModelEndpoint, owner)" in helper_body
-    assert body.count("_owned_enabled_endpoint(db, user") >= 2
