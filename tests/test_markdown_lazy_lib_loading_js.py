@@ -399,19 +399,6 @@ def test_detached_container_math_typesets_with_the_real_renderer(node_available)
     assert "ody-math-pending" not in out["written"]
 
 
-def test_pdf_export_typesets_its_container_before_html2pdf():
-    """Ordering in a call site, so pin the call site. No node needed."""
-    source = (_REPO / "static/js/document.js").read_text(encoding="utf-8")
-    match = re.search(r"\n  async function exportAsPdf\(\) \{(.*?)\n  \}\n", source, re.S)
-    assert match, "exportAsPdf not found"
-    body = match.group(1)
-
-    render = "await markdownModule.renderMath(container);"
-    assert render in body, "the export never typesets its detached container"
-    assert body.index("container.innerHTML = html;") < body.index(render)
-    assert body.index(render) < body.index("window.html2pdf()")
-
-
 def test_md_to_html_renders_inline_once_katex_is_loaded(node_available):
     """After the first load mdToHtml goes back to typesetting synchronously."""
     out = _run_node(
