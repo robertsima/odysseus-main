@@ -32,8 +32,7 @@
   },
   "importlib_reload": {
     "tests/test_fastembed_cache_path.py": "reloads a module; build the objects under test directly instead (D12)",
-    "tests/test_shell_routes.py": "reloads a module; build the objects under test directly instead (D12)",
-    "tests/test_upload_limits_centralized.py": "reloads a module; build the objects under test directly instead (D12)"
+    "tests/test_shell_routes.py": "reloads a module; build the objects under test directly instead (D12)"
   },
   "raw_environ_write": {
     "tests/test_add_directory_event_loop.py": "writes os.environ outside monkeypatch (D12)",
