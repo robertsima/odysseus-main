@@ -39,6 +39,49 @@ DNS lookups of names and connections beyond loopback fail at once with an error
 naming the guard. Address literals still resolve. Mark a test that needs the
 network `@pytest.mark.allow_network` and say why.
 
+### Browser tests (`browser.py`)
+
+Python Playwright driving the system Chrome (`channel="chrome"`); nothing is
+downloaded. `pip install -r requirements-test.txt` installs Playwright.
+`ODYSSEUS_TEST_CHROMIUM=<path>` picks another Chromium build.
+
+- `browser`: one Chrome per test process.
+- `new_page(width, height=None, **context_options)`: a page in a fresh context,
+  closed after the test. Under 481 px the viewport is mobile. Uncaught page
+  errors collect in `page.errors`.
+- Without Playwright or Chrome the tests skip. With `ODYSSEUS_REQUIRE_BROWSER=1`
+  (set in CI) they fail instead. With `ODYSSEUS_BROWSER_ARTIFACTS=<dir>` a failed
+  test leaves a screenshot of each of its pages there.
+
+Browser tests live at the mirror of what they exercise, under `tests/static/`
+(`tests/static/js/workbench/` for `static/js/workbench.js`,
+`tests/static/index/` for the page shell in `static/index.html`). Their fixtures
+are in `tests/static/conftest.py`:
+
+- `open_app(width, theme=None, style=None, workbench_prefs=None, chat=True)`:
+  the shipped `static/` served with a canned `/api/*`
+  (`tests/helpers/static_app.py`), open on a fixture chat with a running agent
+  fleet and Workbench run. `static_app.state` records what the page posted and
+  lets a test change the canned data (`run_status`, `repo_activity`,
+  `appearance`); it is reset before each test.
+- `live_app` and `live_page(width=1440, path="/")`: the real app (`python app.py`)
+  on a free port with scratch data, signed in as an admin, with a scripted
+  OpenAI-compatible model (`tests/helpers/live_app.py`). The model answers by
+  probe markers in the conversation and can hold a reply at a gate
+  (`live_app.model.arm("stream")`, `wait_reached`, `release`), so a test can
+  look at a reply mid-stream. Tests that use it carry
+  `pytest.mark.xdist_group("live_app")`; CI runs with `--dist loadgroup`, so
+  one app serves them all.
+
+`tests/helpers/static_app.py` also has the measuring helpers: `probe` (box,
+paint and whether a click at the centre reaches the element), `assert_usable`,
+`assert_no_sideways_scroll`, `contrast`, and `settle`, which waits for CSS
+transitions to end and a box to stop moving. Wait with `expect(...)`,
+`wait_for_function` or `settle`, never a fixed sleep.
+
+Widths are 1440, 700 and 390 px. Another width (320 px for the narrowest phone
+row, 1024 px for the half-width dock) needs a test that is about that width.
+
 ## Helper conventions
 
 The helpers below live under `tests/helpers/`. They exist to remove repeated
