@@ -9,6 +9,7 @@
    Responses API's `prompt_cache_retention: "24h"` keeps a prompt warm longer.
 """
 import asyncio
+import collections
 import json
 import os
 
@@ -85,6 +86,19 @@ def test_intent_for_a_note_is_a_continuation_of_the_request_not_the_note():
          {"role": "user", "content": PUBLISH_NOTE, "metadata": {"source": "publish_decision"}}],
         "ok")
     assert note_only["continuation"] is True and not note_only["domains"]
+
+
+@pytest.fixture(autouse=True)
+def _fresh_chat_memory(monkeypatch):
+    """Each test's loop runs start with no remembered chat state.
+
+    stream_agent_loop keeps each session's offered tools (_STICKY_TOOLS, which
+    only grow) and preface in module-level dicts. These tests reuse session
+    ids, so without this the second-loop discovery of manage_calendar in one
+    test was already offered in another test's first round.
+    """
+    monkeypatch.setattr(al, "_STICKY_TOOLS", collections.OrderedDict())
+    monkeypatch.setattr(al, "_CHAT_PREFACES", collections.OrderedDict())
 
 
 def _run_loop(monkeypatch, messages, session_settings=None, relevant=None, url=CHATGPT, model="gpt-6-luna",
