@@ -17,15 +17,11 @@ import pytest
 from fastapi import HTTPException
 
 from src.owner_identity import DEFAULT_LOCAL_OWNER
-from tests.helpers.import_state import clear_module
 
 _RESERVED_NAMES = ["internal-tool", "api", "demo", "system", DEFAULT_LOCAL_OWNER]
 
 
 def _fresh_auth_manager(tmp_path):
-    # Same import dance as test_security_regressions: drop any cached stub so
-    # we exercise the real module from disk rather than a conftest mock.
-    clear_module("core.auth")
     from core.auth import AuthManager
 
     return AuthManager(str(tmp_path / "auth.json"))
@@ -111,7 +107,6 @@ def test_legacy_reserved_username_session_cannot_pass_admin_gate(tmp_path, monke
         encoding="utf-8",
     )
     mgr = _fresh_auth_manager(tmp_path)
-    clear_module("core.middleware")
     from core.middleware import require_admin
 
     monkeypatch.setenv("AUTH_ENABLED", "true")
@@ -142,7 +137,6 @@ def test_legacy_reserved_single_user_migrates_to_admin(tmp_path, name):
 
 
 def test_token_cache_owner_normalization_requires_current_user():
-    clear_module("core.auth")
     from core.auth import normalize_known_username
 
     users = {"alice": {}, "admin": {}}
