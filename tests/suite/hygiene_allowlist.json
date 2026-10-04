@@ -21,11 +21,9 @@
     "tests/test_session_ghost_delete.py": "stubs modules at import time; move the stub into a fixture with monkeypatch.setitem (D12)",
     "tests/test_skill_index_prompt_injection.py": "stubs modules at import time; move the stub into a fixture with monkeypatch.setitem (D12)",
     "tests/test_skill_index_toolset_gating.py": "stubs modules at import time; move the stub into a fixture with monkeypatch.setitem (D12)",
-    "tests/test_skills_manager_owner_isolation.py": "stubs modules at import time; move the stub into a fixture with monkeypatch.setitem (D12)",
     "tests/test_skills_tag_token_match.py": "stubs modules at import time; move the stub into a fixture with monkeypatch.setitem (D12)",
     "tests/test_tool_output_prompt_injection.py": "stubs modules at import time; move the stub into a fixture with monkeypatch.setitem (D12)",
     "tests/test_unknown_tool_calls.py": "stubs modules at import time; move the stub into a fixture with monkeypatch.setitem (D12)",
-    "tests/test_vault_password_not_in_argv.py": "stubs modules at import time; move the stub into a fixture with monkeypatch.setitem (D12)",
     "tests/test_webhook_dns_rebinding_pin.py": "stubs modules at import time; move the stub into a fixture with monkeypatch.setitem (D12)",
     "tests/test_webhook_sanitize_error_ipv6.py": "stubs modules at import time; move the stub into a fixture with monkeypatch.setitem (D12)",
     "tests/test_webhook_ssrf_resilience.py": "stubs modules at import time; move the stub into a fixture with monkeypatch.setitem (D12)",
@@ -37,7 +35,6 @@
     "tests/test_poll_endpoint_no_task_interrupt.py": "reloads a module; build the objects under test directly instead (D12)",
     "tests/test_rag_similarity_threshold_env.py": "reloads a module; build the objects under test directly instead (D12)",
     "tests/test_shell_routes.py": "reloads a module; build the objects under test directly instead (D12)",
-    "tests/test_tls_overrides_scope.py": "reloads a module; build the objects under test directly instead (D12)",
     "tests/test_upload_limits_centralized.py": "reloads a module; build the objects under test directly instead (D12)"
   },
   "raw_environ_write": {
@@ -48,7 +45,6 @@
     "tests/test_chatgpt_responses_tools.py": "writes os.environ outside monkeypatch (D12)",
     "tests/test_code_nav_tools.py": "writes os.environ outside monkeypatch (D12)",
     "tests/test_dead_config_removed.py": "writes os.environ outside monkeypatch (D12)",
-    "tests/test_directory_sensitivity_policy.py": "writes os.environ outside monkeypatch (D12)",
     "tests/test_email_audit_digest.py": "writes os.environ outside monkeypatch (D12)",
     "tests/test_email_decode_header.py": "writes os.environ outside monkeypatch (D12)",
     "tests/test_email_helpers_decode_header_spaces.py": "writes os.environ outside monkeypatch (D12)",
@@ -85,7 +81,6 @@
     "tests/test_steer_not_silently_dropped.py": "writes os.environ outside monkeypatch (D12)",
     "tests/test_steer_split_and_wake.py": "writes os.environ outside monkeypatch (D12)",
     "tests/test_terminus_toolset_retention.py": "writes os.environ outside monkeypatch (D12)",
-    "tests/test_tls_overrides_scope.py": "writes os.environ outside monkeypatch (D12)",
     "tests/test_vault_markdown.py": "writes os.environ outside monkeypatch (D12)",
     "tests/test_vault_scan.py": "writes os.environ outside monkeypatch (D12)"
   },
@@ -157,7 +152,6 @@
     "tests/test_delete_message_no_session.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_deleted_session_sidebar_regression.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_dialog_aria.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
-    "tests/test_diffusion_server_security.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_doc_library_open_orphaned.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_docker_devops_hardening.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_docs_no_orphan_images.py": "asset check: reads static/ only to find image references, which D29 keeps",
@@ -227,7 +221,6 @@
     "tests/test_route_latency_ui_static.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_security_regressions.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_select_dropdown_theme_css.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
-    "tests/test_self_scoped_tools.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_session_mode_helpers.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_session_routes_utcnow.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_session_tools_registry.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
@@ -240,7 +233,6 @@
     "tests/test_skill_edit_no_collapse_on_outside_click_js.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_skill_tiers.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_skill_visibility.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
-    "tests/test_skills_manager_owner_isolation.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_slash_autocomplete_static.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_slash_setup_provider_aliases.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_spinner_stops_when_never_attached_js.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
@@ -251,10 +243,8 @@
     "tests/test_steering_composer_lifecycle_js.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_stt_routes.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_task_session_folder.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
-    "tests/test_tls_overrides_scope.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_toast_dismiss_pointer_events.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_tool_approval_frontend_routing.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
-    "tests/test_tool_approval_single_action_scope.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_tool_approval_task_scope.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_tool_images_reach_model.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_tool_index_schema_parity.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
@@ -267,8 +257,6 @@
     "tests/test_upload_handler_atomicity.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_upload_multifile.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_vault_context_availability.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
-    "tests/test_vault_password_not_in_argv.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
-    "tests/test_webhook_trigger_auth_exempt.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_workbench_js.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_worker_stop_and_reasoning.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_worktree_dependency_note.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)"
@@ -287,7 +275,6 @@
     "tests/test_session_manager.py": "edits sys.path; tests/conftest.py already puts the repo root there (D12)",
     "tests/test_session_owner_attribution.py": "edits sys.path; tests/conftest.py already puts the repo root there (D12)",
     "tests/test_settings_error_paths.py": "edits sys.path; tests/conftest.py already puts the repo root there (D12)",
-    "tests/test_upload_handler_atomicity.py": "edits sys.path; tests/conftest.py already puts the repo root there (D12)",
-    "tests/test_vault_password_not_in_argv.py": "edits sys.path; tests/conftest.py already puts the repo root there (D12)"
+    "tests/test_upload_handler_atomicity.py": "edits sys.path; tests/conftest.py already puts the repo root there (D12)"
   }
 }

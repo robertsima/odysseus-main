@@ -137,18 +137,6 @@ def test_readme_warns_auth_enabled_for_network_access():
     assert "Keep `LOCALHOST_BYPASS=false` outside local development." in readme
 
 
-def test_ollama_cookbook_runner_does_not_force_public_bind():
-    route = Path("routes/cookbook_routes.py").read_text(encoding="utf-8")
-    cookbook_js = Path("static/js/cookbook.js").read_text(encoding="utf-8")
-    assert 'OLLAMA_HOST="0.0.0.0:${ODYSSEUS_OLLAMA_PORT}" ollama serve' not in route
-    assert 'OLLAMA_HOST="${ODYSSEUS_OLLAMA_HOST}:${ODYSSEUS_OLLAMA_PORT}" ollama serve' in route
-    assert '_ollama_default_host = "0.0.0.0" if remote else "127.0.0.1"' in route
-    assert "WARNING: remote Ollama will bind" in route
-    assert "OLLAMA_HOST=0.0.0.0:${ollamaPort}" not in cookbook_js
-    assert "const bindHost = _envState.remoteHost ? '0.0.0.0' : '127.0.0.1';" in cookbook_js
-    assert "OLLAMA_HOST=${bindHost}:${ollamaPort}" in cookbook_js
-
-
 def _import_integrations(tmp_path, monkeypatch):
     """Import src.integrations with data + encryption key redirected to tmp."""
     _import_secret_storage(tmp_path, monkeypatch)
@@ -338,30 +326,6 @@ def _make_upload_store(tmp_path):
     return upload_dir, alice_id, bob_id
 
 
-def _stub_core_database_for_route_imports(monkeypatch):
-    from unittest.mock import MagicMock
-
-    core_pkg = types.ModuleType("core")
-    core_pkg.__path__ = []
-    models = types.ModuleType("core.models")
-    models.ChatMessage = MagicMock()
-
-    db = types.ModuleType("core.database")
-    for name in (
-        "SessionLocal",
-        "Session",
-        "ChatMessage",
-        "Document",
-        "DocumentVersion",
-        "GalleryImage",
-        "ModelEndpoint",
-    ):
-        setattr(db, name, MagicMock())
-    monkeypatch.setitem(sys.modules, "core", core_pkg)
-    monkeypatch.setitem(sys.modules, "core.models", models)
-    monkeypatch.setitem(sys.modules, "core.database", db)
-
-
 def test_upload_resolver_rejects_cross_owner_upload_ids(tmp_path):
     from src.upload_handler import UploadHandler
 
@@ -394,9 +358,6 @@ def test_build_user_content_skips_cross_owner_attachments(tmp_path):
 def test_chat_preprocess_does_not_surface_cross_owner_attachment(tmp_path, monkeypatch):
     import asyncio
     from types import SimpleNamespace
-    for mod_name in ("src.chat_handler", "routes.chat_helpers"):
-        sys.modules.pop(mod_name, None)
-    _stub_core_database_for_route_imports(monkeypatch)
     from src.chat_handler import ChatHandler
     from src.upload_handler import UploadHandler
     from src import settings
@@ -423,15 +384,11 @@ def test_chat_preprocess_does_not_surface_cross_owner_attachment(tmp_path, monke
 
     assert attachment_meta == []
     assert user_content == "hello"
-    for mod_name in ("src.chat_handler", "routes.chat_helpers"):
-        sys.modules.pop(mod_name, None)
 
 
 def test_document_upload_lookup_rejects_cross_owner_marker(tmp_path, monkeypatch):
     from src.upload_handler import UploadHandler
 
-    sys.modules.pop("routes.document_helpers", None)
-    _stub_core_database_for_route_imports(monkeypatch)
     from routes.document_helpers import _locate_upload
 
     upload_dir, _alice_id, bob_id = _make_upload_store(tmp_path)
@@ -439,7 +396,6 @@ def test_document_upload_lookup_rejects_cross_owner_marker(tmp_path, monkeypatch
 
     assert _locate_upload(str(upload_dir), bob_id, owner="alice", upload_handler=handler) is None
     assert _locate_upload(str(upload_dir), bob_id, owner="bob", upload_handler=handler).endswith(bob_id)
-    sys.modules.pop("routes.document_helpers", None)
 
 
 def test_find_source_upload_id_rejects_path_traversal_marker():
@@ -453,8 +409,6 @@ def test_pdf_marker_write_rejects_cross_owner_upload(tmp_path, monkeypatch):
     """Saving a doc whose front-matter points at another user's upload must 400."""
     from src.upload_handler import UploadHandler
 
-    sys.modules.pop("routes.document_helpers", None)
-    _stub_core_database_for_route_imports(monkeypatch)
     from fastapi import HTTPException
     from routes.document_helpers import _assert_pdf_marker_upload_owned
 
@@ -486,7 +440,6 @@ def test_pdf_marker_write_rejects_cross_owner_upload(tmp_path, monkeypatch):
     own_marker = f'<!-- pdf_source upload_id="{_alice_id}" -->\n\n# Notes\n'
     _assert_pdf_marker_upload_owned(_Req(), own_marker, "alice", handler)
 
-    sys.modules.pop("routes.document_helpers", None)
 
 
 def test_pdf_marker_render_lookup_denies_cross_owner_without_doc_leak(tmp_path):
@@ -860,22 +813,6 @@ def test_web_content_fetcher_blocks_dns_to_private(monkeypatch):
     assert content._public_http_url("https://example.test/path") is False
 
 
-def test_mcp_config_listing_is_admin_gated():
-    from routes import mcp_routes
-
-    src = Path(mcp_routes.__file__).read_text()
-    assert "def list_servers(request: Request):" in src
-    assert "def list_tools(request: Request):" in src
-    assert "def list_server_tools(server_id: str, request: Request):" in src
-
-
-# ── web_fetch SSRF guard (PR #111 merge gate) ───────────────────────
-# web_fetch routes every request through src.search.content's
-# _public_http_url / _get_public_url, the same SSRF-safe fetcher used by
-# web_search and deep research. These pin that the guard blocks every
-# private/internal address class plus redirect-into-private and non-http
-# schemes, so the new tool can't be turned into an SSRF primitive.
-
 import ipaddress as _ipaddr
 
 import pytest as _pytest
@@ -996,16 +933,6 @@ def test_attachment_extract_dir_normal_inputs_unchanged():
     assert aed("INBOX", "123") == base.resolve() / "INBOX_123"
 
 
-def test_diagnostics_routes_are_admin_gated():
-    """db/rag stats + test endpoints must require admin (they relied only on
-    the global session check before)."""
-    src = Path(__file__).resolve().parents[1] / "routes" / "diagnostics_routes.py"
-    text = src.read_text()
-    for handler in ("get_database_stats", "get_rag_stats", "test_youtube", "test_research"):
-        assert f"def {handler}(request: Request" in text, handler
-    assert text.count("require_admin(request)") >= 4
-
-
 def test_email_thread_rendering_sanitizes_body_html():
     """Both threaded render paths must run server-parsed body_html through the
     allowlist sanitizer (the flat path already did)."""
@@ -1014,26 +941,6 @@ def test_email_thread_rendering_sanitizes_body_html():
     # every `t.body_html` reference is wrapped by _sanitizeHtml(...)
     assert text.count("t.body_html") == text.count("_sanitizeHtml(t.body_html")
     assert "t.body_html" in text  # guard against the file being refactored away
-
-
-def test_session_html_export_escapes_name():
-    src = Path(__file__).resolve().parents[1] / "routes" / "session_routes.py"
-    text = src.read_text()
-    assert "safe_title = html.escape(session.name" in text
-    assert "<title>{session.name}" not in text
-    assert "<h1>{session.name}</h1>" not in text
-
-
-def test_mcp_oauth_page_escapes_reflected_values():
-    src = Path(__file__).resolve().parents[1] / "routes" / "mcp" / "mcp_routes.py"
-    text = src.read_text()
-    page = text.split("def _oauth_authorize_page(", 1)[1].split("def _oauth_result_page", 1)[0]
-    body = page.split("return f", 1)[0]
-    for var in ("auth_url", "server_id", "redirect_uri"):
-        assert f"{var} = html.escape({var}" in body, var
-    # The Host header is no longer reflected at all: the paste-back form posts to
-    # a relative action, so there is nothing to escape and nothing to smuggle.
-    assert "{host}" not in page
 
 
 def _import_mcp_routes():
@@ -1110,47 +1017,16 @@ def test_mcp_oauth_config_sanitizes_paths_and_env(tmp_path, monkeypatch):
     assert env["GMAIL_CREDENTIALS_PATH"] == cfg["token_file"]
 
 
-def test_gmail_mcp_preset_uses_contained_oauth_paths():
-    # The Gmail MCP preset lived in admin.js's MCP form, whose markup was
-    # removed (MCP servers are managed under Settings > Connections). The
-    # guarantee that matters is that no shipped UI points Gmail's OAuth files
-    # outside the contained data directory again.
-    static = Path(__file__).resolve().parents[1] / "static"
-    for path in static.rglob("*.js"):
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        assert "~/.gmail-mcp" not in text, path
-
-
-
-# -- export/gallery filename hardening ----------------------------------------
-
-def _drop_route_module_cache(dotted_name):
-    """Evict a cached route module from both sys.modules and the parent package
-    attribute. The next import then re-binds against the live core.database
-    instead of reusing a stale (possibly stub-polluted) module object — Python
-    can reach a module via either path, so both must be cleared."""
-    sys.modules.pop(dotted_name, None)
-    pkg_name, _, attr = dotted_name.rpartition(".")
-    pkg = sys.modules.get(pkg_name)
-    if pkg is not None and hasattr(pkg, attr):
-        delattr(pkg, attr)
-
-
 def _import_session_routes_for_filename():
-    # Only the pure _sanitize_export_filename helper is exercised here, so import
-    # against the REAL core.database. Importing under a stub Session class would
-    # leak a stub-bound DbSession into the cached module and break later tests
-    # that reuse routes.session_routes (e.g. the archived-sessions filter).
-    _drop_route_module_cache("routes.session_routes")
-    return importlib.import_module("routes.session_routes")
+    import routes.session_routes
+
+    return routes.session_routes
 
 
 def _import_gallery_routes_for_filename():
-    # Same rationale as the session route helper: import _sanitize_gallery_filename
-    # against the real core.database and leave a clean, real module cached.
-    _drop_route_module_cache("routes.gallery.gallery_routes")
-    _drop_route_module_cache("routes.gallery.gallery_helpers")
-    return importlib.import_module("routes.gallery.gallery_routes")
+    from routes.gallery import gallery_routes
+
+    return gallery_routes
 
 
 def test_export_filename_sanitizer_blocks_header_and_path_chars():
@@ -1186,35 +1062,6 @@ def test_gallery_replace_filename_sanitizer_falls_back_when_empty(monkeypatch):
     monkeypatch.setattr(mod.uuid, "uuid4", lambda: types.SimpleNamespace(hex="abcdef1234567890"))
 
     assert mod._sanitize_gallery_filename("../") == "abcdef123456"
-
-def test_chat_active_document_lookup_is_owner_scoped():
-    """The explicit `active_doc_id` path in /api/chat_stream must scope the
-    document lookup to the caller. Resolving by id alone let any user inject
-    another user's document into their own chat context (the session and
-    in-memory fallbacks also need the same owner gate because active document
-    state is process-global)."""
-    import re
-
-    src = Path(__file__).resolve().parents[1] / "routes" / "chat_routes.py"
-    text = src.read_text()
-    # The frontend-supplied id is resolved through the shared owner filter.
-    assert "_owner_session_filter(_doc_q, ctx.user)" in text
-    assert "_owner_session_filter(_session_doc_q, ctx.user)" in text
-    assert "_owner_session_filter(_mem_q, ctx.user)" in text
-    # And never by id alone (the previous IDOR shape, whitespace-insensitive).
-    flat = re.sub(r"\s+", " ", text)
-    assert "filter( DBDocument.id == active_doc_id, ).first()" not in flat
-    assert "filter(DBDocument.id == active_doc_id).first()" not in flat
-    assert "filter(DBDocument.id == _mem_id).first()" not in flat
-
-
-# ── research report HTML sanitization (visual report stored XSS) ──
-#
-# `src.visual_report._md_to_html` renders the deep-research report, whose
-# markdown is built from LLM output over crawled web pages (untrusted content).
-# python-markdown passes raw HTML through verbatim, and report pages are served
-# under a relaxed `script-src 'unsafe-inline'` CSP, so any markup surviving into
-# the report would execute in the app origin. The render must allowlist-sanitize.
 
 @pytest.mark.parametrize("payload", [
     "<script>alert(document.domain)</script>",
@@ -1497,50 +1344,3 @@ def test_dns_rebinding_redirect_re_resolves_per_hop(monkeypatch):
     assert "non-public" in str(exc.value).lower()
     # Both hops were validated.
     assert seen == ["http://public.example/start", "http://private.example/secret"], seen
-
-
-def test_dns_rebinding_transport_uses_public_apis(monkeypatch):
-    """Static guard: ``_PinnedTransport`` must use only the public
-    ``httpx.BaseTransport`` / ``httpcore`` APIs. No subclassing of
-    ``httpx.HTTPTransport`` (whose ``_pool`` slot we'd have to
-    overwrite), no reads of private ``httpcore.ConnectionPool``
-    attributes, and no imports from ``httpx._transports``.
-    """
-    from src.search import content
-
-    import inspect
-
-    # 1) Subclass check: must be BaseTransport, not HTTPTransport.
-    mro_names = [c.__name__ for c in content._PinnedTransport.__mro__]
-    assert "BaseTransport" in mro_names, mro_names
-    assert "HTTPTransport" not in mro_names, (
-        "_PinnedTransport subclasses httpx.HTTPTransport. Subclass "
-        "httpx.BaseTransport instead and build the pool from scratch "
-        "with the public httpcore.ConnectionPool API."
-    )
-
-    # 2) No reads of private httpcore.ConnectionPool attrs.
-    src = inspect.getsource(content._PinnedTransport)
-    forbidden = (
-        "_ssl_context",
-        "_max_connections",
-        "_max_keepalive_connections",
-        "_keepalive_expiry",
-        "_http1",
-        "_http2",
-        "_network_backend",
-    )
-    leaked = [name for name in forbidden if name in src]
-    assert not leaked, (
-        f"_PinnedTransport reads private httpcore.ConnectionPool attrs: {leaked}. "
-        "Build the pool from the public httpcore.ConnectionPool API instead."
-    )
-
-    # 3) No imports from httpx's private transport module.
-    module_src = inspect.getsource(content)
-    forbidden_imports = ("from httpx._transports", "import httpx._transports")
-    leaked_imports = [s for s in forbidden_imports if s in module_src]
-    assert not leaked_imports, (
-        f"content.py imports from httpx's private transport module: {leaked_imports}. "
-        "Use only the public httpx and httpcore APIs."
-    )

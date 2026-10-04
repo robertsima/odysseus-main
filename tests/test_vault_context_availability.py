@@ -110,14 +110,6 @@ def test_one_directory_failing_does_not_stop_the_others(tmp_path):
     assert result["reindexed"] == [str(good)]
 
 
-def test_startup_runs_the_check():
-    import inspect
-
-    from src import app_initializer
-
-    assert "reindex_if_empty()" in inspect.getsource(app_initializer)
-
-
 def test_search_documents_is_always_available():
     """Reachable on any turn, like memory — not only after a literal phrase
     such as "my notes" or "obsidian"."""
@@ -133,16 +125,6 @@ def test_low_signal_turns_still_offer_the_vault():
     ti.retrieve = lambda query, k=8: []
     assert "search_documents" in ti.get_tools_for_query("i like Umni", use_embeddings=False)
     assert ALWAYS_AVAILABLE <= ti.get_tools_for_query("anything", use_embeddings=False)
-
-
-def test_chat_processor_resolves_a_missing_rag_manager_lazily():
-    import inspect
-
-    from src.chat_processor import ChatProcessor
-
-    src = inspect.getsource(ChatProcessor)
-    assert "rag_manager is None" in src
-    assert "get_rag_manager()" in src
 
 
 def test_the_ui_defaults_document_retrieval_on():

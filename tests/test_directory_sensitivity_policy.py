@@ -25,8 +25,6 @@ Hermetic: settings are faked, Chroma is a fake collection.
 import json
 import os
 
-os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
-
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient

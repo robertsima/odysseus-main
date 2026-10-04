@@ -5,8 +5,6 @@ caller that still sends ``approve`` meaning "once" has to say so explicitly or
 it silently inherits a run-long gate bypass.
 """
 
-from pathlib import Path
-
 from src.tool_approval_scopes import ToolApprovalScope
 from src.tool_approvals import ToolApprovalStore
 from src.tool_capabilities import ToolRunSecurityContext, capabilities_for_action
@@ -78,12 +76,3 @@ def test_deny_is_unaffected_by_the_single_action_flag():
         allow_continuation=False,
     ) is None
     assert store.peek(pending.approval_id) is None
-
-
-def test_skill_test_approval_route_opts_out_of_continuation():
-    root = Path(__file__).resolve().parents[1]
-    skills = (root / "routes/skills_routes.py").read_text(encoding="utf-8")
-
-    approve_call = skills.index("exact_approval = tool_approval_store.consume(")
-    end = skills.index(")", skills.index("allow_continuation", approve_call))
-    assert "allow_continuation=False" in skills[approve_call:end]
