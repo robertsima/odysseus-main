@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from fastapi import HTTPException
+from fastapi import APIRouter, HTTPException
 
 from routes.mcp import mcp_routes
 
@@ -51,6 +51,9 @@ def _update_server(monkeypatch, row):
     manager = MagicMock()
     manager.restart_server = AsyncMock(return_value=True)
     manager.get_server_status = MagicMock(return_value={"status": "connected", "tool_count": 3})
+    # setup_mcp_routes adds its routes to the module-level router that app.py
+    # includes; an empty one keeps this test's fake manager out of it.
+    monkeypatch.setattr(mcp_routes, "router", APIRouter(prefix="/api/mcp", tags=["mcp"]))
     router = mcp_routes.setup_mcp_routes(manager)
     route = [r for r in router.routes if getattr(r, "name", None) == "update_server"][-1]
     return route.endpoint, manager, db
