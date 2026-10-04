@@ -180,7 +180,9 @@ jobs:
       # ubuntu-latest ships google-chrome, which Playwright drives with
       # channel="chrome". ODYSSEUS_REQUIRE_BROWSER turns a missing browser
       # into a failure here instead of a run where every test skips.
-      - run: python -m pytest -q -n 2 -m "browser and not nightly" -rfEs --durations=15
+      # loadgroup keeps the tests that share one real app (xdist_group
+      # "live_app") on one worker, so only one app starts.
+      - run: python -m pytest -q -n 2 --dist loadgroup -m "browser and not nightly" -rfEs --durations=15
         env:
           ODYSSEUS_REQUIRE_BROWSER: "1"
           ODYSSEUS_BROWSER_ARTIFACTS: ${{ runner.temp }}/browser-failures
