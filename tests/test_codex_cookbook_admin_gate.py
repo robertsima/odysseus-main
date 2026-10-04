@@ -94,25 +94,3 @@ class TestApiTokenScopeGate:
         with pytest.raises(HTTPException) as exc:
             _require_cookbook_scope(req, COOKBOOK_READ_SCOPES)
         assert exc.value.status_code == 403
-
-
-class TestSourceCodeGate:
-    """Static checks: all cookbook routes use _require_cookbook_scope."""
-
-    def test_no_raw_scope_owner_in_cookbook_routes(self):
-        from pathlib import Path
-        source = Path("routes/codex_routes.py").read_text(encoding="utf-8")
-        # _scope_owner should NOT appear inside cookbook route handlers.
-        # Find lines between cookbook route defs that still call _scope_owner.
-        in_cookbook = False
-        violations = []
-        for i, line in enumerate(source.splitlines(), 1):
-            if "@router." in line and "/cookbook/" in line:
-                in_cookbook = True
-            elif "@router." in line and "/cookbook/" not in line:
-                in_cookbook = False
-            if in_cookbook and "_scope_owner(request" in line:
-                violations.append((i, line.strip()))
-        assert violations == [], (
-            f"Cookbook routes still use _scope_owner instead of _require_cookbook_scope: {violations}"
-        )

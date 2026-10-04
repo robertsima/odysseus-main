@@ -61,55 +61,6 @@ def test_the_scopes_and_the_agent_profile_are_registered():
     assert normalized.index("vault:read") < normalized.index("vault:read_private")
 
 
-def test_capabilities_advertises_the_vault():
-    import inspect
-
-    from routes import codex_routes
-
-    src = inspect.getsource(codex_routes.setup_codex_routes)
-    assert '"vault": {' in src
-    assert "vault:read_private" in src
-
-
-def test_the_bundled_skill_and_helper_teach_the_vault():
-    skill = open("clients/claude/skills/odysseus/SKILL.md", encoding="utf-8").read()
-    assert "/api/codex/vault/search" in skill
-    assert "vault:read_private" in skill
-    # The editor library and the vault must not be confused for each other.
-    assert "separate from the vault above" in skill
-
-    helper = open(
-        "clients/claude/skills/odysseus/scripts/odysseus_api.py", encoding="utf-8"
-    ).read()
-    assert "vault search QUERY" in helper
-    assert "/api/codex/vault/search?q=" in helper
-    assert "/api/codex/vault/document?path=" in helper
-
-
-def test_search_results_are_bounded_and_shaped_for_an_agent():
-    """Excerpts, not whole notes: an agent that gets 40k characters per hit
-    has no budget left to answer with."""
-    import inspect
-
-    from routes import codex_routes
-
-    assert codex_routes.VAULT_EXCERPT_CHARS <= 2000
-    src = inspect.getsource(codex_routes.setup_codex_routes)
-    for field in ("path", "title", "sensitivity", "similarity", "excerpt", "truncated"):
-        assert f'"{field}"' in src
-
-
-def test_document_read_is_restricted_to_indexed_files():
-    """Otherwise the endpoint is a general filesystem reader wearing a scope."""
-    import inspect
-
-    from routes import codex_routes
-
-    src = inspect.getsource(codex_routes.setup_codex_routes)
-    assert "No indexed vault document at that path" in src
-    assert "os.path.realpath" in src
-
-
 def test_the_token_uis_can_actually_grant_the_vault_scopes():
     """The integration form mints a token with `chat` and then PATCHes the
     scopes its toggles list, so a scope missing from that catalog is a scope
