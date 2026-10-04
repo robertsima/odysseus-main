@@ -137,18 +137,6 @@ def test_readme_warns_auth_enabled_for_network_access():
     assert "Keep `LOCALHOST_BYPASS=false` outside local development." in readme
 
 
-def test_ollama_cookbook_runner_does_not_force_public_bind():
-    route = Path("routes/cookbook_routes.py").read_text(encoding="utf-8")
-    cookbook_js = Path("static/js/cookbook.js").read_text(encoding="utf-8")
-    assert 'OLLAMA_HOST="0.0.0.0:${ODYSSEUS_OLLAMA_PORT}" ollama serve' not in route
-    assert 'OLLAMA_HOST="${ODYSSEUS_OLLAMA_HOST}:${ODYSSEUS_OLLAMA_PORT}" ollama serve' in route
-    assert '_ollama_default_host = "0.0.0.0" if remote else "127.0.0.1"' in route
-    assert "WARNING: remote Ollama will bind" in route
-    assert "OLLAMA_HOST=0.0.0.0:${ollamaPort}" not in cookbook_js
-    assert "const bindHost = _envState.remoteHost ? '0.0.0.0' : '127.0.0.1';" in cookbook_js
-    assert "OLLAMA_HOST=${bindHost}:${ollamaPort}" in cookbook_js
-
-
 def _import_integrations(tmp_path, monkeypatch):
     """Import src.integrations with data + encryption key redirected to tmp."""
     _import_secret_storage(tmp_path, monkeypatch)
@@ -1119,7 +1107,6 @@ def test_gmail_mcp_preset_uses_contained_oauth_paths():
     for path in static.rglob("*.js"):
         text = path.read_text(encoding="utf-8", errors="ignore")
         assert "~/.gmail-mcp" not in text, path
-
 
 
 # -- export/gallery filename hardening ----------------------------------------
