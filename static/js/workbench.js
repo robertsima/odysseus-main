@@ -374,6 +374,25 @@ async function refreshAgentRuns({ force = false } = {}) {
       }
       state.agentRuns = next;
       state.agentRunsAt = Date.now();
+      // An SSE run_started can outlive its run_finished event (tab sleeps,
+      // reconnect, or bounded server history). The successful poll is the
+      // authority: never keep a previously seen child "running" indefinitely.
+      for (const known of state.runs.values()) {
+        const row = next.get(known.run_id);
+        if (row) {
+          known.status = row.status;
+          known.finished_at = row.finished_at;
+          known.data = { ...(known.data || {}), ...(row.summary || {}) };
+        } else if (isLive(known.status) &&
+                   (known.session_id === sid || state.chatCards.has(known.run_id)) &&
+                   Date.now() / 1000 - (known.started_at || 0) > 2) {
+          known.status = 'interrupted';
+          known.finished_at = Date.now() / 1000;
+        }
+        if (state.chatCards.has(known.run_id)) updateChatCard({
+          run_id: known.run_id, source: known.source, session_id: state.sessionId, kind: 'restore',
+        });
+      }
       // A run first seen through a message on this chat's feed ("→ worker …")
       // was titled by that message; the server's title names the run itself.
       for (const row of next.values()) {
@@ -416,8 +435,8 @@ function stripRuns() {
       progress: row.progress || null,
     });
   }
-  // A run the browser has seen live but the server has not listed yet (the
-  // launch event arrives before the next poll) still belongs on the strip.
+  // A run the browser has seen live but the server has not listed yet still
+  // belongs on the strip until a successful server poll reconciles it.
   for (const run of state.runs.values()) {
     if (run.source === 'odysseus') continue;
     if (run.session_id !== state.sessionId && !rows.has(run.run_id)) continue;

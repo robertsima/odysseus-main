@@ -339,7 +339,7 @@ def test_fleet_lists_top_level_agents_and_keeps_live_workers_visible():
     tree = AGENTS.split("function treeHtml(", 1)[1].split("function fleetHtml()", 1)[0]
     assert "isLiveAgent(node) || node.session_id === state.selected" in tree
     assert "open ? workers : workers.filter(pinned)" in tree
-    assert "finished worker" in AGENTS
+    assert "inactive branch" in AGENTS
 
 
 def test_agent_mode_swaps_prompt_for_an_agents_menu():

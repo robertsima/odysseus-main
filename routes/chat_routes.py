@@ -2483,6 +2483,22 @@ def setup_chat_routes(
                 _agent_round_models = {1: _requested_model}
                 _agent_round_endpoint_ids = {1: _agent_actual_endpoint_id}
                 _agent_round_endpoint_labels = {1: _agent_actual_endpoint_label}
+                # Monotonic wall time for each agent round, including tool waits.
+                # Only completed rounds are recorded; old messages have no
+                # timing metadata and must not acquire a guessed duration.
+                _round_started = time.monotonic()
+                _timed_round = 1
+                _round_durations = {}
+
+                def _finish_round(next_round=None):
+                    nonlocal _round_started, _timed_round
+                    duration = round(max(0, time.monotonic() - _round_started), 2)
+                    _round_durations[_timed_round] = duration
+                    ended = {"type": "round_complete", "round": _timed_round, "duration_s": duration}
+                    if next_round is not None:
+                        _timed_round = next_round
+                        _round_started = time.monotonic()
+                    return f'data: {json.dumps(ended)}\n\n'
                 # The round the reply was last split at by a steer (1 = never).
                 # What is saved at the end is only what came after it.
                 _last_split_round = 1
@@ -2597,6 +2613,8 @@ def setup_chat_routes(
                                         from src.agent_control import STEER_SPLIT_NO_TEXT
                                         _split_round = int(data.get("round") or 0)
                                         if _split_round > _last_split_round:
+                                            if _split_round > _timed_round:
+                                                yield _finish_round(_split_round)
                                             _split_texts, _split_events = _trail.take_before(_split_round)
                                             if full_response.strip() or _split_events:
                                                 _split_range = range(1, _split_round)
@@ -2611,6 +2629,7 @@ def setup_chat_routes(
                                                     "round_models": [_agent_round_models.get(i, _actual_model or _requested_model) for i in _split_range],
                                                     "round_endpoint_ids": [_agent_round_endpoint_ids.get(i) for i in _split_range],
                                                     "round_endpoint_labels": [_agent_round_endpoint_labels.get(i) for i in _split_range],
+                                                    "round_durations_s": [_round_durations.get(i) for i in _split_range],
                                                 }
                                                 if _split_events:
                                                     _split_md["tool_events"] = _split_events
@@ -2660,12 +2679,15 @@ def setup_chat_routes(
                                     "intent_nudge_exhausted",
                                     "ask_user",
                                     "plan_update",
+                                    "round_complete",
                                 ):
                                     _trail.event(data)
                                     if data.get("type") in ("agent_step", "tool_start", "tool_output"):
                                         _text_segment_break = True
                                     if data.get("type") == "agent_step":
                                         _event_round = data.get("round", 1)
+                                        if isinstance(_event_round, int) and _event_round > _timed_round:
+                                            yield _finish_round(_event_round)
                                         _agent_rounds = max(_agent_rounds, _event_round)
                                         _agent_round_models.setdefault(
                                             _event_round,
@@ -2713,6 +2735,10 @@ def setup_chat_routes(
                                     yield f'data: {json.dumps(data)}\n\n'
                                 elif data.get("type") == "agent_terminal":
                                     terminal_metadata = dict(data.get("data") or {})
+                                    yield _finish_round()
+                                    terminal_metadata["round_durations_s"] = [
+                                        _round_durations.get(i) for i in range(1, max(_round_durations) + 1)
+                                    ]
                                     from src.agent_control import metrics_after_split
                                     terminal_metadata = metrics_after_split(terminal_metadata, _last_split_round)
                                     last_metrics = terminal_metadata
@@ -2756,6 +2782,12 @@ def setup_chat_routes(
                                     yield chunk
                                 elif data.get("type") == "metrics":
                                     last_metrics = data.get("data", {})
+                                    # Metrics arrive after the last round's tool
+                                    # and text output, before the DONE frame.
+                                    yield _finish_round()
+                                    last_metrics["round_durations_s"] = [
+                                        _round_durations.get(i) for i in range(1, max(_round_durations) + 1)
+                                    ]
                                     last_metrics["context_composition"] = ctx.context_diagnostics
                                     _reported_model = last_metrics.get("model")
                                     last_metrics["requested_model"] = last_metrics.get("requested_model") or _requested_model
@@ -2857,6 +2889,7 @@ def setup_chat_routes(
                                         _agent_round_endpoint_labels.get(i)
                                         for i in range(1, max(_agent_round_models, default=1) + 1)
                                     ],
+                                    "round_durations_s": [_round_durations.get(i) for i in range(1, max(_round_durations, default=0) + 1)],
                                 },
                             )
                             if _trail_note:

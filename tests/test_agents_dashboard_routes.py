@@ -111,6 +111,27 @@ async def test_overview_includes_the_current_open_chat_without_agent_history(env
     assert out["rows"][0]["config"]["delegation_policy"] == "explicit"
 
 
+async def test_nested_worker_lifecycle_survives_run_expiry(env, monkeypatch):
+    mgr, eps = env
+    mgr.sessions.update({s.id: s for s in [_Sess('child', 'Child'), _Sess('grandchild', 'Grandchild'), _Sess('old', 'Old')]})
+    import core.database as db
+    parents = {'child': 'a1', 'grandchild': 'child', 'old': 'a1'}
+    monkeypatch.setattr(db, 'get_session_settings', lambda sid, **kw: {'parent_session': parents[sid]} if sid in parents else {})
+    # A running grandchild is visible with its ancestry, even when the
+    # intermediate child's run record has already expired.
+    with agent_runs.track_external('grandchild', source='session', owner='alice'):
+        out = await eps[('GET', '/api/agents/overview')](_req())
+        rows = {r['session_id']: r for r in out['rows']}
+        assert {'a1', 'child', 'grandchild', 'old'} <= rows.keys()
+        assert rows['grandchild']['status'] == 'running'
+        assert rows['child']['status'] != 'running'
+        assert rows['old']['status'] != 'running'
+        assert rows['grandchild']['parent_session'] == 'child'
+        assert rows['child']['children_running'] == 0
+    out = await eps[('GET', '/api/agents/overview')](_req(), current_session='a1')
+    assert {r['session_id']: r['status'] for r in out['rows']}['grandchild'] != 'running'
+
+
 async def test_a_chat_that_ended_on_a_need_is_listed_as_needing_the_user(env, monkeypatch):
     # It used to read "Finished" while its hand-back said "Needs user: ...".
     _mgr, eps = env

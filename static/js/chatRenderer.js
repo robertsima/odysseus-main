@@ -13,6 +13,7 @@ import { bindMenuDismiss } from './escMenuStack.js';
 import { loadPanel } from './panels.js';
 import { matchModelKey } from './model/matchKey.js';
 import agentThread from './agentThread.js?v=20260928subagentui1';
+import { showRoundDuration } from './roundTiming.js';
 import { isCardOpen, setCardOpen } from './cardState.js?v=20260928subagentui1';
 
 // A worker's result handed back to this chat is a long "[Worker X finished]
@@ -2802,6 +2803,7 @@ export function addMessage(role, content, modelName, metadata) {
           applyModelColor(roleEl, contModel);
           if (r === 0) roleEl.appendChild(roleTimestamp(metadata?.timestamp));
           wrap.appendChild(roleEl);
+          showRoundDuration(wrap, metadata.round_durations_s?.[r]);
           const body = document.createElement('div');
           body.className = 'body';
           // Check if this is the last text round — sources go on top of final response
@@ -2880,6 +2882,7 @@ export function addMessage(role, content, modelName, metadata) {
           const nextTxt = (roundTexts[r + 1] || '').trim();
           if (nextTxt) threadWrap.classList.add('has-bottom');
           agentThread.refreshThread(threadWrap);
+          if (!txt) showRoundDuration(threadWrap, metadata.round_durations_s?.[r]);
           lastWrap = threadWrap;
 
           for (const ev of roundTools) {
@@ -3096,6 +3099,7 @@ export function addMessage(role, content, modelName, metadata) {
     }
 
     wrap.appendChild(r);
+    if (role === 'assistant') showRoundDuration(wrap, metadata?.round_durations_s?.[0]);
     wrap.appendChild(b);
     if (isWorkerMsg) _makeWorkerResultCollapsible(wrap, r, textRaw, metadata);
 

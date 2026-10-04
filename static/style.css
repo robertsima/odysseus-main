@@ -42632,6 +42632,7 @@ body.ag-split-resizing { cursor: col-resize !important; user-select: none !impor
 .ag-card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 7px; }
 .ag-fleet-compact .ag-card-grid { grid-template-columns: minmax(0, 1fr); gap: 5px; }
 .ag-card-workers { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 5px; margin: -2px 0 3px 12px; padding-left: 9px; border-left: 2px solid var(--wb-line); }
+.ag-card-workers[hidden] { display: none; }
 .ag-fleet-compact .ag-card-workers { grid-template-columns: minmax(0, 1fr); }
 .ag-workers-toggle { align-self: flex-start; margin-top: 3px; padding: 1px 6px; border: 1px solid var(--wb-line); border-radius: 999px; background: none; color: var(--wb-muted); font: inherit; font-size: 10px; cursor: pointer; }
 .ag-workers-toggle:hover, .ag-workers-toggle[aria-expanded="true"] { color: var(--wb-accent); border-color: var(--wb-accent); }
@@ -43648,3 +43649,7 @@ details.admin-ep-advanced[open] > summary { opacity: 0.8; }
   .pa-row { flex-wrap: wrap; }
   .pa-meta { flex-basis: 100%; }
 }
+
+/* Agent round wall time, visible after delivery in both chat themes. */
+.agent-round-duration{display:inline-flex;align-items:center;margin-inline-start:8px;padding:2px 7px;border:1px solid currentColor;border-radius:999px;font-size:11px;font-weight:600;opacity:.8;white-space:nowrap;vertical-align:middle}
+.agent-thread>.agent-round-duration{margin:6px 8px;color:var(--text-secondary,var(--fg));}
