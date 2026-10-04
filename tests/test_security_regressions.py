@@ -1017,33 +1017,16 @@ def test_mcp_oauth_config_sanitizes_paths_and_env(tmp_path, monkeypatch):
     assert env["GMAIL_CREDENTIALS_PATH"] == cfg["token_file"]
 
 
-def _drop_route_module_cache(dotted_name):
-    """Evict a cached route module from both sys.modules and the parent package
-    attribute. The next import then re-binds against the live core.database
-    instead of reusing a stale (possibly stub-polluted) module object — Python
-    can reach a module via either path, so both must be cleared."""
-    sys.modules.pop(dotted_name, None)
-    pkg_name, _, attr = dotted_name.rpartition(".")
-    pkg = sys.modules.get(pkg_name)
-    if pkg is not None and hasattr(pkg, attr):
-        delattr(pkg, attr)
-
-
 def _import_session_routes_for_filename():
-    # Only the pure _sanitize_export_filename helper is exercised here, so import
-    # against the REAL core.database. Importing under a stub Session class would
-    # leak a stub-bound DbSession into the cached module and break later tests
-    # that reuse routes.session_routes (e.g. the archived-sessions filter).
-    _drop_route_module_cache("routes.session_routes")
-    return importlib.import_module("routes.session_routes")
+    import routes.session_routes
+
+    return routes.session_routes
 
 
 def _import_gallery_routes_for_filename():
-    # Same rationale as the session route helper: import _sanitize_gallery_filename
-    # against the real core.database and leave a clean, real module cached.
-    _drop_route_module_cache("routes.gallery.gallery_routes")
-    _drop_route_module_cache("routes.gallery.gallery_helpers")
-    return importlib.import_module("routes.gallery.gallery_routes")
+    from routes.gallery import gallery_routes
+
+    return gallery_routes
 
 
 def test_export_filename_sanitizer_blocks_header_and_path_chars():
