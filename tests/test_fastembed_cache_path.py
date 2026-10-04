@@ -15,55 +15,45 @@ default, while an explicit non-empty override is still honoured.
 
 from __future__ import annotations
 
-import importlib
+import importlib.util
 import os
-
-import src.constants as constants
 
 
 def _reload_with(monkeypatch, value):
-    """Reload src.constants with FASTEMBED_CACHE_PATH set to ``value`` (or
-    removed when ``value`` is None) and return the reloaded module."""
+    """src.constants imported with FASTEMBED_CACHE_PATH set to ``value`` (or
+    removed when ``value`` is None).
+
+    The module runs again as a separate object that never enters
+    sys.modules: reloading the real one would rebind DATA_DIR and every path
+    under the modules that imported them.
+    """
     if value is None:
         monkeypatch.delenv("FASTEMBED_CACHE_PATH", raising=False)
     else:
         monkeypatch.setenv("FASTEMBED_CACHE_PATH", value)
-    return importlib.reload(constants)
-
-
-def _restore(monkeypatch):
-    """Return the module to its env-default state so reloading it here does
-    not leak a test-specific FASTEMBED_CACHE_DIR into other tests."""
-    monkeypatch.delenv("FASTEMBED_CACHE_PATH", raising=False)
-    importlib.reload(constants)
+    spec = importlib.util.find_spec("src.constants")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_empty_fastembed_cache_path_falls_back_to_default(monkeypatch):
     """The bug: an empty FASTEMBED_CACHE_PATH (exactly what Docker injects)
     must fall back to the DATA_DIR default, never the empty string."""
-    try:
-        mod = _reload_with(monkeypatch, "")
-        assert mod.FASTEMBED_CACHE_DIR, "empty env must not yield an empty path"
-        assert mod.FASTEMBED_CACHE_DIR == os.path.join(mod.DATA_DIR, "fastembed_cache")
-    finally:
-        _restore(monkeypatch)
+    mod = _reload_with(monkeypatch, "")
+    assert mod.FASTEMBED_CACHE_DIR, "empty env must not yield an empty path"
+    assert mod.FASTEMBED_CACHE_DIR == os.path.join(mod.DATA_DIR, "fastembed_cache")
 
 
 def test_unset_fastembed_cache_path_uses_default(monkeypatch):
     """Sanity: an absent variable also resolves to the default."""
-    try:
-        mod = _reload_with(monkeypatch, None)
-        assert mod.FASTEMBED_CACHE_DIR == os.path.join(mod.DATA_DIR, "fastembed_cache")
-    finally:
-        _restore(monkeypatch)
+    mod = _reload_with(monkeypatch, None)
+    assert mod.FASTEMBED_CACHE_DIR == os.path.join(mod.DATA_DIR, "fastembed_cache")
 
 
 def test_explicit_fastembed_cache_path_is_respected(monkeypatch):
     """A real explicit override must still win — the fix only changes the
     empty-value handling, not the documented FASTEMBED_CACHE_PATH override."""
     custom = os.path.join("custom", "fastembed-cache")
-    try:
-        mod = _reload_with(monkeypatch, custom)
-        assert mod.FASTEMBED_CACHE_DIR == custom
-    finally:
-        _restore(monkeypatch)
+    mod = _reload_with(monkeypatch, custom)
+    assert mod.FASTEMBED_CACHE_DIR == custom
