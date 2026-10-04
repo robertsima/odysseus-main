@@ -325,6 +325,9 @@ def metrics_after_split(metrics: Optional[dict], split_round: int) -> dict:
     if md.get("round_texts"):
         md["round_texts"] = [("" if i + 1 < split_round else t)
                              for i, t in enumerate(md["round_texts"])]
+    if md.get("round_durations_s"):
+        md["round_durations_s"] = [(None if i + 1 < split_round else t)
+                                     for i, t in enumerate(md["round_durations_s"])]
     return md
 
 

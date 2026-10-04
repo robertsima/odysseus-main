@@ -8,6 +8,7 @@ The on-disk format is SKILL.md (frontmatter + structured body) under
 """
 
 import asyncio
+import hashlib
 import logging
 import re
 from typing import List, Optional
@@ -1581,6 +1582,41 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
                 return sk
         raise HTTPException(404, "Skill not found")
 
+    @router.get("/{skill_id}/package")
+    async def list_skill_package(request: Request, skill_id: str):
+        user = _owner(request)
+        try:
+            return {"files": skills_manager.package_files(skill_id, owner=user)}
+        except FileNotFoundError:
+            raise HTTPException(404, "Skill not found")
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+
+    @router.get("/{skill_id}/package/file")
+    async def read_skill_package_file(request: Request, skill_id: str, path: str):
+        user = _owner(request)
+        try:
+            return skills_manager.package_file(skill_id, path, owner=user)
+        except (FileNotFoundError, UnicodeError):
+            raise HTTPException(404, "Resource unavailable")
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+
+    @router.put("/{skill_id}/package/file")
+    async def write_skill_package_file(request: Request, skill_id: str, path: str):
+        user = _owner(request)
+        body = await request.json()
+        if not isinstance(body, dict) or not isinstance(body.get("version"), str):
+            raise HTTPException(400, "Resource version is required")
+        try:
+            return skills_manager.save_package_file(skill_id, path, body.get("content"), body["version"], owner=user)
+        except FileNotFoundError:
+            raise HTTPException(404, "Skill or resource not found")
+        except FileExistsError as exc:
+            raise HTTPException(409, str(exc))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+
     @router.get("/{skill_id}/markdown")
     async def get_skill_markdown(request: Request, skill_id: str):
         """Return the raw SKILL.md text — used by the slash-invocation flow
@@ -1594,7 +1630,39 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         md = skills_manager.read_skill_md(match.get("name"), owner=user)
         if md is None:
             raise HTTPException(404, "Skill source unavailable (legacy entry?)")
-        return {"name": match.get("name"), "markdown": md}
+        return {"name": match.get("name"), "markdown": md,
+                "version": hashlib.sha256(md.encode('utf-8')).hexdigest()}
+
+    @router.put("/{skill_id}/links")
+    async def save_skill_links(request: Request, skill_id: str):
+        user = _owner(request)
+        match = next((s for s in skills_manager.load(owner=user) if s.get('name') == skill_id), None)
+        if not match:
+            raise HTTPException(404, "Skill not found")
+        _verify_owner(match, user)
+        body = await request.json()
+        if not isinstance(body, dict) or not isinstance(body.get('version'), str):
+            raise HTTPException(400, "SKILL.md version is required")
+        current = skills_manager.read_skill_md(skill_id, owner=user)
+        if current is None:
+            raise HTTPException(404, "Skill source unavailable")
+        if hashlib.sha256(current.encode('utf-8')).hexdigest() != body['version']:
+            raise HTTPException(409, "SKILL.md changed; reload before saving links")
+        related_skills = body.get('related_skills')
+        related_scripts = body.get('related_scripts')
+        try:
+            skills_manager.validate_skill_links(skill_id, related_skills, related_scripts, user,
+                                                existing_skills=match.get('related_skills') or (),
+                                                existing_scripts=match.get('related_scripts') or ())
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        if not skills_manager.update_skill(skill_id, {
+            'related_skills': related_skills, 'related_scripts': related_scripts,
+        }, owner=user):
+            raise HTTPException(404, "Skill not found")
+        md = skills_manager.read_skill_md(skill_id, owner=user)
+        return {'related_skills': related_skills, 'related_scripts': related_scripts,
+                'markdown': md, 'version': hashlib.sha256(md.encode('utf-8')).hexdigest()}
 
     @router.post("/{skill_id}/test")
     async def test_skill(request: Request, skill_id: str):
@@ -1927,6 +1995,8 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         from services.memory.skill_format import Skill
         user = _owner(request)
         body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(400, "markdown is required")
         new_content = body.get("markdown")
         if not isinstance(new_content, str) or not new_content.strip():
             raise HTTPException(400, "markdown is required")
@@ -1935,6 +2005,11 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         if not match:
             raise HTTPException(404, "Skill not found")
         _verify_owner(match, user)
+        current = skills_manager.read_skill_md(match.get('name'), owner=user)
+        if current is None:
+            raise HTTPException(404, "Skill source unavailable")
+        if 'version' in body and body['version'] != hashlib.sha256(current.encode('utf-8')).hexdigest():
+            raise HTTPException(409, "SKILL.md changed; reload before saving")
         try:
             sk = Skill.from_markdown(new_content)
         except Exception as e:
@@ -1943,8 +2018,14 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         # the skill dir (update_skill) and orphan the original id, so a later
         # delete 404s (#1333). Pin to the stored name, like _apply_skill_md.
         sk.name = match.get("name")
-        if not sk.owner:
-            sk.owner = match.get("owner") or user
+        sk.owner = match.get('owner') or user
+        sk.source = match.get('source')
+        try:
+            skills_manager.validate_skill_links(sk.name, sk.related_skills, sk.related_scripts, user,
+                                                existing_skills=match.get('related_skills') or (),
+                                                existing_scripts=match.get('related_scripts') or ())
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
         ok = skills_manager.update_skill(match.get("name"), {
             "name": sk.name,
             "description": sk.description,
@@ -1964,6 +2045,8 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
             "pitfalls": sk.pitfalls,
             "verification": sk.verification,
             "body_extra": sk.body_extra,
+            "related_skills": sk.related_skills,
+            "related_scripts": sk.related_scripts,
         }, owner=user)
         if not ok:
             raise HTTPException(500, "Update failed")

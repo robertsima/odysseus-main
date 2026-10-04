@@ -50,7 +50,8 @@ logger = logging.getLogger(__name__)
 
 _RECENT_S = 24 * 3600
 
-_ACTIVITY_TO_RUN_STATUS = {"running": "running", "completed": "done", "done": "done", "failed": "error",
+_ACTIVITY_TO_RUN_STATUS = {"running": "running", "waiting_approval": "waiting_approval",
+                           "completed": "done", "done": "done", "failed": "error",
                            "error": "error", "blocked": "error", "cancelled": "stopped", "stopped": "stopped"}
 
 
@@ -249,7 +250,7 @@ def setup_agents_routes(session_manager) -> APIRouter:
             if rec.get("source") == "odysseus":
                 continue
             fin = rec.get("finished_at")
-            if rec.get("status") != "running" and (not fin or now - fin > _RECENT_S):
+            if rec.get("status") not in ("running", "waiting_approval") and (not fin or now - fin > _RECENT_S):
                 continue
             if sid in owned:
                 by_session.setdefault(sid, []).append(rec)
@@ -281,6 +282,19 @@ def setup_agents_routes(session_manager) -> APIRouter:
             visible_ids.update(owned)
         if current_session in owned:
             visible_ids.add(current_session)
+        # The activity registry is short-lived; lineage in session settings is
+        # durable. Keep the ancestry of live workers and their historical
+        # descendants together, including grandchildren after runs expire.
+        from core.database import get_session_settings
+        settings_by_id = {sid: get_session_settings(sid) or {} for sid in owned}
+        parents = {sid: settings.get('parent_session') for sid, settings in settings_by_id.items()}
+        changed = True
+        while changed:
+            before = len(visible_ids)
+            visible_ids.update(parent for sid in tuple(visible_ids)
+                               if (parent := parents.get(sid)) in owned and parent != sid)
+            visible_ids.update(sid for sid, parent in parents.items() if parent in visible_ids and parent != sid)
+            changed = len(visible_ids) != before
         crew_roles = _crew_roles(visible_ids & set(owned))
         for sid in visible_ids:
             sess = owned.get(sid)
@@ -291,7 +305,7 @@ def setup_agents_routes(session_manager) -> APIRouter:
             live_children = [c for c in children if c.get("status") == "running"]
             if pending.get(sid):
                 status = "waiting_approval"
-            elif run.get("status") == "running" or live_children:
+            elif run.get("status") == "running":
                 status = "running"
             elif run.get("status") in ("done", "error", "stopped"):
                 status = {"done": "finished", "error": "failed", "stopped": "stopped"}[run["status"]]
@@ -300,7 +314,7 @@ def setup_agents_routes(session_manager) -> APIRouter:
             events = activity.history(sid, limit=12)
             latest = next((e for e in reversed(events)
                            if e.get("kind") in ("tool_start", "tool_result", "message", "status", "run_started")), None)
-            settings = get_session_settings(sid)
+            settings = settings_by_id[sid]
             # A turn that ended on `Needs user:` lines is waiting on a person,
             # not finished (src/open_needs.py); running and approvals win.
             needs = open_needs.read(settings, since=run.get("started_at"))
@@ -351,7 +365,7 @@ def setup_agents_routes(session_manager) -> APIRouter:
                 config["tool_access"] = settings.get("tool_access")
             if "enabled_tools" in settings:
                 config["enabled_tools"] = settings.get("enabled_tools") or []
-            parent_of = settings.get("parent_session") or link_parent.get(sid)
+            parent_of = parents.get(sid) or link_parent.get(sid)
             if parent_of == sid:
                 parent_of = None
             rows.append({

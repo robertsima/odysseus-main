@@ -108,6 +108,7 @@
     "tests/test_agent_prompt_contract.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_agent_room_consistency.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_agent_round_model_provenance_ui.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
+    "tests/test_agent_round_timing_ui.py": "arrived from dev (PR #58) on 2026-10-04; the chat route recording round_durations_s needs a route behavior test (Phase 4 chat-render batch)",
     "tests/test_agent_runs_stop_and_wait.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_agent_thread_dot_alignment_css.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/test_agent_tool_budget_nonnumeric.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",

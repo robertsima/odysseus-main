@@ -30,7 +30,7 @@ const STATUS = {
   // A worker that paused on a card whose approval has since lapsed (expired or
   // superseded): nothing is left to answer, so it must not read as "Needs approval".
   approval_expired: ['Approval expired', 'warn'],
-  running: ['Running', 'run'], failed: ['Failed', 'bad'],
+  running: ['Working', 'run'], failed: ['Failed', 'bad'],
   finished: ['Finished', 'ok'], stopped: ['Stopped', 'warn'], idle: ['Idle', ''],
   // A turn that ended on `Needs user:` lines or a question to the user
   // (src/open_needs.py). It used to show as Finished, so the one thing the
@@ -549,7 +549,20 @@ function bindHistorySearch() {
 }
 function filteredRows() {
   const q = state.filter.trim().toLowerCase();
-  return state.rows.filter((r) => !q || (r.name || '').toLowerCase().includes(q) || (r.latest || '').toLowerCase().includes(q));
+  if (!q) return state.rows;
+  const byId = new Map(state.rows.map((row) => [row.session_id, row]));
+  const visible = new Set();
+  for (const row of state.rows) {
+    if (!(row.name || '').toLowerCase().includes(q) && !(row.latest || '').toLowerCase().includes(q)) continue;
+    let cursor = row;
+    const visited = new Set();
+    while (cursor && !visited.has(cursor.session_id)) {
+      visible.add(cursor.session_id);
+      visited.add(cursor.session_id);
+      cursor = byId.get(cursor.parent_session);
+    }
+  }
+  return state.rows.filter((row) => visible.has(row.session_id));
 }
 /** Parent → worker rows among `rows`, and the rows with no listed parent.
  *  A worker whose parent is filtered out or archived stands on its own. */
@@ -585,13 +598,13 @@ function treeHtml(row, kids, seen = new Set()) {
   seen.add(row.session_id);
   const workers = (kids.get(row.session_id) || []).filter((child) => !seen.has(child.session_id));
   if (!workers.length) return rowHtml(row);
-  const pinned = (child) => [child, ...descendants(child, kids)].some((node) => isLiveAgent(node) || node.session_id === state.selected);
+  const pinned = (child) => !!state.filter.trim() || [child, ...descendants(child, kids)].some((node) => isLiveAgent(node) || node.session_id === state.selected);
   const open = state.expandedParents.has(row.session_id);
   const folded = workers.filter((child) => !pinned(child)).length;
   const visible = open ? workers : workers.filter(pinned);
   const inner = visible.map((child) => treeHtml(child, kids, seen)).join('');
-  return `${rowHtml(row, { folded, open })}${inner
-    ? `<div class="ag-card-workers" role="group" aria-label="Workers of ${esc(row.name)}">${inner}</div>` : ''}`;
+  return `${rowHtml(row, { folded, open })}${(inner || folded)
+    ? `<div id="ag-workers-${esc(encodeURIComponent(row.session_id))}" class="ag-card-workers" role="group" aria-label="Workers of ${esc(row.name)}"${inner ? '' : ' hidden'}>${inner}</div>` : ''}`;
 }
 function fleetHtml() {
   const rows = filteredRows();
@@ -624,7 +637,7 @@ function fleetHtml() {
     const solo = shown.length === 1;
     const cards = items.map((row) => treeHtml(row, kids)).join('');
     return `<div class="ag-group${key === 'attention' ? ' ag-group-attn' : ''}">${
-      solo ? '' : `<div class="wb-group-h"><span class="wb-group-title">${label}</span><span class="wb-count">${items.length}</span></div>`
+      solo ? '' : `<div class="wb-group-h"><span class="wb-group-title">${label}</span><span class="wb-count">${items.length} tree${items.length === 1 ? '' : 's'}</span></div>`
     }<div class="ag-card-grid">${cards}</div></div>`;
   }).join('');
   if (html) return `${html}${pages > 1 ? `<nav class="ag-fleet-pages" aria-label="Fleet pages"><button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="fleet-page" data-page="${state.fleetPage - 1}"${state.fleetPage === 0 ? ' disabled' : ''}>← Newer</button><span>${state.fleetPage * FLEET_PAGE_SIZE + 1}–${Math.min(candidates.length, (state.fleetPage + 1) * FLEET_PAGE_SIZE)} of ${candidates.length}</span><button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="fleet-page" data-page="${state.fleetPage + 1}"${state.fleetPage >= pages - 1 ? ' disabled' : ''}>Older →</button></nav>` : ''}`;
@@ -641,9 +654,12 @@ function renderFleetOnly() {
   const top = list.scrollTop;
   const focusedUnit = list.contains(document.activeElement) && document.activeElement.matches('.ag-card-select')
     ? document.activeElement.dataset.sid : null;
+  const focusedToggle = list.contains(document.activeElement) && document.activeElement.matches('.ag-workers-toggle')
+    ? document.activeElement.dataset.sid : null;
   list.innerHTML = fleetHtml();
   list.scrollTop = top;
   if (focusedUnit) list.querySelector(`.ag-card-select[data-sid="${CSS.escape(focusedUnit)}"]`)?.focus({ preventScroll: true });
+  if (focusedToggle) list.querySelector(`.ag-workers-toggle[data-sid="${CSS.escape(focusedToggle)}"]`)?.focus({ preventScroll: true });
 }
 function updateStats() {
   const box = $('agents-dashboard')?.querySelector('.ag-triage');
@@ -924,7 +940,7 @@ function rowHtml(r, nest = {}) {
       ${need}
       <div class="ag-row-sub">${meta ? `<span class="ag-row-meta-inline">${meta}</span>` : ''}${r.latest ? `<span class="ag-row-latest" title="${esc(r.latest)}">${esc(latestText(r))}</span>` : '<span class="ag-row-latest">Standing by</span>'}</div>
       ${crew}
-      ${nest.folded ? `<button type="button" class="ag-workers-toggle" data-ag="toggle-workers" data-sid="${esc(r.session_id)}" aria-expanded="${nest.open ? 'true' : 'false'}" title="${nest.open ? 'Hide finished workers' : 'Show finished workers'}">${nest.open ? '▾' : '▸'} ${nest.folded} finished worker${nest.folded === 1 ? '' : 's'}</button>` : ''}
+      ${nest.folded ? `<button type="button" class="ag-workers-toggle" data-ag="toggle-workers" data-sid="${esc(r.session_id)}" aria-controls="ag-workers-${esc(encodeURIComponent(r.session_id))}" aria-expanded="${nest.open ? 'true' : 'false'}" title="${nest.open ? 'Hide inactive branches' : 'Show inactive branches'}">${nest.open ? '▾' : '▸'} ${nest.folded} inactive branch${nest.folded === 1 ? '' : 'es'}</button>` : ''}
     </div>
     <div class="ag-card-actions">${isCurrentChat(r.session_id) ? '' : `<button type="button" class="wb-icon-btn" data-ag="open-chat" data-sid="${esc(r.session_id)}" title="Open chat" aria-label="Open ${esc(r.name)} chat">Open</button>`}${status === 'running' ? `<button type="button" class="wb-icon-btn" data-ag="stop-chat" data-sid="${esc(r.session_id)}" title="Stop agent" aria-label="Stop ${esc(r.name)}">Stop</button>` : ''}</div>
   </div>`;

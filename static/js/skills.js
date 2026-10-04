@@ -38,6 +38,7 @@ function _playSkillsCascade(container = document.getElementById('skills-list')) 
 // fetch + content-settle jump). Populated lazily on expand AND eagerly in
 // the background for all visible cards right after render.
 const _mdCache = new Map();
+const _mdVersions = new Map();
 async function _fetchSkillMarkdown(name) {
   if (_mdCache.has(name)) return _mdCache.get(name);
   const res = await fetch(`${API}/api/skills/${encodeURIComponent(name)}/markdown`);
@@ -45,6 +46,7 @@ async function _fetchSkillMarkdown(name) {
   const data = await res.json();
   const md = data.markdown || '';
   _mdCache.set(name, md);
+  _mdVersions.set(name, data.version);
   return md;
 }
 // Background-load the markdown for every currently-rendered skill card so it
@@ -251,14 +253,17 @@ async function _uninstallCatalogSkill(c, btn) {
 }
 
 function _focusSkillRow(name) {
-  setTimeout(() => {
+  setTimeout(async () => {
     const card = document.querySelector(`.skill-card[data-skill-name="${CSS.escape(name)}"]`);
     if (!card) return;
+    _collapsedSections.delete('user');
+    _applySectionCollapse(document.getElementById('skills-list'));
+    if (!card.classList.contains('doclib-card-expanded')) await _expandSkillCard(card, name);
+    if (!card.classList.contains('doclib-card-expanded')) return;
     card.scrollIntoView({ behavior: 'smooth', block: 'center' });
     card.classList.add('skill-row-flash');
     setTimeout(() => card.classList.remove('skill-row-flash'), 2000);
-    // Expand it so the linked skill opens to its SKILL.md directly.
-    _expandSkillCard(card, name);
+    card.querySelector('.skill-card-toggle')?.focus({ preventScroll: true });
   }, 200);
 }
 
@@ -787,7 +792,7 @@ function renderSkillsList() {
   const cards = [];
   const dupeMeta = _duplicateMeta(sorted);
 
-  for (const sk of sorted) {
+  for (const [index, sk] of sorted.entries()) {
     const name = sk.name || sk.id;
     const dm = dupeMeta.get(name);
     if (dm) {
@@ -821,11 +826,13 @@ function renderSkillsList() {
     header.className = 'doclib-card-header skill-card-header';
     header.innerHTML = `
       ${cbHtml}
-      ${_auditDot(sk)}
-      <div class="skill-card-textcol">
-        <code class="skill-card-name">${esc(name)}</code>
-        ${sk.description ? `<div class="skill-card-desc">${esc(sk.description)}</div>` : ''}
-      </div>
+      <button type="button" class="skill-card-toggle" aria-label="Open skill ${esc(name)}" aria-expanded="false" aria-controls="skill-preview-${index}">
+        ${_auditDot(sk)}
+        <span class="skill-card-textcol">
+          <code class="skill-card-name">${esc(name)}</code>
+          ${sk.description ? `<span class="skill-card-desc">${esc(sk.description)}</span>` : ''}
+        </span>
+      </button>
       <div class="skill-card-right">
         ${_statusPill(sk)}
         ${_sourcePill(sk)}
@@ -839,6 +846,20 @@ function renderSkillsList() {
     `;
     card.appendChild(header);
 
+    const toggle = header.querySelector('.skill-card-toggle');
+    const activate = () => {
+      if (_selectMode) {
+        const cb = card.querySelector('.skill-select-cb');
+        if (cb) { cb.checked = !cb.checked; cb.dispatchEvent(new Event('change')); }
+      } else _expandSkillCard(card, name);
+    };
+    toggle.addEventListener('click', activate);
+    toggle.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault(); event.stopPropagation(); activate();
+      }
+    });
+
     // Kebab dropdown (collapsed-bar quick actions: same set + icons as the
     // expanded footer). Clicking the kebab opens it; it doesn't expand.
     header.querySelector('.skill-kebab-btn').addEventListener('click', (e) => {
@@ -849,10 +870,28 @@ function renderSkillsList() {
     // Preview (hidden until expanded) — SKILL.md goes here + footer.
     const preview = document.createElement('div');
     preview.className = 'doclib-card-preview skill-card-preview';
+    preview.id = `skill-preview-${index}`;
     const pre = document.createElement('pre');
     pre.className = 'skill-md-pre';
     pre.textContent = '';  // filled on expand
     preview.appendChild(pre);
+    const packagePanel = document.createElement('section');
+    packagePanel.className = 'skill-package';
+    packagePanel.setAttribute('aria-label', 'Skill package files');
+    packagePanel.innerHTML = `<div class="skill-package-head"><strong>Skill package</strong></div><p class="skill-package-hint">SKILL.md is edited with Edit below. Supporting references and scripts are text only; linking a script never runs it.</p><div class="skill-package-new"><input class="skill-package-path" aria-label="New package file path" placeholder="references/guide.md" maxlength="240"><button type="button" class="doclib-card-text-btn skill-package-add">+ New file</button></div><div class="skill-package-list">Loading…</div><div class="skill-package-editor" hidden></div><div class="skill-package-links"></div>`;
+    preview.appendChild(packagePanel);
+    const newPath = packagePanel.querySelector('.skill-package-path');
+    const addFile = () => {
+      const path = newPath.value.trim();
+      if (!path) { newPath.focus(); return; }
+      _openPackageFile(card, name, path, true);
+    };
+    packagePanel.querySelector('.skill-package-add').addEventListener('click', addFile);
+    newPath.addEventListener('keydown', e => { if (e.key === 'Enter') addFile(); });
+    if (['bundled', 'curated', 'integration'].includes(sk.source) || sk._legacy) {
+      newPath.disabled = true; packagePanel.querySelector('.skill-package-add').disabled = true;
+      newPath.title = 'This shared skill is read-only';
+    }
 
     // Footer: Approve/Unpublish on the left, destructive delete on the right.
     const actions = document.createElement('div');
@@ -923,22 +962,6 @@ function renderSkillsList() {
     actions.appendChild(rightGroup);
     preview.appendChild(actions);
     card.appendChild(preview);
-
-    // Click to expand/collapse (unless in select mode → toggle checkbox).
-    card.addEventListener('click', (e) => {
-      if (card._suppressNextClick) { card._suppressNextClick = false; return; }
-      if (e.target.closest('button, input, textarea')) return;
-      // While editing, a click on the card body (outside the textarea) must
-      // NOT collapse the card — that silently discards unsaved edits. Only
-      // Save/Cancel exit edit mode.
-      if (card.querySelector('.skill-md-editor')) return;
-      if (_selectMode) {
-        const cb = card.querySelector('.skill-select-cb');
-        if (cb) { cb.checked = !cb.checked; cb.dispatchEvent(new Event('change')); }
-        return;
-      }
-      _expandSkillCard(card, name);
-    });
 
     // Long-press anywhere on the card opens the kebab dropdown — mirrors the
     // documents library + brain memory pattern. Skip when touch starts on a
@@ -1035,6 +1058,7 @@ function renderSkillsList() {
 // card keeps its full expanded height) and detach its resize listener.
 function _collapseSkillCardEl(c) {
   c.classList.remove('doclib-card-expanded', 'skill-expand-instant');
+  c.querySelector('.skill-card-toggle')?.setAttribute('aria-expanded', 'false');
   c.style.removeProperty('height');
   const pv = c.querySelector('.doclib-card-preview');
   const pr = c.querySelector('.skill-md-pre') || c.querySelector('.skill-md-editor');
@@ -1048,6 +1072,8 @@ async function _expandSkillCard(card, name) {
   const adminCard = card.closest('.admin-card');
   // Toggle collapse if already open.
   if (card.classList.contains('doclib-card-expanded')) {
+    if (_hasUnsavedPackage(card) && !window.confirm('Discard unsaved resource changes?')) return;
+    if (_hasUnsavedMarkdown(card) && !window.confirm('Discard unsaved SKILL.md changes?')) return;
     _collapseSkillCardEl(card);
     if (adminCard) adminCard.classList.remove('skills-has-expanded');
     return;
@@ -1057,8 +1083,13 @@ async function _expandSkillCard(card, name) {
   // collapsing behind the new (semi-transparent) one, which read as a jump.
   const switching = !!(grid && grid.querySelector('.doclib-card-expanded'));
   // Collapse any other expanded sibling (full cleanup, not just the class).
+  if (grid && [...grid.querySelectorAll('.doclib-card-expanded')].some(_hasUnsavedPackage)
+      && !window.confirm('Discard unsaved resource changes?')) return;
+  if (grid && [...grid.querySelectorAll('.doclib-card-expanded')].some(_hasUnsavedMarkdown)
+      && !window.confirm('Discard unsaved SKILL.md changes?')) return;
   if (grid) grid.querySelectorAll('.doclib-card-expanded').forEach(_collapseSkillCardEl);
   card.classList.add('doclib-card-expanded');
+  card.querySelector('.skill-card-toggle')?.setAttribute('aria-expanded', 'true');
   if (switching) card.classList.add('skill-expand-instant');
   // Explicit class on the admin-card so CSS doesn't depend on :has()
   // (Firefox mobile builds without :has left the expand at ~50%).
@@ -1100,7 +1131,7 @@ async function _expandSkillCard(card, name) {
     preview.style.setProperty('max-height', 'none', 'important');
     preview.style.setProperty('height', previewH + 'px', 'important');
 
-    if (pre) {
+    if (pre && !card.classList.contains('skill-package-editing')) {
       // Pre = preview height minus its non-pre siblings (footer, warn banner).
       const prevPad = px(preview, 'paddingTop') + px(preview, 'paddingBottom');
       let siblings = 0;
@@ -1140,6 +1171,164 @@ async function _expandSkillCard(card, name) {
       }
     }
   }
+  _loadPackageFiles(card, name);
+}
+
+async function _packageRequest(url, options) {
+  const response = await fetch(url, { credentials: 'same-origin', ...options });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : `HTTP ${response.status}`);
+  return data;
+}
+function _hasUnsavedPackage(card) {
+  const panel = card.querySelector('.skill-package-editor');
+  const input = panel?.querySelector('textarea');
+  return !!input && input.value !== panel._original;
+}
+function _hasUnsavedMarkdown(card) {
+  const input = card.querySelector('.skill-md-editor');
+  return !!input && input.value !== input.dataset.original;
+}
+// Modal chrome is owned by the host. Guard its common close paths while the
+// Skills tab contains a draft; prevent the host close handler in capture phase.
+function _guardSkillDraftClose(event) {
+  const modal = document.getElementById('memory-modal');
+  if (!modal || modal.classList.contains('hidden')) return;
+  const close = event.type === 'keydown' ? event.key === 'Escape'
+    : (event.target.closest('#close-memory-modal') || event.target === modal ||
+       event.target.closest('#tool-memory-btn'));
+  if (!close) return;
+  const cards = [...modal.querySelectorAll('.skill-card.doclib-card-expanded')];
+  const dirtyFile = cards.some(_hasUnsavedPackage);
+  const dirtyMarkdown = cards.some(_hasUnsavedMarkdown);
+  if (!dirtyFile && !dirtyMarkdown) return;
+  const what = dirtyFile && dirtyMarkdown ? 'resource and SKILL.md' : dirtyFile ? 'resource' : 'SKILL.md';
+  if (!window.confirm(`Discard unsaved ${what} changes?`)) {
+    event.preventDefault(); event.stopImmediatePropagation();
+  }
+}
+document.addEventListener('click', _guardSkillDraftClose, true);
+document.addEventListener('keydown', _guardSkillDraftClose, true);
+function _packageUrl(name, path) {
+  return `${API}/api/skills/${encodeURIComponent(name)}/package/file?path=${encodeURIComponent(path)}`;
+}
+async function _loadPackageFiles(card, name) {
+  const list = card.querySelector('.skill-package-list');
+  if (!list) return;
+  try {
+    const data = await _packageRequest(`${API}/api/skills/${encodeURIComponent(name)}/package`);
+    list.replaceChildren();
+    const files = data.files || [];
+    if (!files.length) list.textContent = 'No extra files yet — this is a single-file skill.';
+    for (const file of files) {
+      const button = document.createElement('button');
+      button.type = 'button'; button.className = 'skill-package-file';
+      button.textContent = `${file.path} · ${file.bytes} bytes`;
+      button.title = `Open ${file.path}`;
+      button.addEventListener('click', () => _openPackageFile(card, name, file.path));
+      list.appendChild(button);
+    }
+    _renderSkillLinks(card, name, files);
+  } catch (error) { list.textContent = `Package unavailable: ${error.message}`; }
+}
+function _renderSkillLinks(card, name, files) {
+  const panel = card.querySelector('.skill-package-links');
+  if (!panel) return;
+  const skill = skills.find(s => s.name === name) || {};
+  panel.replaceChildren();
+  const heading = document.createElement('strong'); heading.textContent = 'Related skills & scripts';
+  const hint = document.createElement('p'); hint.className = 'skill-package-hint';
+  hint.textContent = 'Links are references, not automatic invocations. Choose an existing destination and save.';
+  panel.append(heading, hint);
+  const draw = (kind, items, choices) => {
+    const section = document.createElement('div'); section.className = 'skill-link-row';
+    const label = document.createElement('span'); label.textContent = kind === 'skill' ? 'Skills' : 'Scripts';
+    section.append(label);
+    for (const item of items) {
+      const destination = document.createElement('button'); destination.type = 'button';
+      destination.className = 'skill-package-file'; destination.textContent = item;
+      destination.setAttribute('aria-label', kind === 'skill' ? `Open skill ${item}` : `Open script ${item} (does not run)`);
+      destination.title = kind === 'skill' ? `Open skill ${item}` : `Open script ${item} (does not run)`;
+      destination.addEventListener('click', () => kind === 'skill' ? _focusSkillRow(item) : _openPackageFile(card, name, item));
+      if (!choices.includes(item)) { destination.classList.add('skill-link-missing'); destination.title = 'Destination missing or inaccessible'; destination.disabled = true; }
+      const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'skill-link-remove';
+      remove.textContent = '×'; remove.title = `Unlink ${kind} ${item}`;
+      remove.setAttribute('aria-label', `Unlink ${kind} ${item}`);
+      remove.addEventListener('click', () => _saveSkillLinks(card, name, kind, items.filter(x => x !== item)));
+      section.append(destination, remove);
+    }
+    const select = document.createElement('select'); select.setAttribute('aria-label', `Add related ${kind}`);
+    const initial = document.createElement('option'); initial.value = ''; initial.textContent = `+ Link ${kind}`; select.append(initial);
+    choices.filter(x => !items.includes(x)).forEach(x => {
+      const option = document.createElement('option'); option.value = x; option.textContent = x; select.append(option);
+    });
+    select.addEventListener('change', () => {
+      if (select.value) _saveSkillLinks(card, name, kind, [...items, select.value]);
+    });
+    section.append(select); panel.append(section);
+  };
+  draw('skill', skill.related_skills || [], skills.filter(s => s.name !== name && !s._legacy).map(s => s.name));
+  draw('script', skill.related_scripts || [], files.map(f => f.path).filter(p => /^scripts\/.+\.(py|sh|js|ts)$/i.test(p)));
+  const feedback = document.createElement('div'); feedback.className = 'skill-link-feedback'; feedback.setAttribute('role', 'status'); panel.append(feedback);
+}
+async function _saveSkillLinks(card, name, kind, values) {
+  const feedback = card.querySelector('.skill-link-feedback');
+  const panel = card.querySelector('.skill-package-links');
+  if (panel.dataset.busy || card.querySelector('.skill-md-editor')) {
+    feedback.textContent = 'Save SKILL.md first, then edit links.'; return;
+  }
+  panel.dataset.busy = '1';
+  const skill = skills.find(s => s.name === name);
+  try {
+    const data = await _packageRequest(`${API}/api/skills/${encodeURIComponent(name)}/links`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ version: _mdVersions.get(name),
+        related_skills: kind === 'skill' ? values : (skill.related_skills || []),
+        related_scripts: kind === 'script' ? values : (skill.related_scripts || []) }),
+    });
+    skill.related_skills = data.related_skills; skill.related_scripts = data.related_scripts;
+    _mdVersions.set(name, data.version); _mdCache.set(name, data.markdown); card._md = data.markdown;
+    card.querySelector('.skill-md-pre').textContent = data.markdown;
+    await _loadPackageFiles(card, name);
+    card.querySelector('.skill-link-feedback').textContent = 'Links saved';
+  } catch (error) { feedback.textContent = `Links not saved: ${error.message}`; }
+  finally { delete panel.dataset.busy; }
+}
+async function _openPackageFile(card, name, path, create = false) {
+  const panel = card.querySelector('.skill-package-editor');
+  if (!panel) return;
+  const previous = panel.querySelector('textarea');
+  if (previous && previous.value !== panel._original && !window.confirm('Discard unsaved changes to this resource?')) return;
+  try {
+    const file = create ? { path, content: '', version: 'new' } : await _packageRequest(_packageUrl(name, path));
+    panel.replaceChildren(); panel.hidden = false; panel._original = file.content;
+    card.classList.add('skill-package-editing');
+    card._fillH?.();
+    const label = document.createElement('label'); label.textContent = `Edit file: ${file.path}`;
+    const textarea = document.createElement('textarea'); textarea.className = 'skill-package-text';
+    textarea.value = file.content; textarea.spellcheck = false;
+    const save = document.createElement('button'); save.type = 'button'; save.className = 'doclib-card-text-btn'; save.textContent = 'Save file';
+    const close = document.createElement('button'); close.type = 'button'; close.className = 'doclib-card-text-btn'; close.textContent = 'Close';
+    const feedback = document.createElement('span'); feedback.setAttribute('role', 'status');
+    save.addEventListener('click', async () => {
+      save.disabled = true;
+      try {
+        const result = await _packageRequest(_packageUrl(name, path), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: textarea.value, version: file.version }) });
+        file.version = result.version; panel._original = textarea.value;
+        feedback.textContent = 'Saved'; await _loadPackageFiles(card, name);
+      } catch (error) { feedback.textContent = `Not saved: ${error.message}`; }
+      finally { save.disabled = false; }
+    });
+    close.addEventListener('click', () => {
+      if (textarea.value !== panel._original && !window.confirm('Discard unsaved changes?')) return;
+      panel.hidden = true; panel.replaceChildren();
+      card.classList.remove('skill-package-editing');
+      card._fillH?.();
+    });
+    const actions = document.createElement('div'); actions.className = 'skill-package-actions';
+    actions.append(save, close, feedback);
+    label.appendChild(textarea); panel.append(label, actions); textarea.focus();
+  } catch (error) { uiModule.showError(`Cannot open ${path}: ${error.message}`); }
 }
 
 // Swap the read-only <pre> for an editable <textarea> (and back). The
@@ -1154,36 +1343,62 @@ function _toggleSkillEdit(card, name) {
     return;
   }
   const pre = preview.querySelector('.skill-md-pre');
+  const label = document.createElement('label');
+  label.className = 'skill-md-label';
+  label.textContent = `Edit SKILL.md for ${name}`;
   const ta = document.createElement('textarea');
   ta.className = 'skill-md-editor';
   ta.spellcheck = false;
   ta.value = (card._md != null ? card._md : (pre ? pre.textContent : '')) || '';
+  ta.dataset.original = ta.value;
   ta.addEventListener('click', (e) => e.stopPropagation());
   if (pre) pre.style.display = 'none';
-  preview.insertBefore(ta, preview.querySelector('.doclib-card-expanded-actions'));
+  label.appendChild(ta);
+  preview.insertBefore(label, preview.querySelector('.doclib-card-expanded-actions'));
+  const cancel = document.createElement('button');
+  cancel.type = 'button'; cancel.className = 'doclib-card-text-btn doclib-card-action-btn skill-md-cancel';
+  cancel.textContent = 'Cancel';
+  cancel.addEventListener('click', () => {
+    if (_hasUnsavedMarkdown(card) && !window.confirm('Discard unsaved SKILL.md changes?')) return;
+    label.remove(); cancel.remove();
+    if (pre) pre.style.display = '';
+    const edit = preview.querySelector('.skill-md-save');
+    if (edit) { edit.textContent = 'Edit'; edit.classList.remove('skill-md-save'); edit.focus(); }
+    card._fillH?.();
+  });
+  preview.querySelector('.doclib-action-btn-row').appendChild(cancel);
   ta.focus();
-  // Flip the Edit button label to "Save".
   const editBtn = [...preview.querySelectorAll('.doclib-card-action-btn')].find(b => /Edit|Save/.test(b.textContent));
-  if (editBtn) editBtn.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>Save';
+  if (editBtn) { editBtn.textContent = 'Save'; editBtn.classList.add('skill-md-save'); }
+  card._fillH?.();
 }
 
 async function _saveSkillEdit(card, name) {
   const preview = card.querySelector('.skill-card-preview');
   const ta = preview?.querySelector('.skill-md-editor');
   if (!ta) return;
+  const save = preview.querySelector('.skill-md-save');
+  if (save?.disabled) return;
+  if (save) save.disabled = true;
   try {
     const res = await fetch(`${API}/api/skills/${encodeURIComponent(name)}/markdown`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ markdown: ta.value }),
+      body: JSON.stringify({ markdown: ta.value, version: _mdVersions.get(name) }),
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) {
+      const detail = (await res.json().catch(() => ({}))).detail;
+      throw new Error(detail || `HTTP ${res.status}`);
+    }
     // Refresh the cached markdown so the preload/expand show the new text.
     _mdCache.set(name, ta.value);
+    _mdVersions.delete(name);
     uiModule.showToast('Saved');
     await loadSkills();  // re-render (frontmatter changes like name/status may have changed)
   } catch (e) {
     uiModule.showError('Save failed: ' + e.message);
+  } finally {
+    if (save) save.disabled = false;
   }
 }
 
