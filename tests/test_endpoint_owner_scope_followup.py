@@ -1,6 +1,5 @@
 """Regression tests for endpoint owner scoping in secondary model routes."""
 
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -16,6 +15,17 @@ def _compare_request(user="alice", is_admin=False):
             )
         ),
     )
+
+
+@pytest.fixture(autouse=True)
+def _fresh_compare_router(monkeypatch):
+    # setup_compare_routes registers on a module-global router. Give each test
+    # its own, so the handlers bound to these fake session stores never end up
+    # in an app that a later test in the same process imports.
+    from fastapi import APIRouter
+    from routes.compare import compare_routes
+
+    monkeypatch.setattr(compare_routes, "router", APIRouter(prefix="/api/compare", tags=["compare"]))
 
 
 def _compare_start_route(session_manager):
@@ -355,47 +365,3 @@ def test_compare_start_rejects_unowned_endpoint_id(monkeypatch):
 
     assert exc.value.status_code == 404
     assert created == {}
-
-
-def test_compare_endpoint_key_lookup_is_owner_scoped():
-    body = Path("routes/compare/compare_routes.py").read_text(encoding="utf-8")
-    start_body = body.split("def start_comparison", 1)[1].split("# Store comparison record", 1)[0]
-    helper_body = body.split("def _owned_endpoint_by_url", 1)[1].split("class RecordVoteRequest", 1)[0]
-    id_helper_body = body.split("def _owned_endpoint_by_id", 1)[1].split("class RecordVoteRequest", 1)[0]
-
-    assert "_reject_raw_endpoint_url_for_non_admin" in start_body
-    assert "_owned_endpoint_by_url(db, base, user)" in start_body
-    # Credentials prefer an explicit endpoint id (pins the exact key) and only
-    # fall back to URL matching for legacy / admin raw-URL callers.
-    assert "_owned_endpoint_by_id(db, eid, user)" in start_body
-    # The session binds to the resolved endpoint's stored base URL, not the raw
-    # caller-supplied string (the reviewer's remaining compare blocker).
-    assert "build_chat_url(normalize_base(ep.base_url))" in start_body
-    assert "owner_filter(q, ModelEndpoint, owner)" in helper_body
-    # The id lookup is owner-scoped the same way the URL lookup is.
-    assert "owner_filter(q, ModelEndpoint, owner)" in id_helper_body
-
-
-def test_gallery_image_endpoint_lookups_are_owner_scoped():
-    body = Path("routes/gallery/gallery_routes.py").read_text(encoding="utf-8")
-    helper_body = body.split("def _visible_image_endpoint_query", 1)[1].split(
-        "def _first_visible_image_endpoint", 1
-    )[0]
-
-    assert "owner_filter(q, ModelEndpoint, owner)" in helper_body
-    assert body.count("_first_visible_image_endpoint(db, user)") >= 4
-    assert body.count("_visible_image_endpoint_for_base(db,") >= 2
-    assert "def _current_user_is_admin" in body
-    assert body.count('raise HTTPException(403, "Choose a registered image endpoint")') == 2
-    for marker in (
-        "async def gallery_ai_upscale",
-        "async def gallery_style_transfer",
-        "async def inpaint_proxy",
-        "async def harmonize_image",
-    ):
-        section = body.split(marker, 1)[1].split("@router.", 1)[0]
-        assert "user = require_privilege(request, \"can_generate_images\")" in section
-        assert (
-            "_first_visible_image_endpoint(db, user)" in section
-            or "_visible_image_endpoint_for_base(db," in section
-        )

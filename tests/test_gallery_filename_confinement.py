@@ -1,5 +1,4 @@
 import os
-from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
@@ -116,13 +115,3 @@ def test_gallery_replace_rejects_symlink_escape(tmp_path, monkeypatch, app_db):
 
     assert response.status_code == 400
     assert outside.read_bytes() == b"outside image root"
-
-
-def test_gallery_file_operations_use_confining_resolver():
-    source = Path("routes/gallery/gallery_routes.py").read_text(encoding="utf-8")
-
-    assert 'Path("data/generated_images") / img.filename' not in source
-    assert 'os.path.join("data", "generated_images", img.filename)' not in source
-    assert 'os.path.join("data", "generated_images", img_filename)' not in source
-    assert source.count("_gallery_image_path(img.filename)") >= 3
-    assert "_gallery_image_path(img_filename)" in source

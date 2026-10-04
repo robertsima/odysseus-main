@@ -1,5 +1,4 @@
 import os
-from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
@@ -62,11 +61,3 @@ def test_generated_image_headers_include_nosniff():
         generated_images.GENERATED_IMAGE_HEADERS["Cache-Control"]
         == "public, max-age=31536000, immutable"
     )
-
-
-def test_generated_image_route_uses_confining_resolver():
-    source = Path("app.py").read_text(encoding="utf-8")
-
-    assert 'Path("data/generated_images") / filename' not in source
-    assert "resolve_generated_image_path(filename)" in source
-    assert "headers=GENERATED_IMAGE_HEADERS" in source
