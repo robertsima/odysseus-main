@@ -74,7 +74,7 @@ def test_layout_lives_in_one_agamemnon_file():
     # every conflict: `.wb-panel{display:block!important}` beat `.wb-panel.hidden`
     # and drew every Workbench tab at once, and a 1400px breakpoint made the
     # composer static under a fixed-height transcript. Behaviour is covered in
-    # a real browser by tests/test_agamemnon_runtime_layout.py.
+    # a real browser by tests/static/js/workbench/ and tests/static/index/.
     fixes = (ROOT / 'static/agamemnon-critic-fixes.css').read_text()
     # 2026-10-03: this used to be `container not in fixes`. The Classic-style
     # contrast rules legitimately name `#agents-dashboard` and
