@@ -33,7 +33,6 @@
   "importlib_reload": {
     "tests/test_fastembed_cache_path.py": "reloads a module; build the objects under test directly instead (D12)",
     "tests/test_shell_routes.py": "reloads a module; build the objects under test directly instead (D12)",
-    "tests/test_tls_overrides_scope.py": "reloads a module; build the objects under test directly instead (D12)",
     "tests/test_upload_limits_centralized.py": "reloads a module; build the objects under test directly instead (D12)"
   },
   "raw_environ_write": {
@@ -81,7 +80,6 @@
     "tests/test_steer_not_silently_dropped.py": "writes os.environ outside monkeypatch (D12)",
     "tests/test_steer_split_and_wake.py": "writes os.environ outside monkeypatch (D12)",
     "tests/test_terminus_toolset_retention.py": "writes os.environ outside monkeypatch (D12)",
-    "tests/test_tls_overrides_scope.py": "writes os.environ outside monkeypatch (D12)",
     "tests/test_vault_markdown.py": "writes os.environ outside monkeypatch (D12)",
     "tests/test_vault_scan.py": "writes os.environ outside monkeypatch (D12)"
   },
