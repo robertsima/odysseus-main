@@ -25,8 +25,7 @@ from tests.helpers.import_state import clear_fake_database_modules
 
 clear_fake_database_modules()
 
-from core.database import Base, Document, DocumentVersion  # noqa: E402
-from tests.helpers.sqlite_db import make_temp_sqlite  # noqa: E402
+from core.database import Document, DocumentVersion  # noqa: E402
 
 import src.agent_tools.document_tools as dt  # noqa: E402
 from src.agent_tools import TOOL_HANDLERS  # noqa: E402
@@ -36,18 +35,17 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture
-def db(monkeypatch):
+def db(monkeypatch, app_db):
     import core.database as core_database
     import src.database as legacy_database
 
-    SessionLocal, engine, tmpfile = make_temp_sqlite(Base.metadata)
+    SessionLocal = app_db.SessionLocal
     monkeypatch.setattr(core_database, "SessionLocal", SessionLocal)
     monkeypatch.setattr(legacy_database, "SessionLocal", SessionLocal)
     monkeypatch.setattr(dt, "_missing_document_upload", lambda owner, content: None)
     dt.clear_active_document()
     yield SessionLocal
     dt.clear_active_document()
-    engine.dispose()
 
 
 def _add_doc(SessionLocal, *, title=TITLE, content="Status: draft\nBody", owner="alice",

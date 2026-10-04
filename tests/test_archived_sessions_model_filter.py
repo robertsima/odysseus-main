@@ -7,26 +7,12 @@ over-matched models that merely share the suffix. The sibling name filter
 already uses a wildcard-escaped contains match.
 """
 import sys
-import tempfile
 import types
 import uuid
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import NullPool
 
-import core.database as cdb
 from core.database import Session as DbSession
-
-_TMPDB = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-_ENGINE = create_engine(
-    f"sqlite:///{_TMPDB.name}",
-    connect_args={"check_same_thread": False},
-    poolclass=NullPool,
-)
-cdb.Base.metadata.create_all(_ENGINE)
-_TS = sessionmaker(bind=_ENGINE, autoflush=False, autocommit=False)
 
 
 def _route(router, path, method="GET"):
@@ -57,21 +43,20 @@ def _stub_multipart_if_missing(monkeypatch):
 
 
 @pytest.fixture
-def archived_endpoint(monkeypatch):
+def archived_endpoint(monkeypatch, app_db):
     import routes.session_routes as sr
     from unittest.mock import MagicMock
 
     _stub_multipart_if_missing(monkeypatch)
-    monkeypatch.setattr(sr, "SessionLocal", _TS)
+    monkeypatch.setattr(sr, "SessionLocal", app_db.SessionLocal)
     monkeypatch.setattr(sr, "effective_user", lambda request: "alice")
     router = sr.setup_session_routes(MagicMock(), {})
     return _route(router, "/api/sessions/archived")
 
 
-def _seed(owner, *models):
-    db = _TS()
+def _seed(app_db, owner, *models):
+    db = app_db.SessionLocal()
     try:
-        db.query(DbSession).delete()
         for m in models:
             db.add(DbSession(id=str(uuid.uuid4()), owner=owner, name=f"chat {m}",
                              endpoint_url="http://localhost", model=m, archived=True))
@@ -80,20 +65,20 @@ def _seed(owner, *models):
         db.close()
 
 
-def test_contains_match_returns_all_models_sharing_the_substring(archived_endpoint):
-    _seed("alice", "openai/gpt-4", "gpt-4o", "claude-3")
+def test_contains_match_returns_all_models_sharing_the_substring(archived_endpoint, app_db):
+    _seed(app_db, "alice", "openai/gpt-4", "gpt-4o", "claude-3")
     res = archived_endpoint(request=None, model="gpt-4")
     got = {s["model"] for s in res["sessions"]}
     assert got == {"openai/gpt-4", "gpt-4o"}
 
 
-def test_exact_full_model_still_matches(archived_endpoint):
-    _seed("alice", "openai/gpt-4", "gpt-4o")
+def test_exact_full_model_still_matches(archived_endpoint, app_db):
+    _seed(app_db, "alice", "openai/gpt-4", "gpt-4o")
     res = archived_endpoint(request=None, model="openai/gpt-4")
     assert {s["model"] for s in res["sessions"]} == {"openai/gpt-4"}
 
 
-def test_wildcard_in_filter_is_escaped(archived_endpoint):
-    _seed("alice", "gpt-4o", "gpt_4o")
+def test_wildcard_in_filter_is_escaped(archived_endpoint, app_db):
+    _seed(app_db, "alice", "gpt-4o", "gpt_4o")
     res = archived_endpoint(request=None, model="gpt_4")
     assert {s["model"] for s in res["sessions"]} == {"gpt_4o"}

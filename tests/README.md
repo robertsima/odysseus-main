@@ -201,15 +201,29 @@ Use only for the guarded fake/stub `src.endpoint_resolver` cleanup pattern.
   cached against them.
 - Accepts explicit extra dependent module names to evict alongside the defaults.
 
+### Test databases: `app_db` and `make_test_db`
+
+`tests/plugins/database.py` builds each schema once per test process and gives
+each test a fresh copy, deleted after the test. Never call `create_all` in a
+test module, and never at import time.
+
+- `app_db`: a file copy of `core.database`'s schema. `app_db.SessionLocal` is
+  a sessionmaker bound to `app_db.engine` (NullPool, autoflush off);
+  `app_db.path` and `app_db.url` name the file.
+- `make_test_db(metadata=None, *, memory=False, **engine_kwargs)`: the factory
+  behind `app_db`. Use it for a test-local declarative base, more than one
+  database, an in-memory copy (`memory=True`, one connection that every thread
+  shares), or engine options such as `poolclass=QueuePool, pool_size=1`.
+- Bind `SessionLocal` onto the module the code under test reads with
+  `monkeypatch.setattr`. Never set `DATABASE_URL` and reload `core.database`.
+- Each test process also has its own SQLite file as `core.database`'s default
+  database, shared by all its threads, unless `DATABASE_URL` is set.
+
 ### `tests.helpers.sqlite_db.make_temp_sqlite`
 
-Use for the repeated file-backed temp sqlite setup in tests.
-
-- Only constructs `(SessionLocal, engine, tmpfile)` from the repeated block.
-- Does not patch modules and does not clean up the temp file.
-- The caller must bind `SessionLocal` explicitly onto whatever module the code
-  under test reads, and must keep the returned objects alive.
-- Do not use it as a general DB fixture framework.
+For code that cannot take a fixture. Returns `(SessionLocal, engine, path)` for
+a fresh file copy of a schema (`core.database`'s by default); the file is
+deleted when the test process exits. Prefer the fixtures above.
 
 ### `tests.helpers.db_stubs.make_core_db_stub`
 

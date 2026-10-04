@@ -20,7 +20,6 @@ import pytest
 from unittest.mock import MagicMock, AsyncMock
 
 from tests.helpers.import_state import clear_fake_database_modules
-from tests.helpers.sqlite_db import make_temp_sqlite
 
 clear_fake_database_modules()
 
@@ -29,21 +28,12 @@ from core.database import McpServer
 import src.agent_tools.admin_tools as ti  # do_manage_mcp/get_mcp_manager moved here in the registry migration
 from src.agent_tools.admin_tools import _validate_mcp_command
 
-_TS, _ENGINE, _TMPDB = make_temp_sqlite(cdb.Base.metadata)
-
-
 @pytest.fixture(autouse=True)
-def _env(monkeypatch):
-    monkeypatch.setattr(cdb, "SessionLocal", _TS)
+def _env(monkeypatch, app_db):
+    monkeypatch.setattr(cdb, "SessionLocal", app_db.SessionLocal)
     # Allow one benign launcher (so the positive path is reachable) and also
     # python3 (to prove the hard-deny still wins over an operator allowlist).
     monkeypatch.setenv("ODYSSEUS_MCP_ALLOWED_COMMANDS", "mcp-server-demo,python3")
-    db = _TS()
-    try:
-        db.query(McpServer).delete()
-        db.commit()
-    finally:
-        db.close()
     yield
 
 
@@ -117,7 +107,7 @@ def _add(command, args=None, env=None):
     return asyncio.run(ti.do_manage_mcp(json.dumps(payload)))
 
 
-def test_add_rejects_rce_with_no_db_write_and_no_connect(monkeypatch):
+def test_add_rejects_rce_with_no_db_write_and_no_connect(monkeypatch, app_db):
     mcp = MagicMock()
     mcp.connect_server = AsyncMock()
     monkeypatch.setattr(ti, "get_mcp_manager", lambda: mcp)
@@ -127,14 +117,14 @@ def test_add_rejects_rce_with_no_db_write_and_no_connect(monkeypatch):
     assert "refused" in res["error"]
     mcp.connect_server.assert_not_called()
 
-    db = _TS()
+    db = app_db.SessionLocal()
     try:
         assert db.query(McpServer).count() == 0, "rejected add must not persist an enabled row"
     finally:
         db.close()
 
 
-def test_add_rejects_versioned_runtime_alias_no_row_no_connect(monkeypatch):
+def test_add_rejects_versioned_runtime_alias_no_row_no_connect(monkeypatch, app_db):
     # Versioned alias on the real add path must also write no row and not connect.
     mcp = MagicMock()
     mcp.connect_server = AsyncMock()
@@ -144,14 +134,14 @@ def test_add_rejects_versioned_runtime_alias_no_row_no_connect(monkeypatch):
     assert res["exit_code"] == 1
     mcp.connect_server.assert_not_called()
 
-    db = _TS()
+    db = app_db.SessionLocal()
     try:
         assert db.query(McpServer).count() == 0
     finally:
         db.close()
 
 
-def test_add_allows_safe_server_writes_row_and_connects(monkeypatch):
+def test_add_allows_safe_server_writes_row_and_connects(monkeypatch, app_db):
     mcp = MagicMock()
     mcp.connect_server = AsyncMock()
     mcp.get_server_status = MagicMock(return_value={"tool_count": 2})
@@ -161,7 +151,7 @@ def test_add_allows_safe_server_writes_row_and_connects(monkeypatch):
     assert res["exit_code"] == 0
     mcp.connect_server.assert_called_once()
 
-    db = _TS()
+    db = app_db.SessionLocal()
     try:
         assert db.query(McpServer).count() == 1
     finally:

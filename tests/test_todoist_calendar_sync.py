@@ -3,9 +3,6 @@ import json
 from datetime import datetime
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import NullPool
 
 import core.database as cdb
 from core.database import CalendarCal, CalendarEvent
@@ -17,14 +14,8 @@ from src.todoist_calendar_sync import (
 
 
 @pytest.fixture()
-def todoist_db(monkeypatch, tmp_path):
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'todoist-calendar.db'}",
-        connect_args={"check_same_thread": False},
-        poolclass=NullPool,
-    )
-    cdb.Base.metadata.create_all(engine)
-    Session = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+def todoist_db(monkeypatch, app_db):
+    Session = app_db.SessionLocal
     monkeypatch.setattr(cdb, "SessionLocal", Session)
     return Session
 

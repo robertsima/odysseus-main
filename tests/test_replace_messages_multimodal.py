@@ -11,23 +11,20 @@ import pytest
 
 import core.database as cdb
 from core.models import ChatMessage
-from tests.helpers.sqlite_db import make_temp_sqlite
-
-_TS, _ENGINE, _TMPDB = make_temp_sqlite(cdb.Base.metadata)
 
 
 @pytest.fixture
-def manager(monkeypatch):
+def manager(monkeypatch, app_db):
     import core.session_manager as sm
-    monkeypatch.setattr(sm, "SessionLocal", _TS)
+    monkeypatch.setattr(sm, "SessionLocal", app_db.SessionLocal)
     mgr = sm.SessionManager.__new__(sm.SessionManager)
     mgr.sessions = {}
     mgr.upload_handler = None
     return mgr
 
 
-def _make_session(sid, owner="alice"):
-    db = _TS()
+def _make_session(app_db, sid, owner="alice"):
+    db = app_db.SessionLocal()
     try:
         db.add(cdb.Session(id=sid, owner=owner, name="chat", model="gpt-4o",
                            endpoint_url="http://localhost:11434",
@@ -37,9 +34,9 @@ def _make_session(sid, owner="alice"):
         db.close()
 
 
-def test_multimodal_content_persists_text_and_attachment_ref_without_payload(manager):
+def test_multimodal_content_persists_text_and_attachment_ref_without_payload(manager, app_db):
     sid = "sess-" + uuid.uuid4().hex[:8]
-    _make_session(sid)
+    _make_session(app_db, sid)
 
     upload_id = "a" * 32 + ".png"
     multimodal = [
@@ -68,7 +65,7 @@ def test_multimodal_content_persists_text_and_attachment_ref_without_payload(man
         "size=4 bytes | sha256=sha256-digest]"
     )
 
-    db = _TS()
+    db = app_db.SessionLocal()
     try:
         stored = db.query(cdb.ChatMessage).filter_by(session_id=sid).one()
         assert stored.content == expected
@@ -92,9 +89,9 @@ def test_multimodal_content_persists_text_and_attachment_ref_without_payload(man
     )
 
 
-def test_jsonlike_plain_string_content_still_round_trips(manager):
+def test_jsonlike_plain_string_content_still_round_trips(manager, app_db):
     sid = "sess-" + uuid.uuid4().hex[:8]
-    _make_session(sid)
+    _make_session(app_db, sid)
     text = '[{"type": "object", "name": "foo"}]'
     msgs = [ChatMessage(role="user", content=text)]
     assert manager.replace_messages(sid, msgs) is True
@@ -104,9 +101,9 @@ def test_jsonlike_plain_string_content_still_round_trips(manager):
     assert reloaded.history[0].content == text
 
 
-def test_replace_messages_keeps_history_alias_for_context_messages(manager):
+def test_replace_messages_keeps_history_alias_for_context_messages(manager, app_db):
     sid = "sess-" + uuid.uuid4().hex[:8]
-    _make_session(sid)
+    _make_session(app_db, sid)
     msgs = [ChatMessage(role="user", content="original")]
     assert manager.replace_messages(sid, msgs) is True
 

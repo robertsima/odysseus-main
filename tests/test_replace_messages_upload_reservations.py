@@ -2,7 +2,6 @@
 
 import concurrent.futures
 import json
-import os
 import threading
 import uuid
 
@@ -13,30 +12,21 @@ import core.database as cdb
 import core.session_manager as session_manager_module
 from core.models import ChatMessage
 from src.upload_handler import UploadHandler
-from tests.helpers.sqlite_db import make_temp_sqlite
 
 
 OLD_TIMESTAMP = "2000-01-01T00:00:00"
 
 
 @pytest.fixture
-def manager_db(monkeypatch):
-    SessionLocal, engine, tmpfile = make_temp_sqlite(cdb.Base.metadata)
+def manager_db(monkeypatch, app_db):
+    SessionLocal, engine = app_db.SessionLocal, app_db.engine
     monkeypatch.setattr(session_manager_module, "SessionLocal", SessionLocal)
     manager = session_manager_module.SessionManager.__new__(
         session_manager_module.SessionManager
     )
     manager.sessions = {}
     manager.upload_handler = None
-    try:
-        yield manager, SessionLocal, engine
-    finally:
-        engine.dispose()
-        tmpfile.close()
-        try:
-            os.unlink(tmpfile.name)
-        except OSError:
-            pass
+    return manager, SessionLocal, engine
 
 
 def _seed_session(SessionLocal, *, owner="alice", content="existing durable history"):

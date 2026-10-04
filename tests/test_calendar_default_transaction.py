@@ -13,10 +13,9 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import create_engine, event
+from sqlalchemy import event
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
-from sqlalchemy.pool import NullPool
 
 from tests.helpers.import_state import clear_fake_database_modules
 
@@ -42,25 +41,16 @@ class _RejectEventCommit(Session):
 
 
 @pytest.fixture
-def session_factory(tmp_path, monkeypatch):
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'calendar.db'}",
-        connect_args={"check_same_thread": False},
-        poolclass=NullPool,
-    )
-    cdb.Base.metadata.create_all(engine)
+def session_factory(app_db, monkeypatch):
     factory = sessionmaker(
-        bind=engine,
+        bind=app_db.engine,
         autoflush=False,
         autocommit=False,
         class_=_RejectEventCommit,
     )
     monkeypatch.setattr(cdb, "SessionLocal", factory)
     monkeypatch.setattr(calendar_routes, "SessionLocal", factory)
-    try:
-        yield factory
-    finally:
-        engine.dispose()
+    return factory
 
 
 def _request():
@@ -169,15 +159,8 @@ async def test_tool_list_calendars_persists_lazy_default(session_factory):
     assert _counts(session_factory) == (1, 0)
 
 
-def test_repeated_rename_and_reuse_uses_stable_fallback_ids(tmp_path):
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'renamed-calendar.db'}",
-        connect_args={"check_same_thread": False},
-        poolclass=NullPool,
-    )
-    cdb.Base.metadata.create_all(engine)
-    factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
-    db = factory()
+def test_repeated_rename_and_reuse_uses_stable_fallback_ids(app_db):
+    db = app_db.SessionLocal()
     try:
         first = _ensure_default_calendar(db, "alice")
         assert first.id == _default_calendar_id("alice")
@@ -209,17 +192,12 @@ def test_repeated_rename_and_reuse_uses_stable_fallback_ids(tmp_path):
         ]
     finally:
         db.close()
-        engine.dispose()
 
 
-def _assert_concurrent_first_use(tmp_path, occupied_owner=None):
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'concurrent-calendar.db'}",
-        connect_args={"check_same_thread": False, "timeout": 10},
-        poolclass=NullPool,
-    )
-    cdb.Base.metadata.create_all(engine)
-    factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+def _assert_concurrent_first_use(make_test_db, occupied_owner=None):
+    test_db = make_test_db(connect_args={"check_same_thread": False, "timeout": 10})
+    engine = test_db.engine
+    factory = test_db.SessionLocal
     expected_collision_index = 0
     if occupied_owner is not None:
         seed = factory()
@@ -289,33 +267,30 @@ def _assert_concurrent_first_use(tmp_path, occupied_owner=None):
     first.join(10)
     second.join(10)
 
+    assert not first.is_alive() and not second.is_alive()
+    assert errors == []
+    db = factory()
     try:
-        assert not first.is_alive() and not second.is_alive()
-        assert errors == []
-        db = factory()
-        try:
-            rows = db.query(CalendarCal).filter(CalendarCal.owner == "alice").all()
-            assert [(row.id, row.name) for row in rows] == [
-                (_default_calendar_id("alice", expected_collision_index), "Personal")
-            ]
-            assert db.query(CalendarEvent).count() == 2
-            if occupied_owner is not None:
-                occupied = db.query(CalendarCal).filter(
-                    CalendarCal.id == _default_calendar_id("alice"),
-                ).one()
-                assert occupied.owner == occupied_owner
-        finally:
-            db.close()
+        rows = db.query(CalendarCal).filter(CalendarCal.owner == "alice").all()
+        assert [(row.id, row.name) for row in rows] == [
+            (_default_calendar_id("alice", expected_collision_index), "Personal")
+        ]
+        assert db.query(CalendarEvent).count() == 2
+        if occupied_owner is not None:
+            occupied = db.query(CalendarCal).filter(
+                CalendarCal.id == _default_calendar_id("alice"),
+            ).one()
+            assert occupied.owner == occupied_owner
     finally:
-        engine.dispose()
+        db.close()
 
 
-def test_concurrent_first_use_creates_one_sqlite_default(tmp_path):
-    _assert_concurrent_first_use(tmp_path)
+def test_concurrent_first_use_creates_one_sqlite_default(make_test_db):
+    _assert_concurrent_first_use(make_test_db)
 
 
-def test_concurrent_first_use_after_rename_creates_one_fallback_default(tmp_path):
-    _assert_concurrent_first_use(tmp_path, occupied_owner="bob")
+def test_concurrent_first_use_after_rename_creates_one_fallback_default(make_test_db):
+    _assert_concurrent_first_use(make_test_db, occupied_owner="bob")
 
 
 def test_sqlite_default_stays_in_callers_transaction(session_factory):
@@ -484,17 +459,13 @@ def test_generic_backend_renamed_slot_advances_inside_savepoint():
     assert db.winner.owner == "bob"
 
 
-def test_generic_backend_fallback_keeps_outer_transaction_usable(tmp_path):
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'generic-savepoint-calendar.db'}",
-        poolclass=NullPool,
-    )
-    cdb.Base.metadata.create_all(engine)
+def test_generic_backend_fallback_keeps_outer_transaction_usable(app_db):
+    engine = app_db.engine
     # SQLite supplies a lightweight local SQL executor here; changing only the
     # dispatch name exercises the real Session/savepoint branch used by
     # PostgreSQL-style backends without pretending to validate their dialect.
     engine.dialect.name = "postgresql"
-    factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    factory = app_db.SessionLocal
 
     seed = factory()
     try:
@@ -535,4 +506,3 @@ def test_generic_backend_fallback_keeps_outer_transaction_usable(tmp_path):
         assert verify.query(CalendarEvent).count() == 1
     finally:
         verify.close()
-        engine.dispose()

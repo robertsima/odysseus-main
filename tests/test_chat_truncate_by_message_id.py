@@ -13,26 +13,22 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import QueuePool
 
 from core.models import ChatMessage
 
 
 @pytest.fixture
-def managed(monkeypatch, tmp_path):
+def managed(monkeypatch, make_test_db):
     """A SessionManager on its own SQLite file. Patched, not reloaded: a
     reloaded core.database leaks into every test that runs after this one."""
     import core.database as database
     import core.session_manager as sm_mod
 
-    engine = create_engine(f"sqlite:///{tmp_path / 'app.db'}", connect_args={"check_same_thread": False})
-    database.Base.metadata.create_all(bind=engine)
-    factory = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+    factory = make_test_db(poolclass=QueuePool).SessionLocal
     monkeypatch.setattr(sm_mod, "SessionLocal", factory)
     db = SimpleNamespace(SessionLocal=factory, ChatMessage=database.ChatMessage, Session=database.Session)
-    yield sm_mod.SessionManager(), db
-    engine.dispose()
+    return sm_mod.SessionManager(), db
 
 
 def _chat(sm, sid="chat", n=30):

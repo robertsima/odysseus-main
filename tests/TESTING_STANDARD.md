@@ -99,11 +99,12 @@ cleanup. Specifically:
   `os.environ[...] = ...` that outlives the test.
 - **Current working directory** - never `chdir` without restoring; never assert
   against cwd-relative paths like `./data`. Use a temp workspace helper instead.
-- **Database** - the root `conftest.py` defaults `DATABASE_URL` to an in-memory
-  SQLite for collection safety. A test that needs a real file-backed DB must opt
-  in explicitly via `tests.helpers.sqlite_db.make_temp_sqlite` and bind its
-  `SessionLocal` onto the module under test. Do not rely on a persistent
-  on-disk DB existing.
+- **Database** - each test process gets its own SQLite file as the default
+  `DATABASE_URL`, shared by its threads. A test that needs its own database
+  takes the `app_db` or `make_test_db` fixture (`tests/plugins/database.py`)
+  and binds its `SessionLocal` onto the module under test. Never call
+  `create_all` in a test module, and do not rely on a persistent on-disk DB
+  existing.
 - **Optional dependencies** - do not require packages that may be absent in a
   clean environment (e.g. `python-multipart`). Guard or stub them locally.
 - **Node-subprocess JS tests** - skip cleanly when `node` is absent

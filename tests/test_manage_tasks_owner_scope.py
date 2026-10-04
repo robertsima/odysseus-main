@@ -12,12 +12,8 @@ permissive than the reader.
 """
 
 import json
-import tempfile
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import NullPool
 
 from tests.helpers.import_state import clear_fake_database_modules
 
@@ -27,21 +23,16 @@ import core.database as cdb
 from core.database import ScheduledTask
 from src.tools.system import do_manage_tasks
 
-_TMPDB = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-_ENGINE = create_engine(
-    f"sqlite:///{_TMPDB.name}",
-    connect_args={"check_same_thread": False},
-    poolclass=NullPool,
-)
-cdb.Base.metadata.create_all(_ENGINE)
-_TS = sessionmaker(bind=_ENGINE, autoflush=False, autocommit=False)
-# do_manage_tasks does `from core.database import SessionLocal` at call time,
-# so patching the module attribute is enough to point it at the temp DB.
-cdb.SessionLocal = _TS
+
+@pytest.fixture(autouse=True)
+def _bind_test_db(monkeypatch, app_db):
+    # do_manage_tasks does `from core.database import SessionLocal` at call
+    # time, so patching the module attribute points it at the test database.
+    monkeypatch.setattr(cdb, "SessionLocal", app_db.SessionLocal)
 
 
-def _seed(task_id, owner):
-    db = _TS()
+def _seed(app_db, task_id, owner):
+    db = app_db.SessionLocal()
     try:
         db.add(ScheduledTask(
             id=task_id, owner=owner, name=task_id, prompt="original",
@@ -53,8 +44,8 @@ def _seed(task_id, owner):
         db.close()
 
 
-def _get(task_id):
-    db = _TS()
+def _get(app_db, task_id):
+    db = app_db.SessionLocal()
     try:
         return db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
     finally:
@@ -62,41 +53,41 @@ def _get(task_id):
 
 
 @pytest.mark.asyncio
-async def test_edit_denied_on_ownerless_task_for_authenticated_user():
-    _seed("ownerless-edit", None)
+async def test_edit_denied_on_ownerless_task_for_authenticated_user(app_db):
+    _seed(app_db, "ownerless-edit", None)
     out = await do_manage_tasks(
         json.dumps({"action": "edit", "task_id": "ownerless-edit", "prompt": "pwned"}),
         owner="alice",
     )
     assert out["exit_code"] == 1 and out["error"] == "Access denied"
-    assert _get("ownerless-edit").prompt == "original"
+    assert _get(app_db, "ownerless-edit").prompt == "original"
 
 
 @pytest.mark.asyncio
-async def test_delete_denied_on_ownerless_task_for_authenticated_user():
-    _seed("ownerless-del", None)
+async def test_delete_denied_on_ownerless_task_for_authenticated_user(app_db):
+    _seed(app_db, "ownerless-del", None)
     out = await do_manage_tasks(
         json.dumps({"action": "delete", "task_id": "ownerless-del"}),
         owner="alice",
     )
     assert out["exit_code"] == 1 and out["error"] == "Access denied"
-    assert _get("ownerless-del") is not None
+    assert _get(app_db, "ownerless-del") is not None
 
 
 @pytest.mark.asyncio
-async def test_pause_denied_on_ownerless_task_for_authenticated_user():
-    _seed("ownerless-pause", None)
+async def test_pause_denied_on_ownerless_task_for_authenticated_user(app_db):
+    _seed(app_db, "ownerless-pause", None)
     out = await do_manage_tasks(
         json.dumps({"action": "pause", "task_id": "ownerless-pause"}),
         owner="alice",
     )
     assert out["exit_code"] == 1 and out["error"] == "Access denied"
-    assert _get("ownerless-pause").status == "active"
+    assert _get(app_db, "ownerless-pause").status == "active"
 
 
 @pytest.mark.asyncio
-async def test_run_denied_on_ownerless_task_for_authenticated_user():
-    _seed("ownerless-run", None)
+async def test_run_denied_on_ownerless_task_for_authenticated_user(app_db):
+    _seed(app_db, "ownerless-run", None)
     out = await do_manage_tasks(
         json.dumps({"action": "run", "task_id": "ownerless-run"}),
         owner="alice",
@@ -105,35 +96,35 @@ async def test_run_denied_on_ownerless_task_for_authenticated_user():
 
 
 @pytest.mark.asyncio
-async def test_edit_denied_on_other_owners_task():
-    _seed("bob-task", "bob")
+async def test_edit_denied_on_other_owners_task(app_db):
+    _seed(app_db, "bob-task", "bob")
     out = await do_manage_tasks(
         json.dumps({"action": "edit", "task_id": "bob-task", "prompt": "pwned"}),
         owner="alice",
     )
     assert out["exit_code"] == 1 and out["error"] == "Access denied"
-    assert _get("bob-task").prompt == "original"
+    assert _get(app_db, "bob-task").prompt == "original"
 
 
 @pytest.mark.asyncio
-async def test_edit_allowed_for_matching_owner():
-    _seed("alice-task", "alice")
+async def test_edit_allowed_for_matching_owner(app_db):
+    _seed(app_db, "alice-task", "alice")
     out = await do_manage_tasks(
         json.dumps({"action": "edit", "task_id": "alice-task", "prompt": "updated"}),
         owner="alice",
     )
     assert out["exit_code"] == 0
-    assert _get("alice-task").prompt == "updated"
+    assert _get(app_db, "alice-task").prompt == "updated"
 
 
 @pytest.mark.asyncio
-async def test_edit_allowed_in_no_login_mode():
+async def test_edit_allowed_in_no_login_mode(app_db):
     # owner is None when auth is disabled — single-user mode keeps full access
     # to shared (owner-less) tasks, exactly as `list` returns them unfiltered.
-    _seed("shared-task", None)
+    _seed(app_db, "shared-task", None)
     out = await do_manage_tasks(
         json.dumps({"action": "edit", "task_id": "shared-task", "prompt": "updated"}),
         owner=None,
     )
     assert out["exit_code"] == 0
-    assert _get("shared-task").prompt == "updated"
+    assert _get(app_db, "shared-task").prompt == "updated"

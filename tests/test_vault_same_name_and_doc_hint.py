@@ -16,9 +16,6 @@ from tests.helpers.import_state import clear_fake_database_modules
 
 clear_fake_database_modules()
 
-from core.database import Base  # noqa: E402
-from tests.helpers.sqlite_db import make_temp_sqlite  # noqa: E402
-
 import src.agent_tools.document_tools as dt  # noqa: E402
 import src.agent_tools.filesystem_tools as fst  # noqa: E402
 from src.agent_tools import TOOL_HANDLERS  # noqa: E402
@@ -92,18 +89,17 @@ def test_write_file_of_a_unique_note_has_no_warning(vault):
 
 
 @pytest.fixture
-def db(monkeypatch):
+def db(monkeypatch, app_db):
     import core.database as core_database
     import src.database as legacy_database
 
-    SessionLocal, engine, _tmpfile = make_temp_sqlite(Base.metadata)
+    SessionLocal = app_db.SessionLocal
     monkeypatch.setattr(core_database, "SessionLocal", SessionLocal)
     monkeypatch.setattr(legacy_database, "SessionLocal", SessionLocal)
     monkeypatch.setattr(dt, "_missing_document_upload", lambda owner, content: None)
     dt.clear_active_document()
     yield SessionLocal
     dt.clear_active_document()
-    engine.dispose()
 
 
 def test_update_document_not_found_points_at_edit_file(db):

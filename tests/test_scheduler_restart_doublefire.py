@@ -13,9 +13,8 @@ polls.
 import sys, types, asyncio
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
-from sqlalchemy import create_engine, Column, String, DateTime, Integer, Boolean, Text
-from sqlalchemy.orm import sessionmaker, declarative_base
-from sqlalchemy.pool import StaticPool
+from sqlalchemy import Column, String, DateTime, Integer, Boolean, Text
+from sqlalchemy.orm import declarative_base
 
 
 def _test_utcnow():
@@ -38,7 +37,7 @@ def _stub_heavy(monkeypatch):
             monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
 
 
-def _setup_isolated_db(monkeypatch):
+def _setup_isolated_db(monkeypatch, make_test_db):
     """Point core.database at a throwaway in-memory schema for one test.
 
     Every attribute is swapped through monkeypatch, so the real engine,
@@ -71,18 +70,12 @@ def _setup_isolated_db(monkeypatch):
         status = Column(String, default="queued")
         error = Column(Text)
 
-    # One shared connection: _check_due_tasks queries from a worker thread,
-    # and a plain :memory: engine gives every thread its own empty database.
-    eng = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    B.metadata.create_all(eng)
-    monkeypatch.setattr(cd, "engine", eng, raising=False)
-    monkeypatch.setattr(
-        cd, "SessionLocal", sessionmaker(bind=eng, autocommit=False, autoflush=False)
-    )
+    # An in-memory copy keeps one connection that every thread shares:
+    # _check_due_tasks queries from a worker thread, and a plain :memory:
+    # engine gives every thread its own empty database.
+    db = make_test_db(B.metadata, memory=True)
+    monkeypatch.setattr(cd, "engine", db.engine, raising=False)
+    monkeypatch.setattr(cd, "SessionLocal", db.SessionLocal)
     monkeypatch.setattr(cd, "ScheduledTask", ScheduledTask)
     monkeypatch.setattr(cd, "TaskRun", TaskRun)
     return cd, ScheduledTask, TaskRun
@@ -97,10 +90,10 @@ def test_scheduler_utcnow_preserves_naive_utc_contract():
     assert abs((now - _test_utcnow()).total_seconds()) < 2
 
 
-def _drive_scheduler(monkeypatch, pre_start_setup=None):
+def _drive_scheduler(monkeypatch, make_test_db, pre_start_setup=None):
     """Build a TaskScheduler bypassing __init__ and run start() + two polls."""
     _stub_heavy(monkeypatch)
-    cd, ScheduledTask, TaskRun = _setup_isolated_db(monkeypatch)
+    cd, ScheduledTask, TaskRun = _setup_isolated_db(monkeypatch, make_test_db)
 
     from src.task_scheduler import TaskScheduler
     sch = TaskScheduler.__new__(TaskScheduler)
@@ -145,7 +138,7 @@ def _drive_scheduler(monkeypatch, pre_start_setup=None):
     return cd, ScheduledTask, TaskRun, real_dispatches
 
 
-def test_restart_does_not_re_dispatch_overdue_task(monkeypatch):
+def test_restart_does_not_re_dispatch_overdue_task(monkeypatch, make_test_db):
     """After restart, an overdue active task should fire at most once across
     two consecutive polls (the first poll re-fires it, but next_run is then
     advanced so the second poll does not)."""
@@ -160,7 +153,7 @@ def test_restart_does_not_re_dispatch_overdue_task(monkeypatch):
         db.commit()
         db.close()
 
-    cd, ScheduledTask, TaskRun, dispatched = _drive_scheduler(monkeypatch, _setup)
+    cd, ScheduledTask, TaskRun, dispatched = _drive_scheduler(monkeypatch, make_test_db, _setup)
 
     db = cd.SessionLocal()
     t = db.query(ScheduledTask).filter(ScheduledTask.id == "t_due_1").first()
@@ -176,7 +169,7 @@ def test_restart_does_not_re_dispatch_overdue_task(monkeypatch):
     )
 
 
-def test_startup_does_not_advance_fresh_tasks(monkeypatch):
+def test_startup_does_not_advance_fresh_tasks(monkeypatch, make_test_db):
     """Tasks whose next_run is in the future must be untouched by the startup
     sweep — only overdue ones get pushed forward."""
     future = _test_utcnow() + timedelta(hours=2)
@@ -189,7 +182,7 @@ def test_startup_does_not_advance_fresh_tasks(monkeypatch):
         db.commit()
         db.close()
 
-    cd, ScheduledTask, TaskRun, dispatched = _drive_scheduler(monkeypatch, _setup)
+    cd, ScheduledTask, TaskRun, dispatched = _drive_scheduler(monkeypatch, make_test_db, _setup)
 
     db = cd.SessionLocal()
     t = db.query(ScheduledTask).filter(ScheduledTask.id == "t_fresh").first()
@@ -200,7 +193,7 @@ def test_startup_does_not_advance_fresh_tasks(monkeypatch):
     assert len(dispatched) == 0
 
 
-def test_startup_does_not_advance_paused_tasks(monkeypatch):
+def test_startup_does_not_advance_paused_tasks(monkeypatch, make_test_db):
     """A paused task with an old next_run is not overdue for execution —
     it should not be advanced by the startup sweep."""
     def _setup(cd, ScheduledTask, TaskRun):
@@ -214,7 +207,7 @@ def test_startup_does_not_advance_paused_tasks(monkeypatch):
         db.commit()
         db.close()
 
-    cd, ScheduledTask, TaskRun, dispatched = _drive_scheduler(monkeypatch, _setup)
+    cd, ScheduledTask, TaskRun, dispatched = _drive_scheduler(monkeypatch, make_test_db, _setup)
 
     db = cd.SessionLocal()
     t = db.query(ScheduledTask).filter(ScheduledTask.id == "t_paused").first()

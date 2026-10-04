@@ -1,32 +1,22 @@
 """Task chaining must not cross owner boundaries."""
 
-import tempfile
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import NullPool
 
 from tests.helpers.import_state import clear_fake_database_modules
 
 clear_fake_database_modules()
 
-import core.database as cdb
 import routes.task_routes as task_routes
 from core.database import ScheduledTask
 
-_TMPDB = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-_ENGINE = create_engine(
-    f"sqlite:///{_TMPDB.name}",
-    connect_args={"check_same_thread": False},
-    poolclass=NullPool,
-)
-cdb.Base.metadata.create_all(_ENGINE)
-_TS = sessionmaker(bind=_ENGINE, autoflush=False, autocommit=False)
-task_routes.SessionLocal = _TS
+
+@pytest.fixture(autouse=True)
+def _bind_test_db(monkeypatch, app_db):
+    monkeypatch.setattr(task_routes, "SessionLocal", app_db.SessionLocal)
 
 
 def _req(user="alice"):
@@ -34,7 +24,6 @@ def _req(user="alice"):
 
 
 def _endpoint(method, path):
-    task_routes.SessionLocal = _TS
     router = task_routes.setup_task_routes(MagicMock())
     for route in router.routes:
         if getattr(route, "path", None) == path and method in getattr(route, "methods", set()):
@@ -42,8 +31,8 @@ def _endpoint(method, path):
     raise RuntimeError(f"{method} {path} not found")
 
 
-def _seed_task(task_id, owner, *, then_task_id=None):
-    db = _TS()
+def _seed_task(app_db, task_id, owner, *, then_task_id=None):
+    db = app_db.SessionLocal()
     try:
         task = ScheduledTask(
             id=task_id,
@@ -63,8 +52,8 @@ def _seed_task(task_id, owner, *, then_task_id=None):
 
 
 @pytest.mark.asyncio
-async def test_create_task_rejects_cross_owner_chain_target():
-    _seed_task("bob-target-create", "bob")
+async def test_create_task_rejects_cross_owner_chain_target(app_db):
+    _seed_task(app_db, "bob-target-create", "bob")
     create_task = _endpoint("POST", "/api/tasks")
 
     req = task_routes.TaskCreate(
@@ -79,9 +68,9 @@ async def test_create_task_rejects_cross_owner_chain_target():
 
 
 @pytest.mark.asyncio
-async def test_update_task_rejects_cross_owner_chain_target():
-    _seed_task("alice-source-update", "alice")
-    _seed_task("bob-target-update", "bob")
+async def test_update_task_rejects_cross_owner_chain_target(app_db):
+    _seed_task(app_db, "alice-source-update", "alice")
+    _seed_task(app_db, "bob-target-update", "bob")
     update_task = _endpoint("PUT", "/api/tasks/{task_id}")
 
     with pytest.raises(HTTPException) as exc:
@@ -92,7 +81,7 @@ async def test_update_task_rejects_cross_owner_chain_target():
         )
 
     assert exc.value.status_code == 404
-    db = _TS()
+    db = app_db.SessionLocal()
     try:
         source = db.query(ScheduledTask).filter(ScheduledTask.id == "alice-source-update").first()
         assert source.then_task_id is None
@@ -101,9 +90,9 @@ async def test_update_task_rejects_cross_owner_chain_target():
 
 
 @pytest.mark.asyncio
-async def test_update_task_allows_same_owner_chain_target():
-    _seed_task("alice-source-allow", "alice")
-    _seed_task("alice-target-allow", "alice")
+async def test_update_task_allows_same_owner_chain_target(app_db):
+    _seed_task(app_db, "alice-source-allow", "alice")
+    _seed_task(app_db, "alice-target-allow", "alice")
     update_task = _endpoint("PUT", "/api/tasks/{task_id}")
 
     out = await update_task(
@@ -115,12 +104,12 @@ async def test_update_task_allows_same_owner_chain_target():
     assert out["then_task_id"] == "alice-target-allow"
 
 
-def test_scheduler_cycle_guard_treats_cross_owner_chain_as_unsafe():
-    _seed_task("bob-target-cycle", "bob")
+def test_scheduler_cycle_guard_treats_cross_owner_chain_as_unsafe(app_db):
+    _seed_task(app_db, "bob-target-cycle", "bob")
     from src.task_scheduler import TaskScheduler
 
     scheduler = TaskScheduler.__new__(TaskScheduler)
-    db = _TS()
+    db = app_db.SessionLocal()
     try:
         assert scheduler._has_chain_cycle(db, "bob-target-cycle", owner="alice") is True
     finally:

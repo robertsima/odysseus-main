@@ -18,7 +18,6 @@ pytest.importorskip("sqlalchemy")
 pytest.importorskip("icalendar")
 
 from tests.helpers.import_state import clear_fake_database_modules
-from tests.helpers.sqlite_db import make_temp_sqlite
 
 clear_fake_database_modules()
 
@@ -27,13 +26,11 @@ import routes.calendar_routes as cr  # noqa: E402
 from core.database import CalendarCal, CalendarEvent  # noqa: E402
 from routes.calendar_routes import _ensure_positive_duration  # noqa: E402
 
-_TS, _ENGINE, _TMPDB = make_temp_sqlite(cdb.Base.metadata)
-
 
 @pytest.fixture(autouse=True)
-def _bind_temp_db(monkeypatch):
-    monkeypatch.setattr(cdb, "SessionLocal", _TS)
-    monkeypatch.setattr(cr, "SessionLocal", _TS)
+def _bind_temp_db(monkeypatch, app_db):
+    monkeypatch.setattr(cdb, "SessionLocal", app_db.SessionLocal)
+    monkeypatch.setattr(cr, "SessionLocal", app_db.SessionLocal)
     monkeypatch.setattr(cr, "require_user", lambda request: "tester")
     yield
 

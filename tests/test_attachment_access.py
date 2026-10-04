@@ -15,8 +15,8 @@ import sys
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import QueuePool
 
 from core import database
 from src import attachment_access, tool_execution
@@ -46,12 +46,8 @@ def _meta(*ids):
 
 
 @pytest.fixture
-def world(tmp_path, monkeypatch):
-    engine = create_engine(f"sqlite:///{tmp_path / 'chat.db'}")
-    tables = [database.Session.__table__, database.ChatMessage.__table__,
-              database.ArchivedChatMessage.__table__]
-    database.Base.metadata.create_all(engine, tables=tables)
-    factory = sessionmaker(bind=engine)
+def world(tmp_path, monkeypatch, make_test_db):
+    factory = sessionmaker(bind=make_test_db(poolclass=QueuePool).engine)
     # Patch the factory; reloading core.database breaks later tests.
     monkeypatch.setattr(database, "SessionLocal", factory)
 

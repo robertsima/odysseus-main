@@ -14,8 +14,9 @@ import asyncio
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text, create_engine
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text
+from sqlalchemy.orm import declarative_base
+from sqlalchemy.pool import QueuePool
 
 from src.task_scheduler import _utcnow
 
@@ -34,7 +35,7 @@ def _reset_foreground_gate():
     _clear()
 
 
-def _setup_db(tmp_path, monkeypatch):
+def _setup_db(make_test_db, monkeypatch):
     import core.database as cd
 
     base = declarative_base()
@@ -69,9 +70,7 @@ def _setup_db(tmp_path, monkeypatch):
         error = Column(Text)
         model = Column(String)
 
-    engine = create_engine(f"sqlite:///{tmp_path / 'tasks.db'}")
-    base.metadata.create_all(engine)
-    session_local = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+    session_local = make_test_db(base.metadata, poolclass=QueuePool).SessionLocal
     monkeypatch.setattr(cd, "SessionLocal", session_local)
     monkeypatch.setattr(cd, "ScheduledTask", ScheduledTask)
     monkeypatch.setattr(cd, "TaskRun", TaskRun)
@@ -125,8 +124,8 @@ def _load(session_local, ScheduledTask, TaskRun):
 REASON = "foreground request GET /api/email/list"
 
 
-def test_sweep_preempts_a_running_task_once_with_the_retry(tmp_path, monkeypatch):
-    session_local, ScheduledTask, TaskRun = _setup_db(tmp_path, monkeypatch)
+def test_sweep_preempts_a_running_task_once_with_the_retry(make_test_db, monkeypatch):
+    session_local, ScheduledTask, TaskRun = _setup_db(make_test_db, monkeypatch)
     _seed(session_local, ScheduledTask)
     scheduler = _make_scheduler(monkeypatch)
 
@@ -179,9 +178,9 @@ def test_sweep_preempts_a_running_task_once_with_the_retry(tmp_path, monkeypatch
     assert _outcome(run)["abort_cause"] == "foreground_interrupt"
 
 
-def test_sweep_preempts_a_queued_task_with_the_same_label(tmp_path, monkeypatch):
+def test_sweep_preempts_a_queued_task_with_the_same_label(make_test_db, monkeypatch):
     """Cancelled while still waiting for idle — the outer dispatcher's handler."""
-    session_local, ScheduledTask, TaskRun = _setup_db(tmp_path, monkeypatch)
+    session_local, ScheduledTask, TaskRun = _setup_db(make_test_db, monkeypatch)
     overdue = _utcnow() - timedelta(minutes=1)
     _seed(session_local, ScheduledTask, next_run=overdue)
     scheduler = _make_scheduler(monkeypatch)
@@ -221,9 +220,9 @@ def test_sweep_preempts_a_queued_task_with_the_same_label(tmp_path, monkeypatch)
     assert scheduler._foreground_preemptions() == {}
 
 
-def test_user_stop_is_still_a_user_stop(tmp_path, monkeypatch):
+def test_user_stop_is_still_a_user_stop(make_test_db, monkeypatch):
     """The preemption mark must not leak onto a real Stop."""
-    session_local, ScheduledTask, TaskRun = _setup_db(tmp_path, monkeypatch)
+    session_local, ScheduledTask, TaskRun = _setup_db(make_test_db, monkeypatch)
     _seed(session_local, ScheduledTask)
     scheduler = _make_scheduler(monkeypatch)
 

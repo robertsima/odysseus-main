@@ -4,7 +4,7 @@ import asyncio
 import httpx
 import pytest
 from fastapi import FastAPI
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import QueuePool
 
@@ -14,13 +14,10 @@ from src import session_actions
 
 
 @pytest.fixture
-def pool(tmp_path, monkeypatch):
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'availability.db'}",
-        connect_args={"check_same_thread": False},
+def pool(make_test_db, monkeypatch):
+    engine = make_test_db(
         poolclass=QueuePool, pool_size=1, max_overflow=0, pool_timeout=0.05,
-    )
-    database.Base.metadata.create_all(engine)
+    ).engine
     factory = sessionmaker(bind=engine)
     monkeypatch.setattr(database, "SessionLocal", factory)
     with factory() as db:
@@ -32,7 +29,6 @@ def pool(tmp_path, monkeypatch):
         db.commit()
     yield engine, factory
     assert engine.pool.checkedout() == 0
-    engine.dispose()
 
 
 @pytest.mark.asyncio

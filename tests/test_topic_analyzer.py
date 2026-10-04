@@ -1,14 +1,12 @@
 """Tests for topic keyword matching (src/topic_analyzer.py)."""
 from types import SimpleNamespace
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
 from tests.helpers.import_state import clear_fake_database_modules
 
 clear_fake_database_modules()
 
-from core.database import Base, Session as DbSession, ChatMessage as DbChatMessage
+from core.database import Session as DbSession, ChatMessage as DbChatMessage
 from core.session_manager import SessionManager
 from src.topic_analyzer import analyze_topics
 from datetime import datetime
@@ -40,13 +38,10 @@ def test_multiword_keyword_matches():
     assert "Learning" in _freq(result)
 
 
-def test_topic_analyzer_hydrates_sessions(monkeypatch):
+def test_topic_analyzer_hydrates_sessions(monkeypatch, make_test_db):
     # 1. Create clean in-memory database
-    engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(bind=engine)
-    
     # 2. Create test session factory
-    TestSessionLocal = sessionmaker(bind=engine)
+    TestSessionLocal = make_test_db(memory=True).SessionLocal
     
     # 3. Populate test database with a session and a message about Python
     db = TestSessionLocal()

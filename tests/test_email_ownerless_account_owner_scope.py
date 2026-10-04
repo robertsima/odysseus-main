@@ -16,14 +16,8 @@ import pytest
 from fastapi import HTTPException
 
 
-def _make_db():
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-    from core.database import Base
-    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
-    Base.metadata.create_all(engine)
-    Factory = sessionmaker(bind=engine)
-    return Factory
+def _make_db(make_test_db):
+    return make_test_db(memory=True).SessionLocal
 
 
 def _make_account(Factory, account_id, owner, imap_user, from_address="", is_default=False):
@@ -48,11 +42,11 @@ def _make_account(Factory, account_id, owner, imap_user, from_address="", is_def
     db.close()
 
 
-def test_assert_owns_account_rejects_ownerless_account_for_other_tenant():
+def test_assert_owns_account_rejects_ownerless_account_for_other_tenant(make_test_db):
     """The core regression: a legacy owner-less mailbox is NOT accessible to an
     authenticated caller whose own mailbox does not match it."""
     from routes.email_helpers import _assert_owns_account
-    Factory = _make_db()
+    Factory = _make_db(make_test_db)
     # owner="" (created while auth was disabled); mailbox belongs to victim.
     _make_account(Factory, "acct-legacy", owner="", imap_user="victim@corp.com")
 
@@ -62,38 +56,38 @@ def test_assert_owns_account_rejects_ownerless_account_for_other_tenant():
     assert exc.value.status_code == 404
 
 
-def test_assert_owns_account_allows_owned_account():
+def test_assert_owns_account_allows_owned_account(make_test_db):
     from routes.email_helpers import _assert_owns_account
-    Factory = _make_db()
+    Factory = _make_db(make_test_db)
     _make_account(Factory, "acct-bob", owner="bob", imap_user="bob@corp.com")
     with mock.patch("core.database.SessionLocal", Factory):
         _assert_owns_account("acct-bob", "bob")  # no raise
 
 
-def test_assert_owns_account_allows_ownerless_account_on_mailbox_match():
+def test_assert_owns_account_allows_ownerless_account_on_mailbox_match(make_test_db):
     """Legacy-claim path stays intact: the user whose mailbox matches an
     owner-less account may still act on it (imap_user or from_address)."""
     from routes.email_helpers import _assert_owns_account
-    Factory = _make_db()
+    Factory = _make_db(make_test_db)
     _make_account(Factory, "acct-legacy", owner="", imap_user="alice@corp.com")
     with mock.patch("core.database.SessionLocal", Factory):
         _assert_owns_account("acct-legacy", "alice@corp.com")  # no raise
 
 
-def test_assert_owns_account_noop_for_single_user_mode():
+def test_assert_owns_account_noop_for_single_user_mode(make_test_db):
     """owner == "" (unconfigured / single-user) accepts any account, unchanged."""
     from routes.email_helpers import _assert_owns_account
-    Factory = _make_db()
+    Factory = _make_db(make_test_db)
     _make_account(Factory, "acct-legacy", owner="", imap_user="whoever@corp.com")
     with mock.patch("core.database.SessionLocal", Factory):
         _assert_owns_account("acct-legacy", "")  # no raise
 
 
-def test_get_email_config_does_not_resolve_ownerless_account_for_other_tenant(monkeypatch):
+def test_get_email_config_does_not_resolve_ownerless_account_for_other_tenant(monkeypatch, make_test_db):
     """`_get_email_config(account_id=..., owner=...)` must not serve an
     owner-less account (and its decrypted creds) to a non-matching tenant."""
     import routes.email_helpers as eh
-    Factory = _make_db()
+    Factory = _make_db(make_test_db)
     _make_account(Factory, "acct-legacy", owner="", imap_user="victim@corp.com", is_default=True)
 
     # Make the settings.json / env fallback empty and deterministic.
@@ -107,10 +101,10 @@ def test_get_email_config_does_not_resolve_ownerless_account_for_other_tenant(mo
     assert cfg.get("account_id") != "acct-legacy"
 
 
-def test_get_email_config_resolves_ownerless_account_on_mailbox_match():
+def test_get_email_config_resolves_ownerless_account_on_mailbox_match(make_test_db):
     """The mailbox owner still resolves their claimable legacy account by id."""
     import routes.email_helpers as eh
-    Factory = _make_db()
+    Factory = _make_db(make_test_db)
     _make_account(Factory, "acct-legacy", owner="", imap_user="alice@corp.com")
     with mock.patch("core.database.SessionLocal", Factory):
         cfg = eh._get_email_config(account_id="acct-legacy", owner="alice@corp.com")

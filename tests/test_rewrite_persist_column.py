@@ -7,16 +7,11 @@ and since session_manager.save_sessions() is a no-op this DB UPDATE was the
 only persistence path. The rewrite was shown live but silently lost on
 reload.
 """
-import tempfile
 import uuid
 from datetime import datetime, timedelta
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import NullPool
 
-import core.database as cdb
 from core.database import ChatMessage as DBChatMessage, Session as DbSession
 
 
@@ -26,11 +21,8 @@ def test_chatmessage_has_timestamp_not_created_at():
     assert not hasattr(DBChatMessage, "created_at")
 
 
-def test_rewrite_query_selects_and_updates_latest_assistant_message():
-    tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-    engine = create_engine(f"sqlite:///{tmp.name}", connect_args={"check_same_thread": False}, poolclass=NullPool)
-    cdb.Base.metadata.create_all(engine)
-    TS = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+def test_rewrite_query_selects_and_updates_latest_assistant_message(app_db):
+    TS = app_db.SessionLocal
 
     sid = "s-" + uuid.uuid4().hex[:8]
     base = datetime(2026, 6, 3, 12, 0, 0)

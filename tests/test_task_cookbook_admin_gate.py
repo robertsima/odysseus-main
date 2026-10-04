@@ -7,9 +7,6 @@ from unittest.mock import MagicMock
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import NullPool
 
 from tests.helpers.import_state import clear_fake_database_modules
 
@@ -41,17 +38,11 @@ def _restore_module_binding(monkeypatch, name, module):
 
 
 @pytest.fixture()
-def task_db(monkeypatch, tmp_path):
+def task_db(monkeypatch, app_db):
     _restore_module_binding(monkeypatch, "core.database", cdb)
     for attr, value in _REAL_DATABASE_ATTRS.items():
         monkeypatch.setattr(cdb, attr, value, raising=False)
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'tasks.db'}",
-        connect_args={"check_same_thread": False},
-        poolclass=NullPool,
-    )
-    cdb.Base.metadata.create_all(engine)
-    testing_session = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    testing_session = app_db.SessionLocal
     monkeypatch.setattr(task_routes, "SessionLocal", testing_session)
     monkeypatch.setattr(cdb, "SessionLocal", testing_session)
     return testing_session

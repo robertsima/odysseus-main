@@ -20,8 +20,9 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text, create_engine
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text
+from sqlalchemy.orm import declarative_base
+from sqlalchemy.pool import QueuePool
 
 _REPORT_BACKLOG = pytest.mark.skip(
     reason="Re-port backlog: uses fork-only internals replaced by upstream's agent core (website/upstream-sync-2026-09-18.md)"
@@ -45,7 +46,7 @@ def _reset_foreground_gate():
     _clear()
 
 
-def _setup_db(tmp_path, monkeypatch):
+def _setup_db(make_test_db, monkeypatch):
     import core.database as cd
 
     base = declarative_base()
@@ -80,9 +81,7 @@ def _setup_db(tmp_path, monkeypatch):
         error = Column(Text)
         model = Column(String)
 
-    engine = create_engine(f"sqlite:///{tmp_path / 'tasks.db'}")
-    base.metadata.create_all(engine)
-    session_local = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+    session_local = make_test_db(base.metadata, poolclass=QueuePool).SessionLocal
     monkeypatch.setattr(cd, "SessionLocal", session_local)
     monkeypatch.setattr(cd, "ScheduledTask", ScheduledTask)
     monkeypatch.setattr(cd, "TaskRun", TaskRun)
@@ -129,9 +128,9 @@ def _seed_task(session_local, ScheduledTask, task_id="t1"):
     db.close()
 
 
-def test_manual_run_does_not_wait_for_idle(tmp_path, monkeypatch):
+def test_manual_run_does_not_wait_for_idle(make_test_db, monkeypatch):
     """The browser is active — a manual run must still execute."""
-    session_local, ScheduledTask, TaskRun = _setup_db(tmp_path, monkeypatch)
+    session_local, ScheduledTask, TaskRun = _setup_db(make_test_db, monkeypatch)
     _seed_task(session_local, ScheduledTask)
 
     import src.interactive_gate as gate
@@ -172,9 +171,9 @@ def test_manual_run_does_not_wait_for_idle(tmp_path, monkeypatch):
         db.close()
 
 
-def test_scheduled_run_still_waits_for_idle(tmp_path, monkeypatch):
+def test_scheduled_run_still_waits_for_idle(make_test_db, monkeypatch):
     """The gate is intact for automatic dispatch — only manual runs skip it."""
-    session_local, ScheduledTask, TaskRun = _setup_db(tmp_path, monkeypatch)
+    session_local, ScheduledTask, TaskRun = _setup_db(make_test_db, monkeypatch)
     _seed_task(session_local, ScheduledTask)
 
     import src.interactive_gate as gate
@@ -205,9 +204,9 @@ def test_scheduled_run_still_waits_for_idle(tmp_path, monkeypatch):
     assert not ran.is_set()
 
 
-def test_foreground_sweep_leaves_manual_runs_alone(tmp_path, monkeypatch):
+def test_foreground_sweep_leaves_manual_runs_alone(make_test_db, monkeypatch):
     """The heartbeat's "stop background work" sweep must not kill Run now."""
-    session_local, ScheduledTask, TaskRun = _setup_db(tmp_path, monkeypatch)
+    session_local, ScheduledTask, TaskRun = _setup_db(make_test_db, monkeypatch)
     _seed_task(session_local, ScheduledTask)
 
     scheduler = _make_scheduler()
@@ -247,11 +246,11 @@ def test_foreground_sweep_leaves_manual_runs_alone(tmp_path, monkeypatch):
         db.close()
 
 
-def test_background_task_does_not_hold_the_slot_while_waiting_for_idle(tmp_path, monkeypatch):
+def test_background_task_does_not_hold_the_slot_while_waiting_for_idle(make_test_db, monkeypatch):
     """A scheduled run parked on the idle gate used to keep the single model
     slot, so every later task — Run now included — queued behind a run that
     could not start until the user walked away."""
-    session_local, ScheduledTask, TaskRun = _setup_db(tmp_path, monkeypatch)
+    session_local, ScheduledTask, TaskRun = _setup_db(make_test_db, monkeypatch)
 
     db = session_local()
     db.add(ScheduledTask(
@@ -286,8 +285,8 @@ def test_background_task_does_not_hold_the_slot_while_waiting_for_idle(tmp_path,
     asyncio.run(drive())
 
 
-def test_manual_refcount_released_after_run(tmp_path, monkeypatch):
-    session_local, ScheduledTask, TaskRun = _setup_db(tmp_path, monkeypatch)
+def test_manual_refcount_released_after_run(make_test_db, monkeypatch):
+    session_local, ScheduledTask, TaskRun = _setup_db(make_test_db, monkeypatch)
     _seed_task(session_local, ScheduledTask)
 
     scheduler = _make_scheduler()

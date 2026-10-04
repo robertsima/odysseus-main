@@ -5,11 +5,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import NullPool
 
-from core.database import Base, GalleryImage
+from core.database import GalleryImage
 
 
 def _gallery_module():
@@ -76,7 +73,7 @@ def test_gallery_image_path_rejects_symlink_escape(tmp_path, monkeypatch):
     assert exc.value.status_code == 400
 
 
-def test_gallery_replace_rejects_symlink_escape(tmp_path, monkeypatch):
+def test_gallery_replace_rejects_symlink_escape(tmp_path, monkeypatch, app_db):
     gallery_routes = _gallery_module()
     image_dir = tmp_path / "generated_images"
     image_dir.mkdir()
@@ -88,13 +85,7 @@ def test_gallery_replace_rejects_symlink_escape(tmp_path, monkeypatch):
     except (AttributeError, NotImplementedError, OSError) as exc:
         pytest.skip(f"symlinks unavailable: {exc}")
 
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'gallery.db'}",
-        connect_args={"check_same_thread": False},
-        poolclass=NullPool,
-    )
-    Base.metadata.create_all(engine)
-    SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    SessionLocal = app_db.SessionLocal
     db = SessionLocal()
     try:
         db.add(

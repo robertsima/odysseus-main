@@ -11,28 +11,24 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import QueuePool
 
 from core.models import ChatMessage
 
 
 @pytest.fixture
-def managed(monkeypatch, tmp_path):
+def managed(monkeypatch, make_test_db):
     """A SessionManager on its own SQLite file (patched, never reloaded)."""
     import core.database as database
     import core.models as models
     import core.session_manager as sm_mod
 
-    engine = create_engine(f"sqlite:///{tmp_path / 'app.db'}", connect_args={"check_same_thread": False})
-    database.Base.metadata.create_all(bind=engine)
-    factory = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+    factory = make_test_db(poolclass=QueuePool).SessionLocal
     monkeypatch.setattr(sm_mod, "SessionLocal", factory)
     monkeypatch.setattr(database, "SessionLocal", factory)
     sm = sm_mod.SessionManager()
     monkeypatch.setattr(models, "get_session_manager_instance", lambda: sm)
-    yield sm, SimpleNamespace(SessionLocal=factory, db=database)
-    engine.dispose()
+    return sm, SimpleNamespace(SessionLocal=factory, db=database)
 
 
 def _chat(sm, sid="chat", n=12):

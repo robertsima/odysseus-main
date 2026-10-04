@@ -15,23 +15,20 @@ import uuid
 import pytest
 
 from tests.helpers.import_state import clear_fake_database_modules
-from tests.helpers.sqlite_db import make_temp_sqlite
 
 clear_fake_database_modules()
 
 import core.database as cdb
 from tests.helpers.fake_notes_store import FakeNotesStore
 
-_TS, _ENGINE, _TMPDB = make_temp_sqlite(cdb.Base.metadata)
-
 
 @pytest.fixture(autouse=True)
-def _bind_temp_db(monkeypatch):
+def _bind_temp_db(monkeypatch, app_db):
     monkeypatch.setitem(sys.modules, "core.database", cdb)
     parent = sys.modules.get("core")
     if parent is not None:
         monkeypatch.setattr(parent, "database", cdb, raising=False)
-    monkeypatch.setattr(cdb, "SessionLocal", _TS)
+    monkeypatch.setattr(cdb, "SessionLocal", app_db.SessionLocal)
     from src import notes_store
     store = FakeNotesStore()
     monkeypatch.setattr(notes_store, "STORE", store)

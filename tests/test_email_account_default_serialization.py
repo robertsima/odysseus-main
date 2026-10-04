@@ -18,28 +18,18 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import create_engine, create_mock_engine, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
 
 
 @pytest.fixture
-def account_db(tmp_path, monkeypatch):
+def account_db(make_test_db, monkeypatch):
     from core import database as core_db
 
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'accounts.db'}",
+    factory = make_test_db(
         connect_args={"check_same_thread": False, "timeout": 5},
-        poolclass=NullPool,
-    )
-    core_db.Base.metadata.create_all(engine)
-    factory = sessionmaker(
-        bind=engine,
-        autocommit=False,
-        autoflush=False,
-    )
+    ).SessionLocal
     monkeypatch.setattr(core_db, "SessionLocal", factory)
-    yield factory
-    engine.dispose()
+    return factory
 
 
 def _endpoint(method, path):
@@ -287,17 +277,13 @@ def test_upgrade_normalizes_legacy_defaults_and_installs_unique_index(
 
 
 def test_concurrent_legacy_seed_is_one_locked_transaction(
-    tmp_path, monkeypatch, caplog
+    tmp_path, monkeypatch, caplog, make_test_db
 ):
     from core import database as core_db
 
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'seed-accounts.db'}",
-        connect_args={"check_same_thread": False, "timeout": 5},
-        poolclass=NullPool,
-    )
-    core_db.Base.metadata.create_all(engine)
-    factory = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+    seed_db = make_test_db(connect_args={"check_same_thread": False, "timeout": 5})
+    engine = seed_db.engine
+    factory = seed_db.SessionLocal
     settings_file = tmp_path / "settings.json"
     settings_file.write_text(
         json.dumps({"imap_host": "imap.example.test", "imap_user": "alice"}),
@@ -321,22 +307,19 @@ def test_concurrent_legacy_seed_is_one_locked_transaction(
         threading.Thread(target=core_db._migrate_seed_email_account)
         for _ in range(2)
     ]
-    try:
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join(5)
-        assert all(not thread.is_alive() for thread in threads)
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(5)
+    assert all(not thread.is_alive() for thread in threads)
 
-        with engine.connect() as conn:
-            rows = conn.execute(text("""
-                SELECT owner, is_default FROM email_accounts
-                ORDER BY id
-            """)).all()
-        assert rows == [(None, 1)]
-        assert "seed email account migration:" not in caplog.text
-    finally:
-        engine.dispose()
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT owner, is_default FROM email_accounts
+            ORDER BY id
+        """)).all()
+    assert rows == [(None, 1)]
+    assert "seed email account migration:" not in caplog.text
 
 
 def test_multi_owner_row_locks_are_acquired_in_canonical_order():

@@ -1,17 +1,13 @@
 from fastapi import Request
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
-from core.database import Base, Note
+from core.database import Note
 from routes.admin_wipe_routes import setup_admin_wipe_routes
 from src.notes_markdown import NoteRecord
 from tests.helpers.fake_notes_store import FakeNotesStore
 
 
-def test_wipe_notes_clears_markdown_store_and_legacy_rows(monkeypatch):
-    engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(bind=engine)
-    sessions = sessionmaker(bind=engine)
+def test_wipe_notes_clears_markdown_store_and_legacy_rows(monkeypatch, make_test_db):
+    sessions = make_test_db(memory=True).SessionLocal
     db = sessions()
     db.add(Note(id="legacy", title="Legacy"))
     db.commit()

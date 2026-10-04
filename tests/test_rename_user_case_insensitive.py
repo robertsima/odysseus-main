@@ -55,15 +55,12 @@ def _has_real_sqlalchemy():
 
 
 @pytest.mark.skipif(not _has_real_sqlalchemy(), reason="sqlalchemy not installed")
-def test_rename_owner_db_filter_is_case_insensitive():
-    from sqlalchemy import create_engine, func
-    from sqlalchemy.orm import sessionmaker
+def test_rename_owner_db_filter_is_case_insensitive(make_test_db):
+    from sqlalchemy import func
 
-    from core.database import Base, Session as DbSession
+    from core.database import Session as DbSession
 
-    engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(bind=engine)
-    db = sessionmaker(bind=engine)()
+    db = make_test_db(memory=True).SessionLocal()
     db.add(
         DbSession(
             id="s1",

@@ -164,15 +164,13 @@ def test_an_agent_cannot_widen_its_own_chat(settings_api):
 
 # ── the one-time move of the old coupling ─────────────────────────────────
 
-def test_chats_and_loadouts_with_the_vault_grant_keep_a_full_shell_once(monkeypatch, tmp_path):
+def test_chats_and_loadouts_with_the_vault_grant_keep_a_full_shell_once(monkeypatch, tmp_path, make_test_db):
     import core.database as database
-    from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import QueuePool
     from contextlib import contextmanager
 
-    engine = create_engine(f"sqlite:///{tmp_path / 'app.db'}")
-    database.Base.metadata.create_all(bind=engine)
-    factory = sessionmaker(bind=engine)
+    factory = sessionmaker(bind=make_test_db(poolclass=QueuePool).engine)
 
     @contextmanager
     def db_session():

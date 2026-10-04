@@ -7,13 +7,9 @@ tool to fall back to its default 14-day window.
 
 import json
 import sys
-import tempfile
 import uuid
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import NullPool
 
 from tests.helpers.import_state import clear_fake_database_modules
 
@@ -21,23 +17,14 @@ clear_fake_database_modules()
 
 import core.database as cdb
 
-_TMPDB = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-_ENGINE = create_engine(
-    f"sqlite:///{_TMPDB.name}",
-    connect_args={"check_same_thread": False},
-    poolclass=NullPool,
-)
-cdb.Base.metadata.create_all(_ENGINE)
-_TS = sessionmaker(bind=_ENGINE, autoflush=False, autocommit=False)
-
 
 @pytest.fixture(autouse=True)
-def _bind_temp_db(monkeypatch):
+def _bind_temp_db(monkeypatch, app_db):
     monkeypatch.setitem(sys.modules, "core.database", cdb)
     parent = sys.modules.get("core")
     if parent is not None:
         monkeypatch.setattr(parent, "database", cdb, raising=False)
-    monkeypatch.setattr(cdb, "SessionLocal", _TS)
+    monkeypatch.setattr(cdb, "SessionLocal", app_db.SessionLocal)
     yield
 
 

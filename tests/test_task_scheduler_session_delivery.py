@@ -9,9 +9,6 @@ sqlalchemy = pytest.importorskip("sqlalchemy")
 if not isinstance(sqlalchemy, _types.ModuleType):
     pytest.skip("sqlalchemy is stubbed in this environment", allow_module_level=True)
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-
 from tests.helpers.import_state import clear_fake_database_modules
 
 clear_fake_database_modules()
@@ -33,10 +30,8 @@ if type(Base).__name__ == "MagicMock":
     pytest.skip("core.database is stubbed — run this file in isolation", allow_module_level=True)
 
 
-def _make_db():
-    engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    return sessionmaker(bind=engine)()
+def _make_db(make_test_db):
+    return make_test_db(memory=True).SessionLocal()
 
 
 def _make_task():
@@ -53,7 +48,7 @@ def _make_task():
     )
 
 
-def test_session_delivery_survives_empty_database(monkeypatch):
+def test_session_delivery_survives_empty_database(monkeypatch, make_test_db):
     """On a fresh/wiped database there is no session to inherit endpoint/model
     from, so _resolve_defaults returns None. The delivery must still persist a
     session instead of crashing on the NOT NULL constraint (issue #326)."""
@@ -62,7 +57,7 @@ def test_session_delivery_survives_empty_database(monkeypatch):
     if parent is not None:
         monkeypatch.setattr(parent, "database", cdb, raising=False)
 
-    db = _make_db()
+    db = _make_db(make_test_db)
     scheduler = TaskScheduler.__new__(TaskScheduler)
     scheduler._session_manager = None
 
@@ -74,7 +69,7 @@ def test_session_delivery_survives_empty_database(monkeypatch):
     assert sessions[0].model == ""
 
 
-def test_session_delivery_uses_in_memory_messages_with_manager(monkeypatch):
+def test_session_delivery_uses_in_memory_messages_with_manager(monkeypatch, make_test_db):
     """Manager delivery must not construct the SQLAlchemy ChatMessage model."""
     monkeypatch.setitem(sys.modules, "core.database", cdb)
     parent = sys.modules.get("core")
@@ -89,7 +84,7 @@ def test_session_delivery_uses_in_memory_messages_with_manager(monkeypatch):
             assert isinstance(message, MemChatMessage)
             self.messages.append((session_id, message))
 
-    db = _make_db()
+    db = _make_db(make_test_db)
     manager = RecordingManager()
     scheduler = TaskScheduler.__new__(TaskScheduler)
     scheduler._session_manager = manager

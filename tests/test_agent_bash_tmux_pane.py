@@ -33,12 +33,17 @@ class FakeTmux:
         return "", "", 0
 
     async def capture(self, name):
+        # Answer for the latest command typed into the pane. Matching the first
+        # one left every later command in a pane waiting out its timeout.
         typed = "\n".join(self.sent)
-        start = re.search(r"__ODYSSEUS_CMD_START_[^_]+__", typed)
-        end = re.search(r"(__ODYSSEUS_CMD_END_[^_]+__:)", typed)
-        if not (start and end and self.finish):
-            return f"\n{start.group(0)}\n" if start else ""
-        return f"\n{start.group(0)}\n{self.output}\n{end.group(1)}0\n"
+        stamps = re.findall(r"__ODYSSEUS_CMD_START_([^_]+)__", typed)
+        if not stamps:
+            return ""
+        start = f"__ODYSSEUS_CMD_START_{stamps[-1]}__"
+        end = f"__ODYSSEUS_CMD_END_{stamps[-1]}__:"
+        if not (end in typed and self.finish):
+            return f"\n{start}\n"
+        return f"\n{start}\n{self.output}\n{end}0\n"
 
 
 @pytest.fixture
@@ -115,8 +120,9 @@ async def test_one_command_at_a_time_per_pane(tmux, monkeypatch):
             active -= 1
 
     monkeypatch.setattr(st, "_tmux_send_line", counting_send)
-    await asyncio.gather(*(_run(f"echo {i}") for i in range(3)))
+    results = await asyncio.gather(*(_run(f"echo {i}") for i in range(3)))
     assert peak == 1
+    assert [rc for _out, _err, rc, _stopped in results] == [0, 0, 0]
 
 
 @pytest.mark.asyncio

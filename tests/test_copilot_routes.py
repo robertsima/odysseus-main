@@ -1,23 +1,19 @@
 """DB-backed tests for Copilot endpoint provisioning (routes/copilot_routes.py)."""
 import json
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
-from core.database import Base, ModelEndpoint
+from core.database import ModelEndpoint
 import routes.copilot_routes as cr
 
 
-def _mem_db(monkeypatch):
-    engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(bind=engine)
-    TestSessionLocal = sessionmaker(bind=engine)
+def _mem_db(monkeypatch, make_test_db):
+    TestSessionLocal = make_test_db(memory=True).SessionLocal
     monkeypatch.setattr(cr, "SessionLocal", TestSessionLocal)
     return TestSessionLocal
 
 
-def test_provision_creates_owner_scoped_endpoint(monkeypatch):
-    TestSessionLocal = _mem_db(monkeypatch)
+def test_provision_creates_owner_scoped_endpoint(monkeypatch, make_test_db):
+    TestSessionLocal = _mem_db(monkeypatch, make_test_db)
     monkeypatch.setattr(
         cr.copilot, "fetch_models",
         lambda base, token: [
@@ -44,8 +40,8 @@ def test_provision_creates_owner_scoped_endpoint(monkeypatch):
         db.close()
 
 
-def test_provision_refreshes_existing_token(monkeypatch):
-    TestSessionLocal = _mem_db(monkeypatch)
+def test_provision_refreshes_existing_token(monkeypatch, make_test_db):
+    TestSessionLocal = _mem_db(monkeypatch, make_test_db)
     monkeypatch.setattr(cr.copilot, "fetch_models", lambda base, token: [{"id": "gpt-4o", "tool_calls": True}])
 
     first = cr._provision_endpoint("OLD", "https://api.githubcopilot.com", "bob")
@@ -62,8 +58,8 @@ def test_provision_refreshes_existing_token(monkeypatch):
         db.close()
 
 
-def test_provision_handles_model_fetch_failure(monkeypatch):
-    TestSessionLocal = _mem_db(monkeypatch)
+def test_provision_handles_model_fetch_failure(monkeypatch, make_test_db):
+    TestSessionLocal = _mem_db(monkeypatch, make_test_db)
 
     def boom(base, token):
         raise RuntimeError("network down")

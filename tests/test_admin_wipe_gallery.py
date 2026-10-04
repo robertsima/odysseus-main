@@ -1,18 +1,13 @@
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from core.database import Base, GalleryImage, GalleryAlbum
+from core.database import GalleryImage, GalleryAlbum
 from routes.admin_wipe_routes import setup_admin_wipe_routes
 from fastapi import Request
 
-def test_wipe_gallery_clears_albums(monkeypatch):
+def test_wipe_gallery_clears_albums(monkeypatch, make_test_db):
     # 1. Create a clean in-memory database
-    engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(bind=engine)
-    
     # 2. Create test session factory
-    TestSessionLocal = sessionmaker(bind=engine)
-    
+    TestSessionLocal = make_test_db(memory=True).SessionLocal
+
     # 3. Populate test database with an album and an image linked to it
     db = TestSessionLocal()
     album = GalleryAlbum(id="album-1", name="Trip to Rome")
@@ -57,7 +52,7 @@ def test_wipe_gallery_clears_albums(monkeypatch):
     db.close()
 
 
-def _wipe_gallery(monkeypatch, tmp_path, filenames, *, write_files=True):
+def _wipe_gallery(monkeypatch, tmp_path, make_test_db, filenames, *, write_files=True):
     """Run the gallery wipe against an in-memory DB and a real image dir.
 
     Returns (result, image_dir) so a caller can assert on what survived.
@@ -65,9 +60,7 @@ def _wipe_gallery(monkeypatch, tmp_path, filenames, *, write_files=True):
     import routes.admin_wipe_routes
     import src.generated_images as gen
 
-    engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(bind=engine)
-    TestSessionLocal = sessionmaker(bind=engine)
+    TestSessionLocal = make_test_db(memory=True).SessionLocal
 
     image_dir = tmp_path / "generated_images"
     image_dir.mkdir(parents=True, exist_ok=True)
@@ -89,7 +82,7 @@ def _wipe_gallery(monkeypatch, tmp_path, filenames, *, write_files=True):
     return handler(kind="gallery", request=Request(scope={"type": "http"})), image_dir
 
 
-def test_wipe_gallery_deletes_the_image_files(monkeypatch, tmp_path):
+def test_wipe_gallery_deletes_the_image_files(monkeypatch, tmp_path, make_test_db):
     """The wipe used to remove the rows and two directories nothing writes to,
     leaving every image on disk.
 
@@ -99,29 +92,29 @@ def test_wipe_gallery_deletes_the_image_files(monkeypatch, tmp_path):
     one any signed-in user could fetch by filename.
     """
     names = ["a1b2c3d4e5f6.png", "0f1e2d3c4b5a.png"]
-    result, image_dir = _wipe_gallery(monkeypatch, tmp_path, names)
+    result, image_dir = _wipe_gallery(monkeypatch, tmp_path, make_test_db, names)
 
     assert result["status"] == "deleted"
     assert result["files_removed"] == 2
     assert sorted(p.name for p in image_dir.iterdir()) == []
 
 
-def test_wipe_gallery_survives_a_row_whose_file_is_already_gone(monkeypatch, tmp_path):
+def test_wipe_gallery_survives_a_row_whose_file_is_already_gone(monkeypatch, tmp_path, make_test_db):
     """Best-effort per file: the database half has already committed, so a row
     pointing at a file that no longer exists must not turn a successful wipe
     into a 500. It reports only what it actually removed."""
-    result, _ = _wipe_gallery(monkeypatch, tmp_path, ["a1b2c3d4e5f6.png"],
+    result, _ = _wipe_gallery(monkeypatch, tmp_path, make_test_db, ["a1b2c3d4e5f6.png"],
                               write_files=False)
     assert result["status"] == "deleted"
     assert result["files_removed"] == 0
 
 
-def test_wipe_gallery_cannot_reach_outside_the_image_dir(monkeypatch, tmp_path):
+def test_wipe_gallery_cannot_reach_outside_the_image_dir(monkeypatch, tmp_path, make_test_db):
     """A malformed stored filename goes through the path-confined resolver, so
     a traversal attempt removes nothing rather than deleting an arbitrary file."""
     outside = tmp_path / "secret.png"
     outside.write_bytes(b"do not delete")
 
-    result, _ = _wipe_gallery(monkeypatch, tmp_path, ["../secret.png"])
+    result, _ = _wipe_gallery(monkeypatch, tmp_path, make_test_db, ["../secret.png"])
     assert result["files_removed"] == 0
     assert outside.exists()

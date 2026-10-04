@@ -3,26 +3,23 @@
 import json
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
-from core.database import Base, ModelEndpoint, ProviderAuthSession
+from core.database import ModelEndpoint, ProviderAuthSession
 import routes.chatgpt_subscription_routes as csr
 
 
-def _mem_db(monkeypatch):
-    engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(bind=engine)
+def _mem_db(monkeypatch, make_test_db):
     # Match production (core.database SessionLocal is autoflush=False): a pending
     # db.delete(ep) is NOT flushed before the orphan-auth reference-count SELECT,
     # which is exactly why _delete_orphaned_provider_auth needs exclude_ep_id.
-    TestSessionLocal = sessionmaker(bind=engine, autoflush=False)
+    # make_test_db's SessionLocal is autoflush=False too.
+    TestSessionLocal = make_test_db(memory=True).SessionLocal
     monkeypatch.setattr(csr, "SessionLocal", TestSessionLocal)
     return TestSessionLocal
 
 
-def test_provision_creates_owner_scoped_auth_session_and_endpoint(monkeypatch):
-    TestSessionLocal = _mem_db(monkeypatch)
+def test_provision_creates_owner_scoped_auth_session_and_endpoint(monkeypatch, make_test_db):
+    TestSessionLocal = _mem_db(monkeypatch, make_test_db)
     monkeypatch.setattr(csr.chatgpt_subscription, "fetch_available_models", lambda token: ["gpt-5.5", "o4-mini"])
 
     res = csr._provision_endpoint({"access_token": "AT", "refresh_token": "RT"}, "alice")
@@ -56,8 +53,8 @@ def test_provision_creates_owner_scoped_auth_session_and_endpoint(monkeypatch):
         db.close()
 
 
-def test_provision_refreshes_existing_auth_session_and_endpoint(monkeypatch):
-    TestSessionLocal = _mem_db(monkeypatch)
+def test_provision_refreshes_existing_auth_session_and_endpoint(monkeypatch, make_test_db):
+    TestSessionLocal = _mem_db(monkeypatch, make_test_db)
     monkeypatch.setattr(csr.chatgpt_subscription, "fetch_available_models", lambda token: ["gpt-5.5"])
 
     first = csr._provision_endpoint({"access_token": "OLD", "refresh_token": "OLD-RT"}, "bob")
@@ -77,14 +74,14 @@ def test_provision_refreshes_existing_auth_session_and_endpoint(monkeypatch):
         db.close()
 
 
-def test_provision_rejects_missing_tokens(monkeypatch):
-    _mem_db(monkeypatch)
+def test_provision_rejects_missing_tokens(monkeypatch, make_test_db):
+    _mem_db(monkeypatch, make_test_db)
     with pytest.raises(ValueError, match="missing access_token or refresh_token"):
         csr._provision_endpoint({"access_token": "AT"}, "alice")
 
 
-def test_provision_rejects_accounts_without_usable_models(monkeypatch):
-    _mem_db(monkeypatch)
+def test_provision_rejects_accounts_without_usable_models(monkeypatch, make_test_db):
+    _mem_db(monkeypatch, make_test_db)
     monkeypatch.setattr(csr.chatgpt_subscription, "fetch_available_models", lambda token: [])
 
     with pytest.raises(ValueError, match="no usable Codex models"):
@@ -106,10 +103,10 @@ def _add_auth_and_endpoints(db, *, auth_id="auth1", ep_ids=("ep1",)):
     db.commit()
 
 
-def test_delete_orphaned_provider_auth_revokes_when_last_endpoint_removed(monkeypatch):
+def test_delete_orphaned_provider_auth_revokes_when_last_endpoint_removed(monkeypatch, make_test_db):
     from routes.model_routes import _delete_orphaned_provider_auth
 
-    TestSessionLocal = _mem_db(monkeypatch)
+    TestSessionLocal = _mem_db(monkeypatch, make_test_db)
     db = TestSessionLocal()
     try:
         _add_auth_and_endpoints(db, auth_id="auth1", ep_ids=("ep1",))
@@ -125,10 +122,10 @@ def test_delete_orphaned_provider_auth_revokes_when_last_endpoint_removed(monkey
         db.close()
 
 
-def test_delete_orphaned_provider_auth_requires_exclude_ep_id_for_pending_delete(monkeypatch):
+def test_delete_orphaned_provider_auth_requires_exclude_ep_id_for_pending_delete(monkeypatch, make_test_db):
     from routes.model_routes import _delete_orphaned_provider_auth
 
-    TestSessionLocal = _mem_db(monkeypatch)
+    TestSessionLocal = _mem_db(monkeypatch, make_test_db)
     db = TestSessionLocal()
     try:
         _add_auth_and_endpoints(db, auth_id="auth1", ep_ids=("ep1",))
@@ -143,10 +140,10 @@ def test_delete_orphaned_provider_auth_requires_exclude_ep_id_for_pending_delete
         db.close()
 
 
-def test_delete_orphaned_provider_auth_keeps_auth_while_another_endpoint_uses_it(monkeypatch):
+def test_delete_orphaned_provider_auth_keeps_auth_while_another_endpoint_uses_it(monkeypatch, make_test_db):
     from routes.model_routes import _delete_orphaned_provider_auth
 
-    TestSessionLocal = _mem_db(monkeypatch)
+    TestSessionLocal = _mem_db(monkeypatch, make_test_db)
     db = TestSessionLocal()
     try:
         _add_auth_and_endpoints(db, auth_id="auth1", ep_ids=("ep1", "ep2"))
@@ -157,10 +154,10 @@ def test_delete_orphaned_provider_auth_keeps_auth_while_another_endpoint_uses_it
         db.close()
 
 
-def test_delete_orphaned_provider_auth_noop_without_auth_id(monkeypatch):
+def test_delete_orphaned_provider_auth_noop_without_auth_id(monkeypatch, make_test_db):
     from routes.model_routes import _delete_orphaned_provider_auth
 
-    TestSessionLocal = _mem_db(monkeypatch)
+    TestSessionLocal = _mem_db(monkeypatch, make_test_db)
     db = TestSessionLocal()
     try:
         assert _delete_orphaned_provider_auth(db, None, exclude_ep_id="ep1") is False
@@ -168,10 +165,10 @@ def test_delete_orphaned_provider_auth_noop_without_auth_id(monkeypatch):
         db.close()
 
 
-def test_delete_orphaned_provider_auth_noop_when_auth_row_missing(monkeypatch):
+def test_delete_orphaned_provider_auth_noop_when_auth_row_missing(monkeypatch, make_test_db):
     from routes.model_routes import _delete_orphaned_provider_auth
 
-    TestSessionLocal = _mem_db(monkeypatch)
+    TestSessionLocal = _mem_db(monkeypatch, make_test_db)
     db = TestSessionLocal()
     try:
         # Endpoint points at an auth_id whose ProviderAuthSession is already gone.
@@ -215,8 +212,8 @@ def _delete_route(monkeypatch, TestSessionLocal):
     raise AssertionError("DELETE /api/model-endpoints/{ep_id} not found")
 
 
-def test_delete_endpoint_route_revokes_orphaned_provider_auth(monkeypatch):
-    TestSessionLocal = _mem_db(monkeypatch)
+def test_delete_endpoint_route_revokes_orphaned_provider_auth(monkeypatch, make_test_db):
+    TestSessionLocal = _mem_db(monkeypatch, make_test_db)
     db = TestSessionLocal()
     try:
         _add_auth_and_endpoints(db, auth_id="auth1", ep_ids=("ep1",))
@@ -237,8 +234,8 @@ def test_delete_endpoint_route_revokes_orphaned_provider_auth(monkeypatch):
         db.close()
 
 
-def test_delete_endpoint_route_keeps_auth_when_shared(monkeypatch):
-    TestSessionLocal = _mem_db(monkeypatch)
+def test_delete_endpoint_route_keeps_auth_when_shared(monkeypatch, make_test_db):
+    TestSessionLocal = _mem_db(monkeypatch, make_test_db)
     db = TestSessionLocal()
     try:
         _add_auth_and_endpoints(db, auth_id="auth1", ep_ids=("ep1", "ep2"))
@@ -258,10 +255,10 @@ def test_delete_endpoint_route_keeps_auth_when_shared(monkeypatch):
         db.close()
 
 
-def test_delete_orphaned_provider_auth_revokes_only_after_last_of_several(monkeypatch):
+def test_delete_orphaned_provider_auth_revokes_only_after_last_of_several(monkeypatch, make_test_db):
     from routes.model_routes import _delete_orphaned_provider_auth
 
-    TestSessionLocal = _mem_db(monkeypatch)
+    TestSessionLocal = _mem_db(monkeypatch, make_test_db)
     db = TestSessionLocal()
     try:
         _add_auth_and_endpoints(db, auth_id="auth1", ep_ids=("ep1", "ep2"))

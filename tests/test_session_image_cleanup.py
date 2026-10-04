@@ -1,14 +1,10 @@
 import json
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import NullPool
-
-from core.database import Base, ChatMessage, GalleryImage, Session
+from core.database import ChatMessage, GalleryImage, Session
 from src import session_image_cleanup
 
 
-def test_cleanup_session_images_deactivates_gallery_rows_and_unlinks_files(tmp_path, monkeypatch):
+def test_cleanup_session_images_deactivates_gallery_rows_and_unlinks_files(tmp_path, monkeypatch, app_db):
     image_dir = tmp_path / "generated_images"
     image_dir.mkdir()
     linked_file = image_dir / "aaaaaaaaaaaa.png"
@@ -17,14 +13,7 @@ def test_cleanup_session_images_deactivates_gallery_rows_and_unlinks_files(tmp_p
     event_file.write_bytes(b"event")
     monkeypatch.setattr(session_image_cleanup, "GENERATED_IMAGES_DIR", str(image_dir))
 
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'cleanup.db'}",
-        connect_args={"check_same_thread": False},
-        poolclass=NullPool,
-    )
-    Base.metadata.create_all(engine)
-    SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
-    db = SessionLocal()
+    db = app_db.SessionLocal()
     try:
         db.add(Session(id="chat-1", name="Image chat", endpoint_url="http://local", model="image-model", owner="alice"))
         db.add(

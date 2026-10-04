@@ -12,35 +12,27 @@ minimal fake request keeps the same real coverage (handler + DB + owner routing)
 while completing reliably everywhere.
 """
 
-import tempfile
 import uuid
 from types import SimpleNamespace
-
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import NullPool
 from unittest.mock import MagicMock
+
+import pytest
 
 from tests.helpers.import_state import clear_fake_database_modules
 
 clear_fake_database_modules()
 
-import core.database as cdb
 import routes.document_routes as droutes
 from core.database import Document
 from core.database import Session as DbSession
 from routes.document_helpers import DocumentPatch
 from src.agent_tools.document_tools import set_active_document, get_active_document
 
-_TMPDB = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-_ENGINE = create_engine(
-    f"sqlite:///{_TMPDB.name}",
-    connect_args={"check_same_thread": False},
-    poolclass=NullPool,
-)
-cdb.Base.metadata.create_all(_ENGINE)
-_TS = sessionmaker(bind=_ENGINE, autoflush=False, autocommit=False)
-droutes.SessionLocal = _TS  # route handlers resolve SessionLocal at call time
+
+@pytest.fixture(autouse=True)
+def _bind_test_db(monkeypatch, app_db):
+    # Route handlers resolve SessionLocal at call time.
+    monkeypatch.setattr(droutes, "SessionLocal", app_db.SessionLocal)
 
 
 def _req():
@@ -55,9 +47,9 @@ def _endpoint(method, path):
     raise RuntimeError(f"{method} {path} not found")
 
 
-def _make_doc():
+def _make_doc(app_db):
     sid = "s-" + uuid.uuid4().hex[:8]
-    db = _TS()
+    db = app_db.SessionLocal()
     try:
         db.add(DbSession(id=sid, owner="tester", name="s", model="m", endpoint_url="http://x"))
         doc = Document(
@@ -72,26 +64,26 @@ def _make_doc():
         db.close()
 
 
-async def test_patch_unlink_clears_active_document():
+async def test_patch_unlink_clears_active_document(app_db):
     patch_document = _endpoint("PATCH", "/api/document/{doc_id}")
-    doc_id = _make_doc()
+    doc_id = _make_doc(app_db)
     set_active_document(doc_id)
     await patch_document(_req(), doc_id, DocumentPatch(session_id=""))
     assert get_active_document() is None
 
 
-async def test_delete_clears_active_document():
+async def test_delete_clears_active_document(app_db):
     delete_document = _endpoint("DELETE", "/api/document/{doc_id}")
-    doc_id = _make_doc()
+    doc_id = _make_doc(app_db)
     set_active_document(doc_id)
     await delete_document(_req(), doc_id)
     assert get_active_document() is None
 
 
-async def test_unlinking_a_different_doc_leaves_pointer():
+async def test_unlinking_a_different_doc_leaves_pointer(app_db):
     patch_document = _endpoint("PATCH", "/api/document/{doc_id}")
-    active_id = _make_doc()
-    other_id = _make_doc()
+    active_id = _make_doc(app_db)
+    other_id = _make_doc(app_db)
     set_active_document(active_id)
     await patch_document(_req(), other_id, DocumentPatch(session_id=""))
     assert get_active_document() == active_id

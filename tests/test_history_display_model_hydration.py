@@ -7,11 +7,9 @@ import pytest
 from fastapi import APIRouter, FastAPI
 from fastapi.testclient import TestClient
 from starlette.requests import Request
-from sqlalchemy import create_engine, event
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
+from sqlalchemy import event
 
-from core.database import Base, ChatMessage as DbChatMessage, Session as DbSession
+from core.database import ChatMessage as DbChatMessage, Session as DbSession
 from core.models import ChatMessage, Session
 from core.session_manager import SessionManager
 from routes import chat_routes
@@ -24,17 +22,9 @@ _REPORT_BACKLOG = pytest.mark.skip(
 )
 
 
-def _database():
-    engine = create_engine(
-        "sqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    Base.metadata.create_all(
-        engine,
-        tables=[DbSession.__table__, DbChatMessage.__table__],
-    )
-    return engine, sessionmaker(bind=engine, autocommit=False, autoflush=False)
+def _database(make_test_db):
+    db = make_test_db(memory=True)
+    return db.engine, db.SessionLocal
 
 
 def _seed_session(db_factory, *, session_id="session-1", message_count=6, stored_count=None):
@@ -95,8 +85,8 @@ def _manager(db_factory, monkeypatch, sessions=None):
     return manager
 
 
-def test_paginated_history_reads_only_count_and_requested_page(monkeypatch):
-    engine, db_factory = _database()
+def test_paginated_history_reads_only_count_and_requested_page(monkeypatch, make_test_db):
+    engine, db_factory = _database(make_test_db)
     _seed_session(db_factory)
 
     class DisplayOnlyManager:
@@ -119,7 +109,6 @@ def test_paginated_history_reads_only_count_and_requested_page(monkeypatch):
         response = TestClient(app).get("/api/history/session-1?limit=2")
     finally:
         event.remove(engine, "before_cursor_execute", capture_sql)
-        engine.dispose()
 
     assert response.status_code == 200
     payload = response.json()
@@ -140,9 +129,9 @@ def test_paginated_history_reads_only_count_and_requested_page(monkeypatch):
     assert sum("count(" in statement for statement in chat_selects) == 1
 
 
-def test_production_router_order_reaches_bounded_canonical_history(monkeypatch):
+def test_production_router_order_reaches_bounded_canonical_history(monkeypatch, make_test_db):
     """The assembled app must not shadow canonical history with session routes."""
-    engine, db_factory = _database()
+    engine, db_factory = _database(make_test_db)
     _seed_session(db_factory, message_count=1200)
 
     class DisplayOnlyManager:
@@ -162,10 +151,7 @@ def test_production_router_order_reaches_bounded_canonical_history(monkeypatch):
     app.include_router(session_routes.setup_session_routes(manager, {}))
     app.include_router(history_routes.setup_history_routes(manager))
 
-    try:
-        response = TestClient(app).get("/api/history/session-1?limit=24")
-    finally:
-        engine.dispose()
+    response = TestClient(app).get("/api/history/session-1?limit=24")
 
     assert response.status_code == 200
     assert response.request.url.params["limit"] == "24"
@@ -177,8 +163,8 @@ def test_production_router_order_reaches_bounded_canonical_history(monkeypatch):
     assert displayed < payload["total"]
 
 
-def test_incomplete_cached_history_hydrates_once_for_model_context(monkeypatch):
-    engine, db_factory = _database()
+def test_incomplete_cached_history_hydrates_once_for_model_context(monkeypatch, make_test_db):
+    engine, db_factory = _database(make_test_db)
     raw_multimodal = json.dumps(
         [
             {"type": "text", "text": "look at the source image"},
@@ -260,13 +246,10 @@ def test_incomplete_cached_history_hydrates_once_for_model_context(monkeypatch):
         },
     )
 
-    try:
-        hydrated = manager.get_session("session-1")
-        first_full_loads = manager.full_loads
-        warm = manager.get_session("session-1")
-        second_full_loads = manager.full_loads
-    finally:
-        engine.dispose()
+    hydrated = manager.get_session("session-1")
+    first_full_loads = manager.full_loads
+    warm = manager.get_session("session-1")
+    second_full_loads = manager.full_loads
 
     assert hydrated is warm
     assert len(hydrated.history) == 3
@@ -288,7 +271,7 @@ def test_incomplete_cached_history_hydrates_once_for_model_context(monkeypatch):
     assert hidden_summary["metadata"]["hidden"] is True
 
 
-def test_inflated_message_count_column_does_not_reload_warm_sessions(monkeypatch):
+def test_inflated_message_count_column_does_not_reload_warm_sessions(monkeypatch, make_test_db):
     """A drifted-high sessions.message_count must not reload on every read.
 
     `_persist_message` swallows a failed insert while `add_message` has already
@@ -296,31 +279,28 @@ def test_inflated_message_count_column_does_not_reload_warm_sessions(monkeypatch
     that column, the hydration gate would stay true forever and re-select the
     whole transcript on every send, edit, delete and truncate.
     """
-    engine, db_factory = _database()
+    engine, db_factory = _database(make_test_db)
     _seed_session(db_factory, message_count=6, stored_count=8)
 
     manager = _manager(db_factory, monkeypatch)
-    try:
-        session = manager.get_session("session-1")
-        cold_loads = manager.full_loads
-        for _ in range(3):
-            manager.get_session("session-1")
-    finally:
-        engine.dispose()
+    session = manager.get_session("session-1")
+    cold_loads = manager.full_loads
+    for _ in range(3):
+        manager.get_session("session-1")
 
     assert len(session.history) == 6
     assert cold_loads == 1
     assert manager.full_loads == 1
 
 
-def test_stale_low_message_count_column_still_hydrates_for_the_model(monkeypatch):
+def test_stale_low_message_count_column_still_hydrates_for_the_model(monkeypatch, make_test_db):
     """The other drift direction must not hand the model a truncated transcript.
 
     `_persist_message` writes message_count = 0 when the session is not cached.
     A partly-filled cache plus that stale-low column previously left the send
     path with whatever RAM happened to hold.
     """
-    engine, db_factory = _database()
+    engine, db_factory = _database(make_test_db)
     _seed_session(db_factory, message_count=6, stored_count=0)
 
     manager = _manager(
@@ -338,11 +318,8 @@ def test_stale_low_message_count_column_still_hydrates_for_the_model(monkeypatch
             )
         },
     )
-    try:
-        session = manager.get_session("session-1")
-        manager.get_session("session-1")
-    finally:
-        engine.dispose()
+    session = manager.get_session("session-1")
+    manager.get_session("session-1")
 
     assert [message.content for message in session.history] == [
         f"content-{index}" for index in range(6)
@@ -350,13 +327,13 @@ def test_stale_low_message_count_column_still_hydrates_for_the_model(monkeypatch
     assert manager.full_loads == 1
 
 
-def test_fork_after_restart_copies_the_real_transcript(monkeypatch):
+def test_fork_after_restart_copies_the_real_transcript(monkeypatch, make_test_db):
     """Forking reads source.history, so it must hydrate through get_session.
 
     Display pagination no longer fills the cache, so a fork taken after a
     restart used to return HTTP 200 with an empty conversation.
     """
-    engine, db_factory = _database()
+    engine, db_factory = _database(make_test_db)
     _seed_session(db_factory, message_count=6)
 
     # Restart state: metadata-only cache entry, exactly what load_sessions seeds.
@@ -371,22 +348,19 @@ def test_fork_after_restart_copies_the_real_transcript(monkeypatch):
     app.include_router(history_routes.setup_history_routes(manager))
     client = TestClient(app)
 
-    try:
-        page = client.get("/api/history/session-1?limit=2")
-        assert page.status_code == 200
-        assert len(manager.sessions["session-1"].history) == 0
+    page = client.get("/api/history/session-1?limit=2")
+    assert page.status_code == 200
+    assert len(manager.sessions["session-1"].history) == 0
 
-        response = client.post("/api/session/session-1/fork", json={"keep_count": 4})
-        assert response.status_code == 200
-        payload = response.json()
-        assert payload["kept"] == 4
+    response = client.post("/api/session/session-1/fork", json={"keep_count": 4})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["kept"] == 4
 
-        forked = manager.get_session(payload["id"])
-        assert [message.content for message in forked.history] == [
-            f"content-{index}" for index in range(4)
-        ]
-    finally:
-        engine.dispose()
+    forked = manager.get_session(payload["id"])
+    assert [message.content for message in forked.history] == [
+        f"content-{index}" for index in range(4)
+    ]
 
 
 class _ContextBuildReached(Exception):
@@ -440,10 +414,10 @@ def _route_endpoint(router, path):
 @_REPORT_BACKLOG
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", ["/api/chat", "/api/chat_stream"])
-async def test_model_send_routes_hydrate_before_context_build(monkeypatch, path):
+async def test_model_send_routes_hydrate_before_context_build(monkeypatch, path, make_test_db):
     # A real SessionManager over a real (temp) DB — a stub here would only
     # assert that the stub hydrates, not that SessionManager does.
-    engine, db_factory = _database()
+    engine, db_factory = _database(make_test_db)
     _seed_session(db_factory, message_count=6, stored_count=8)
     manager = _manager(db_factory, monkeypatch)
     manager.load_sessions()  # restart state: metadata only, no messages cached
@@ -535,18 +509,15 @@ async def test_model_send_routes_hydrate_before_context_build(monkeypatch, path)
                 )
             )
 
-    try:
-        with pytest.raises(_ContextBuildReached):
-            await send()
-        first_loads = manager.full_loads
+    with pytest.raises(_ContextBuildReached):
+        await send()
+    first_loads = manager.full_loads
 
-        # Second send on the now-warm session: the transcript is complete, so
-        # it must be served from RAM even though sessions.message_count is
-        # still drifted high in the DB.
-        with pytest.raises(_ContextBuildReached):
-            await send()
-    finally:
-        engine.dispose()
+    # Second send on the now-warm session: the transcript is complete, so
+    # it must be served from RAM even though sessions.message_count is
+    # still drifted high in the DB.
+    with pytest.raises(_ContextBuildReached):
+        await send()
 
     assert len(contexts_built) == 2
     assert contexts_built[0] is contexts_built[1]

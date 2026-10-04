@@ -53,6 +53,20 @@ def _stub_api_token_purge(monkeypatch):
     monkeypatch.setitem(sys.modules, "core.database", db_stub)
 
 
+@pytest.fixture(autouse=True)
+def _cheap_password_hashes(monkeypatch):
+    """Hash at bcrypt cost 4 instead of the default 12.
+
+    create_user hashes inside the lock, and at the default cost these tests
+    took 27 s. The races they check do not depend on it: with _config_lock
+    removed they fail the same way at cost 4.
+    """
+    import bcrypt
+
+    real_gensalt = bcrypt.gensalt
+    monkeypatch.setattr(bcrypt, "gensalt", lambda rounds=4, prefix=b"2b": real_gensalt(rounds, prefix))
+
+
 def _fresh_auth_manager(tmp_path):
     clear_module("core.auth")
     from core.auth import AuthManager

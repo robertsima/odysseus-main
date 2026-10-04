@@ -2,19 +2,13 @@ from datetime import datetime, timedelta
 import asyncio
 import sqlite3
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-
-from core.database import Base
 from core.database import ChatMessage as DbChatMessage
 from core.database import Session as DbSession
 from src.session_search import SessionSearchResult, search_session_messages
 
 
-def _db(with_fts=True):
-    engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    db = sessionmaker(bind=engine)()
+def _db(make_test_db, with_fts=True):
+    db = make_test_db(memory=True).SessionLocal()
     if with_fts:
         db.connection().exec_driver_sql(
             """
@@ -61,8 +55,8 @@ def _has_fts(db):
     )
 
 
-def test_session_search_uses_fts_and_returns_context():
-    db = _db(with_fts=True)
+def test_session_search_uses_fts_and_returns_context(make_test_db):
+    db = _db(make_test_db, with_fts=True)
     try:
         base = datetime(2026, 1, 1, 12, 0, 0)
         _add_session(db, "s1", owner="alice", name="Jazz planning")
@@ -82,8 +76,8 @@ def test_session_search_uses_fts_and_returns_context():
         db.close()
 
 
-def test_session_search_escapes_like_wildcards_in_fallback():
-    db = _db(with_fts=False)
+def test_session_search_escapes_like_wildcards_in_fallback(make_test_db):
+    db = _db(make_test_db, with_fts=False)
     try:
         base = datetime(2026, 1, 1, 12, 0, 0)
         _add_session(db, "s1", owner="alice")
@@ -98,8 +92,8 @@ def test_session_search_escapes_like_wildcards_in_fallback():
         db.close()
 
 
-def test_session_search_owner_scope_includes_legacy_and_excludes_other_users():
-    db = _db(with_fts=True)
+def test_session_search_owner_scope_includes_legacy_and_excludes_other_users(make_test_db):
+    db = _db(make_test_db, with_fts=True)
     try:
         base = datetime(2026, 1, 1, 12, 0, 0)
         _add_session(db, "alice", owner="alice")
@@ -117,8 +111,8 @@ def test_session_search_owner_scope_includes_legacy_and_excludes_other_users():
         db.close()
 
 
-def test_session_search_can_exclude_legacy_rows_for_authenticated_ui_scope():
-    db = _db(with_fts=True)
+def test_session_search_can_exclude_legacy_rows_for_authenticated_ui_scope(make_test_db):
+    db = _db(make_test_db, with_fts=True)
     try:
         base = datetime(2026, 1, 1, 12, 0, 0)
         _add_session(db, "alice", owner="alice")
@@ -139,8 +133,8 @@ def test_session_search_can_exclude_legacy_rows_for_authenticated_ui_scope():
         db.close()
 
 
-def test_session_search_ownerless_call_only_sees_legacy_rows():
-    db = _db(with_fts=True)
+def test_session_search_ownerless_call_only_sees_legacy_rows(make_test_db):
+    db = _db(make_test_db, with_fts=True)
     try:
         base = datetime(2026, 1, 1, 12, 0, 0)
         _add_session(db, "alice", owner="alice")
@@ -156,8 +150,8 @@ def test_session_search_ownerless_call_only_sees_legacy_rows():
         db.close()
 
 
-def test_session_search_falls_back_to_like_when_fts_has_no_substring_hits():
-    db = _db(with_fts=True)
+def test_session_search_falls_back_to_like_when_fts_has_no_substring_hits(make_test_db):
+    db = _db(make_test_db, with_fts=True)
     try:
         base = datetime(2026, 1, 1, 12, 0, 0)
         _add_session(db, "s1", owner="alice")
@@ -172,8 +166,8 @@ def test_session_search_falls_back_to_like_when_fts_has_no_substring_hits():
         db.close()
 
 
-def test_session_search_merges_like_substring_hits_with_fts_hits():
-    db = _db(with_fts=True)
+def test_session_search_merges_like_substring_hits_with_fts_hits(make_test_db):
+    db = _db(make_test_db, with_fts=True)
     try:
         base = datetime(2026, 1, 1, 12, 0, 0)
         _add_session(db, "s1", owner="alice")
@@ -188,8 +182,8 @@ def test_session_search_merges_like_substring_hits_with_fts_hits():
         db.close()
 
 
-def test_session_search_can_preserve_unrestricted_no_auth_route_scope():
-    db = _db(with_fts=True)
+def test_session_search_can_preserve_unrestricted_no_auth_route_scope(make_test_db):
+    db = _db(make_test_db, with_fts=True)
     try:
         base = datetime(2026, 1, 1, 12, 0, 0)
         _add_session(db, "owned", owner="admin")
@@ -210,8 +204,8 @@ def test_session_search_can_preserve_unrestricted_no_auth_route_scope():
         db.close()
 
 
-def test_session_search_excludes_archived_by_default():
-    db = _db(with_fts=True)
+def test_session_search_excludes_archived_by_default(make_test_db):
+    db = _db(make_test_db, with_fts=True)
     try:
         base = datetime(2026, 1, 1, 12, 0, 0)
         _add_session(db, "active", owner="alice")

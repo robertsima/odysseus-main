@@ -1,17 +1,12 @@
 """Regression tests for the document PDF preview framing headers and PyMuPDF dependency handling."""
 
 import builtins
-import tempfile
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import NullPool
 
-import core.database as cdb
 import routes.document_routes as droutes
 from core.database import Document
 from core.middleware import SecurityHeadersMiddleware
@@ -113,27 +108,10 @@ async def test_unrelated_paths_keep_strict_policy():
 
 
 @pytest.fixture
-def test_db(monkeypatch):
-    """Create a temporary SQLite database and patch routes.document_routes.SessionLocal."""
-    import os
-    tmpdb = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-    tmpdb.close()
-    engine = create_engine(
-        f"sqlite:///{tmpdb.name}",
-        connect_args={"check_same_thread": False},
-        poolclass=NullPool,
-    )
-    cdb.Base.metadata.create_all(engine)
-    ts = sessionmaker(bind=engine, autoflush=False, autocommit=False)
-    monkeypatch.setattr(droutes, "SessionLocal", ts)
-    try:
-        yield ts
-    finally:
-        engine.dispose()
-        try:
-            os.unlink(tmpdb.name)
-        except OSError:
-            pass
+def test_db(monkeypatch, app_db):
+    """A fresh SQLite database patched in as routes.document_routes.SessionLocal."""
+    monkeypatch.setattr(droutes, "SessionLocal", app_db.SessionLocal)
+    return app_db.SessionLocal
 
 
 def _req():

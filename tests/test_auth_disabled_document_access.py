@@ -14,36 +14,21 @@ test_document_session_owner_scope.py) so coverage lands on the real
 closures without spinning up middleware.
 """
 
-import tempfile
 import uuid
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import NullPool
 
 from tests.helpers.import_state import clear_fake_database_modules
 
 clear_fake_database_modules()
 
-import core.database as cdb
 import routes.document_routes as droutes
 from core.database import Document
 from core.database import Session as DbSession
 from routes.document_helpers import _verify_doc_owner, _owner_session_filter
-
-_TMPDB = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-_ENGINE = create_engine(
-    f"sqlite:///{_TMPDB.name}",
-    connect_args={"check_same_thread": False},
-    poolclass=NullPool,
-)
-cdb.Base.metadata.create_all(_ENGINE)
-_TS = sessionmaker(bind=_ENGINE, autoflush=False, autocommit=False)
-
 
 # ------------------------------------------------------------------ helpers
 
@@ -62,17 +47,17 @@ def _endpoint(method, path):
     raise RuntimeError(f"{method} {path} not found")
 
 
-def _bind_test_db():
+def _bind_test_db(app_db):
     previous = droutes.SessionLocal
-    droutes.SessionLocal = _TS
+    droutes.SessionLocal = app_db.SessionLocal
     return previous
 
 
-def _seed(owner="alice"):
+def _seed(app_db, owner="alice"):
     """Create one session + one owned document. Returns (session_id, doc_id)."""
     session_id = f"{owner}-" + uuid.uuid4().hex[:8]
     doc_id = str(uuid.uuid4())
-    db = _TS()
+    db = app_db.SessionLocal()
     try:
         db.add(DbSession(
             id=session_id, owner=owner, name=owner,
@@ -99,13 +84,13 @@ def _seed(owner="alice"):
 
 
 @pytest.mark.asyncio
-async def test_list_documents_allows_none_user_when_auth_disabled(monkeypatch):
+async def test_list_documents_allows_none_user_when_auth_disabled(monkeypatch, app_db):
     """AUTH_ENABLED=false + user=None must NOT raise 403 on list_documents."""
     monkeypatch.setenv("AUTH_ENABLED", "false")
-    previous = _bind_test_db()
+    previous = _bind_test_db(app_db)
     try:
         list_docs = _endpoint("GET", "/api/documents/{session_id}")
-        session_id, doc_id = _seed()
+        session_id, doc_id = _seed(app_db)
 
         # Must succeed — this is the bug fix.
         rows = await list_docs(_req(None), session_id)
@@ -116,13 +101,13 @@ async def test_list_documents_allows_none_user_when_auth_disabled(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_get_document_allows_none_user_when_auth_disabled(monkeypatch):
+async def test_get_document_allows_none_user_when_auth_disabled(monkeypatch, app_db):
     """AUTH_ENABLED=false + user=None must NOT raise 403 on get_document."""
     monkeypatch.setenv("AUTH_ENABLED", "false")
-    previous = _bind_test_db()
+    previous = _bind_test_db(app_db)
     try:
         get_doc = _endpoint("GET", "/api/document/{doc_id}")
-        _session_id, doc_id = _seed()
+        _session_id, doc_id = _seed(app_db)
 
         # Must succeed — _verify_doc_owner bypasses when auth is disabled.
         result = await get_doc(_req(None), doc_id)
@@ -131,11 +116,11 @@ async def test_get_document_allows_none_user_when_auth_disabled(monkeypatch):
         droutes.SessionLocal = previous
 
 
-def test_verify_doc_owner_allows_none_user_when_auth_disabled(monkeypatch):
+def test_verify_doc_owner_allows_none_user_when_auth_disabled(monkeypatch, app_db):
     """_verify_doc_owner with user=None + AUTH_ENABLED=false must pass."""
     monkeypatch.setenv("AUTH_ENABLED", "false")
-    _session_id, doc_id = _seed()
-    db = _TS()
+    _session_id, doc_id = _seed(app_db)
+    db = app_db.SessionLocal()
     try:
         doc = db.query(Document).filter(Document.id == doc_id).first()
         # Must NOT raise — the bypass allows single-user access.
@@ -144,11 +129,11 @@ def test_verify_doc_owner_allows_none_user_when_auth_disabled(monkeypatch):
         db.close()
 
 
-def test_owner_session_filter_noops_for_none_user_when_auth_disabled(monkeypatch):
+def test_owner_session_filter_noops_for_none_user_when_auth_disabled(monkeypatch, app_db):
     """_owner_session_filter with user=None + AUTH_ENABLED=false returns query unchanged."""
     monkeypatch.setenv("AUTH_ENABLED", "false")
-    _session_id, doc_id = _seed()
-    db = _TS()
+    _session_id, doc_id = _seed(app_db)
+    db = app_db.SessionLocal()
     try:
         q = db.query(Document).filter(Document.id == doc_id)
         result = _owner_session_filter(q, None)
@@ -163,13 +148,13 @@ def test_owner_session_filter_noops_for_none_user_when_auth_disabled(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_list_documents_rejects_none_user_when_auth_enabled(monkeypatch):
+async def test_list_documents_rejects_none_user_when_auth_enabled(monkeypatch, app_db):
     """AUTH_ENABLED=true (default) + user=None must raise 403."""
     monkeypatch.delenv("AUTH_ENABLED", raising=False)
-    previous = _bind_test_db()
+    previous = _bind_test_db(app_db)
     try:
         list_docs = _endpoint("GET", "/api/documents/{session_id}")
-        session_id, _doc_id = _seed()
+        session_id, _doc_id = _seed(app_db)
 
         with pytest.raises(HTTPException) as exc:
             await list_docs(_req(None), session_id)
@@ -180,13 +165,13 @@ async def test_list_documents_rejects_none_user_when_auth_enabled(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_get_document_rejects_none_user_when_auth_enabled(monkeypatch):
+async def test_get_document_rejects_none_user_when_auth_enabled(monkeypatch, app_db):
     """AUTH_ENABLED=true (default) + user=None must raise 403 via _verify_doc_owner."""
     monkeypatch.delenv("AUTH_ENABLED", raising=False)
-    previous = _bind_test_db()
+    previous = _bind_test_db(app_db)
     try:
         get_doc = _endpoint("GET", "/api/document/{doc_id}")
-        _session_id, doc_id = _seed()
+        _session_id, doc_id = _seed(app_db)
 
         with pytest.raises(HTTPException) as exc:
             await get_doc(_req(None), doc_id)
@@ -196,11 +181,11 @@ async def test_get_document_rejects_none_user_when_auth_enabled(monkeypatch):
         droutes.SessionLocal = previous
 
 
-def test_verify_doc_owner_rejects_none_user_when_auth_enabled(monkeypatch):
+def test_verify_doc_owner_rejects_none_user_when_auth_enabled(monkeypatch, app_db):
     """_verify_doc_owner with user=None + AUTH_ENABLED=true must raise 403."""
     monkeypatch.delenv("AUTH_ENABLED", raising=False)
-    _session_id, doc_id = _seed()
-    db = _TS()
+    _session_id, doc_id = _seed(app_db)
+    db = app_db.SessionLocal()
     try:
         doc = db.query(Document).filter(Document.id == doc_id).first()
         with pytest.raises(HTTPException) as exc:
@@ -214,13 +199,13 @@ def test_verify_doc_owner_rejects_none_user_when_auth_enabled(monkeypatch):
 #                                                 _verify_doc_owner raises 404
 
 
-def test_verify_doc_owner_rejects_wrong_owner_when_auth_enabled(monkeypatch):
+def test_verify_doc_owner_rejects_wrong_owner_when_auth_enabled(monkeypatch, app_db):
     """_verify_doc_owner with a mismatched owner must raise 404 (not 403).
 
     This confirms the authenticated path is untouched by the no-auth bypass."""
     monkeypatch.delenv("AUTH_ENABLED", raising=False)
-    session_id, doc_id = _seed(owner="alice")
-    db = _TS()
+    session_id, doc_id = _seed(app_db, owner="alice")
+    db = app_db.SessionLocal()
     try:
         doc = db.query(Document).filter(Document.id == doc_id).first()
         with pytest.raises(HTTPException) as exc:
@@ -231,13 +216,13 @@ def test_verify_doc_owner_rejects_wrong_owner_when_auth_enabled(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_get_document_rejects_wrong_owner(monkeypatch):
+async def test_get_document_rejects_wrong_owner(monkeypatch, app_db):
     """GET /api/document/{doc_id} with wrong authenticated user -> 404."""
     monkeypatch.delenv("AUTH_ENABLED", raising=False)
-    previous = _bind_test_db()
+    previous = _bind_test_db(app_db)
     try:
         get_doc = _endpoint("GET", "/api/document/{doc_id}")
-        _session_id, doc_id = _seed(owner="alice")
+        _session_id, doc_id = _seed(app_db, owner="alice")
 
         with pytest.raises(HTTPException) as exc:
             await get_doc(_req("bob"), doc_id)
@@ -248,19 +233,19 @@ async def test_get_document_rejects_wrong_owner(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_list_documents_hides_wrong_owner_docs(monkeypatch):
+async def test_list_documents_hides_wrong_owner_docs(monkeypatch, app_db):
     """list_documents for alice must not show bob's documents."""
     monkeypatch.delenv("AUTH_ENABLED", raising=False)
-    previous = _bind_test_db()
+    previous = _bind_test_db(app_db)
     try:
         list_docs = _endpoint("GET", "/api/documents/{session_id}")
 
         # Seed alice's session with a doc
-        alice_session, alice_doc = _seed(owner="alice")
+        alice_session, alice_doc = _seed(app_db, owner="alice")
         # Create bob's session+doc in the SAME session so ownership filter kicks in
         bob_session = "bob-" + uuid.uuid4().hex[:8]
         bob_doc = str(uuid.uuid4())
-        db = _TS()
+        db = app_db.SessionLocal()
         try:
             db.add(DbSession(id=bob_session, owner="bob", name="bob", model="m", endpoint_url="http://x"))
             db.add(Document(
