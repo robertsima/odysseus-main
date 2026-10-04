@@ -231,9 +231,10 @@ Three habits, each from a line that answered a question wrongly:
   Source assertions are a last resort for things with no reachable seam — and
   they rot: several of this suite's stale tests are source assertions that
   outlived the code they described.
-- **Extend the existing file.** The suite has over 850 test files and a taxonomy
-  (`tests/_taxonomy.py`). A new file for a behaviour that already has one splits
-  the coverage and both halves drift.
+- **Put the test at the mirror of the production file.** Tests for
+  `src/agent_loop.py` live under `tests/src/agent_loop/`, so a new behaviour
+  joins the tests that already cover its module instead of splitting the
+  coverage (`tests/TESTING_STANDARD.md`).
 
 When changing code with a subtle invariant, write the test that fails first and
 keep it in the commit. Several guards in the agent loop exist because a test

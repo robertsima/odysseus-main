@@ -162,7 +162,7 @@ Growth:
 
 - **D27. Close the security holes first.** Phase 1 gains a step: a behavior test for each missed security mutant, plus the agent loop's tool-result threading (B06). Each test is shown failing with its mutant patch applied. This step does not wait for the phase 6 backfill.
 - **D28. The mutation probe becomes a benchmark.**
-  - The 20 patches in [`testing-restructure-2026-10-03/mutants/`](testing-restructure-2026-10-03/mutants/) move to `tests/mutants/` with a runner script.
+  - The 20 patches live in `tests/mutants/`, with `expected.json` and the runner `scripts/mutation_benchmark.py`.
   - The nightly workflow runs them weekly. It reports a planted bug that stops being caught, a harmless refactor that starts failing tests, and a patch that no longer applies and needs a refresh.
   - Every real regression CI catches becomes a new planted bug.
 - **D29. Cut rules for phase 4:**
@@ -272,7 +272,7 @@ Track these, not the test count:
 
 ## Evidence
 
-The measurements ran on 2026-10-03 against dev at f2700767 and 45d16fa3, which differ in five test and CSS files. Their raw output lived in a session scratch folder and is not kept. The mutation patches are kept in [`testing-restructure-2026-10-03/mutants/`](testing-restructure-2026-10-03/mutants/), and they apply to dev at 2cb46742.
+The measurements ran on 2026-10-03 against dev at f2700767 and 45d16fa3, which differ in five test and CSS files. Their raw output lived in a session scratch folder and is not kept. The mutation patches are kept in `tests/mutants/`.
 
 ### Census
 

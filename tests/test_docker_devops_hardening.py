@@ -26,7 +26,7 @@ HOST_DOCKER_OVERLAY = ROOT / "docker" / "host-docker.yml"
 TEST_DOCS = [
     ROOT / "tests" / "README.md",
     ROOT / "tests" / "TESTING_STANDARD.md",
-    ROOT / "tests" / "LAYOUT_INVENTORY.md",
+    ROOT / "AGENTS.md",
 ]
 
 
