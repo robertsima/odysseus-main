@@ -9,8 +9,6 @@ import asyncio
 import contextlib
 import datetime
 import secrets as _secrets_mod
-import sys
-import types
 import uuid as _uuid_mod
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -28,40 +26,18 @@ from fastapi import HTTPException
 
 @pytest.fixture
 def token_routes_mod(monkeypatch):
-    """Yield routes.api_token_routes imported under isolated module stubs.
+    """routes.api_token_routes with a no-op database session and ApiToken model.
 
-    Two stubs are required:
-    - python_multipart: FastAPI validates Form() params at router-registration
-      time and raises RuntimeError when the package is absent.
-    - core.database: the real module declares SQLAlchemy ORM models at import
-      time; the conftest sqlalchemy stubs cause a metaclass conflict.
-
-    Both are installed with monkeypatch.setitem so they are restored after
-    each test without touching any other test's module state.
+    Tests that need rows patch get_db_session and ApiToken again themselves.
     """
-    # python-multipart stub
-    mp_stub = types.ModuleType("python_multipart")
-    mp_stub.__version__ = "0.0.13"
-    monkeypatch.setitem(sys.modules, "python_multipart", mp_stub)
-
-    # core.database stub: __getattr__ resolves any ORM name to a MagicMock
-    class _DBStub(types.ModuleType):
-        def __getattr__(self, name):
-            return MagicMock()
+    import routes.api_token_routes as mod  # noqa: PLC0415
 
     @contextlib.contextmanager
     def _noop_db_session():
         yield MagicMock()
 
-    db_stub = _DBStub("core.database")
-    db_stub.get_db_session = _noop_db_session
-    db_stub.ApiToken = MagicMock()
-    monkeypatch.setitem(sys.modules, "core.database", db_stub)
-
-    # Force a fresh import so the route module binds to the stubbed core.database
-    monkeypatch.delitem(sys.modules, "routes.api_token_routes", raising=False)
-
-    import routes.api_token_routes as mod  # noqa: PLC0415
+    monkeypatch.setattr(mod, "get_db_session", _noop_db_session)
+    monkeypatch.setattr(mod, "ApiToken", MagicMock())
     return mod
 
 
