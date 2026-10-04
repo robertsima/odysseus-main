@@ -6,31 +6,10 @@ rows behind, so a deleted user could keep authenticating with an
 """
 
 import contextlib
-import importlib
 import sys
 import types
-from pathlib import Path
 
 import pytest
-
-from tests.helpers.import_state import clear_module
-
-
-def _real_core_package():
-    root = Path(__file__).resolve().parent.parent
-    core_path = str(root / "core")
-    core = sys.modules.get("core")
-    if core is None:
-        core = types.ModuleType("core")
-        sys.modules["core"] = core
-    core.__path__ = [core_path]
-    clear_module("core.auth")
-    return core
-
-
-def _auth_module():
-    _real_core_package()
-    return importlib.import_module("core.auth")
 
 
 class _OwnerColumn:
@@ -72,7 +51,8 @@ class _FakeSession:
 
 @pytest.fixture
 def manager(tmp_path, monkeypatch):
-    auth_mod = _auth_module()
+    import core.auth as auth_mod
+
     monkeypatch.setattr(auth_mod, "_hash_password", lambda password: f"hash:{password}")
     monkeypatch.setattr(
         auth_mod, "_verify_password", lambda password, hashed: hashed == f"hash:{password}"

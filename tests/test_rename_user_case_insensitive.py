@@ -5,34 +5,25 @@ owner='Admin' while auth usernames are normalized to 'admin'. A case-
 sensitive filter would skip those rows during rename (issue #1165).
 """
 
-import importlib
 import sys
 import time
-import types
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
-from tests.helpers.import_state import clear_module
 
+@pytest.fixture(autouse=True)
+def _string_password_hashes(monkeypatch):
+    """Skip bcrypt: hash to a readable string on the real core.auth."""
+    import core.auth as auth_mod
 
-def _real_core_package():
-    root = Path(__file__).resolve().parent.parent
-    core_path = str(root / "core")
-    core = sys.modules.get("core")
-    if core is None:
-        core = types.ModuleType("core")
-        sys.modules["core"] = core
-    core.__path__ = [core_path]
-    clear_module("core.auth")
-    return core
+    monkeypatch.setattr(auth_mod, "_hash_password", lambda password: f"hash:{password}")
+    monkeypatch.setattr(auth_mod, "_verify_password", lambda password, hashed: hashed == f"hash:{password}")
 
 
 def _fresh_auth_manager(tmp_path):
-    auth_mod = importlib.import_module("core.auth", package=_real_core_package())
-    auth_mod._hash_password = lambda password: f"hash:{password}"
-    auth_mod._verify_password = lambda password, hashed: hashed == f"hash:{password}"
+    import core.auth as auth_mod
+
     return auth_mod.AuthManager(str(tmp_path / "auth.json"))
 
 
