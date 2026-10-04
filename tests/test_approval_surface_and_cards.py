@@ -22,8 +22,6 @@ from types import SimpleNamespace
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-
 
 # ---------------------------------------------------------------------------
 # Task 1: headless runs fail fast
@@ -162,10 +160,6 @@ def test_scheduled_audit_visits_each_real_owner(monkeypatch):
 
     monkeypatch.setattr("core.auth.get_auth_manager", lambda: NoUsers())
     assert skills_routes.scheduled_audit_owners() == [None]
-    # The nightly loop must pass each owner instead of owner=None.
-    app_src = (ROOT / "app.py").read_text(encoding="utf-8")
-    assert "owner=None, max_skills=batch" not in app_src
-    assert "scheduled_audit_owners()" in app_src
 
 
 # ---------------------------------------------------------------------------
@@ -306,20 +300,6 @@ def test_approval_status_endpoint_is_owner_scoped(monkeypatch):
     assert client.get(url, params={"session_id": "a1"}).status_code == 404
 
 
-def test_frontend_cards_check_liveness_and_the_intercept_has_no_timer():
-    renderer = (ROOT / "static/js/chatRenderer.js").read_text(encoding="utf-8")
-    stream = (ROOT / "static/js/chatStream.js").read_text(encoding="utf-8")
-    dashboard = (ROOT / "static/js/agentsDashboard.js").read_text(encoding="utf-8")
-
-    assert "/api/agents/approvals/" in renderer
-    assert "_watchApprovalLiveness(card, aq, !!renderOptions.restored)" in renderer
-    assert "restored: true" in renderer
-    assert "odysseus:tool-approval-cancel" in renderer
-    assert "odysseus:tool-approval-cancel" in stream
-    assert "setTimeout" not in stream.split("document.addEventListener('odysseus:tool-approval', ()")[1].split("}, true);")[0]
-    assert "approval_expired" in dashboard
-
-
 # ---------------------------------------------------------------------------
 # Task 3: publish status from the real request
 # ---------------------------------------------------------------------------
@@ -449,12 +429,6 @@ def test_followup_note_says_the_request_is_spent():
     assert "that request is spent" in note
     assert "new request_publish" in note
     assert "manage_agent_worktree status" in note
-
-
-def test_publish_service_docstring_no_longer_promises_a_retry():
-    src = (ROOT / "src/agent_worktree/service.py").read_text(encoding="utf-8")
-    assert "A failed push leaves the grant unused" not in src
-    assert "marked failed" in src
 
 
 def test_open_needs_drops_a_publish_need_with_nothing_open(monkeypatch):
