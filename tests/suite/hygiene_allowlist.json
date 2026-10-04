@@ -33,7 +33,6 @@
   "importlib_reload": {
     "tests/test_fastembed_cache_path.py": "reloads a module; build the objects under test directly instead (D12)",
     "tests/test_poll_endpoint_no_task_interrupt.py": "reloads a module; build the objects under test directly instead (D12)",
-    "tests/test_rag_similarity_threshold_env.py": "reloads a module; build the objects under test directly instead (D12)",
     "tests/test_shell_routes.py": "reloads a module; build the objects under test directly instead (D12)",
     "tests/test_tls_overrides_scope.py": "reloads a module; build the objects under test directly instead (D12)",
     "tests/test_upload_limits_centralized.py": "reloads a module; build the objects under test directly instead (D12)"
