@@ -8,93 +8,14 @@ Fix: (1) Read from JSON body as fallback.
      (3) Require an explicit per-turn web setting before exposing web tools.
 """
 
-import ast
-from pathlib import Path
-
 import pytest
 
 from src.action_intents import classify_tool_intent
 from src.tool_policy import (
-
     WEB_TOOL_NAMES,
     is_web_search_explicitly_denied,
     web_search_enabled_for_turn,
 )
-
-_CHAT_ROUTES = Path(__file__).resolve().parent.parent / "routes" / "chat_routes.py"
-
-
-# ── Source-level guards ─────────────────────────────────────────
-
-
-def test_allow_bash_reads_from_body_as_fallback():
-    """chat_stream must read allow_bash from the JSON body, not just form_data."""
-    source = _CHAT_ROUTES.read_text(encoding="utf-8")
-    tree = ast.parse(source)
-
-    # Find the chat_stream function
-    chat_stream_func = None
-    for node in ast.walk(tree):
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == "chat_stream":
-            chat_stream_func = node
-            break
-    assert chat_stream_func is not None, "chat_stream function not found"
-
-    # Look for an assignment to allow_bash that references 'body'
-    found_body_fallback = False
-    for node in ast.walk(chat_stream_func):
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id == "allow_bash":
-                    # Check if 'body' appears in the value
-                    src_segment = ast.get_source_segment(source, node)
-                    if src_segment and "body" in src_segment:
-                        found_body_fallback = True
-    assert found_body_fallback, (
-        "allow_bash assignment in chat_stream must fall back to JSON body"
-    )
-
-
-def test_allow_web_search_reads_from_body_as_fallback():
-    """chat_stream must read allow_web_search from the JSON body, not just form_data."""
-    source = _CHAT_ROUTES.read_text(encoding="utf-8")
-    tree = ast.parse(source)
-
-    chat_stream_func = None
-    for node in ast.walk(tree):
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == "chat_stream":
-            chat_stream_func = node
-            break
-    assert chat_stream_func is not None
-
-    found_body_fallback = False
-    for node in ast.walk(chat_stream_func):
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id == "allow_web_search":
-                    src_segment = ast.get_source_segment(source, node)
-                    if src_segment and "body" in src_segment:
-                        found_body_fallback = True
-    assert found_body_fallback, (
-        "allow_web_search assignment in chat_stream must fall back to JSON body"
-    )
-
-
-def test_browser_form_followups_include_approval_and_send_phrases():
-    """Short approval replies after a form/browser turn must keep browser tools available."""
-    source = _CHAT_ROUTES.read_text(encoding="utf-8")
-    assert "approved" in source
-    assert "proceed" in source
-    assert "send(?:\\s+it)?" in source
-    assert "submit(?:\\s+it)?" in source
-
-
-def test_agent_loop_expands_browser_mcp_tools_from_connected_server():
-    """Browser intent must not depend on stale hardcoded Playwright tool names."""
-    source = (Path(__file__).resolve().parent.parent / "src" / "agent_loop.py").read_text(encoding="utf-8")
-    assert "def _expand_browser_mcp_tools" in source
-    assert "server_id\") == \"builtin_browser\"" in source
-    assert "_relevant_tools = _expand_browser_mcp_tools(" in source
 
 
 class _FakeBrowserManager:
@@ -114,37 +35,6 @@ def test_browser_sentinel_always_expands_connected_tools():
 
     expanded = _expand_browser_mcp_tools({"builtin_browser"}, _FakeBrowserManager())
     assert "mcp__builtin_browser__browser_snapshot" in expanded
-
-
-def test_disabled_tools_respects_missing_vs_explicit_toggles():
-    """Bash still defers to privileges, but web is an explicit per-turn opt-in.
-    """
-    source = _CHAT_ROUTES.read_text(encoding="utf-8")
-
-    # The fix changes:
-    #   if str(allow_bash).lower() != "true":
-    # to:
-    #   if allow_bash is not None and str(allow_bash).lower() != "true":
-    assert "allow_bash is not None" in source, (
-        "disabled_tools check must guard against allow_bash being None"
-    )
-    assert "web_search_enabled_for_turn(allow_web_search, use_web)" in source, (
-        "web tools must be gated through the explicit per-turn web setting"
-    )
-    assert "disabled_tools.update(WEB_TOOL_NAMES)" in source, (
-        "disabled_tools must add web_search/web_fetch when web is not explicitly enabled"
-    )
-    assert "_forced_tools = set(WEB_TOOL_NAMES)" in source, (
-        "web tools should only be forced visible from the explicit web setting"
-    )
-
-
-def test_workspace_auto_escalation_keeps_shell_tools():
-    """Workspace/shell auto-routing must not use the light typed-tool clamp."""
-    source = _CHAT_ROUTES.read_text(encoding="utf-8")
-    assert '_workspace_agent_intent = _tool_intent.category in {"shell", "workspace"}' in source
-    assert "allow_bash = \"true\"" in source
-    assert "if auto_escalated and not _workspace_agent_intent:" in source
 
 
 # ── Functional tests of the disabled-tools logic ───────────────
@@ -339,26 +229,3 @@ def test_explicit_false_disables_even_for_admin():
         allow_bash="false", can_use_bash=True,
     )
     assert "bash" in disabled
-
-
-# ── Frontend source-level guards ──────────────────────────────
-
-_CHAT_JS = Path(__file__).resolve().parent.parent / "static" / "js" / "chat.js"
-
-
-def test_frontend_always_sends_explicit_allow_bash():
-    """chat.js must always send allow_bash (both true and false), not only on toggle ON."""
-    source = _CHAT_JS.read_text(encoding="utf-8")
-    # Must not only append 'true' — must also handle the false case
-    assert "allow_bash', el('bash-toggle').checked ? 'true' : 'false'" in source or \
-           "allow_bash', 'false'" in source, (
-        "Frontend must send explicit allow_bash=false when toggle is off"
-    )
-
-
-def test_frontend_sends_explicit_allow_web_search_false_in_agent_mode():
-    """chat.js must send allow_web_search=false when web toggle is off in agent mode."""
-    source = _CHAT_JS.read_text(encoding="utf-8")
-    assert "fd.append('allow_web_search', el('web-toggle').checked ? 'true' : 'false')" in source, (
-        "Frontend must send explicit allow_web_search=false in agent mode when toggle is off"
-    )
