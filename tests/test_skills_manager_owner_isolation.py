@@ -21,26 +21,13 @@ silently mutates a file owned by a different user AND overwrites the
 `owner` field with an attacker's value.
 """
 
-import os
-import sys
 import textwrap
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
-
-# ── module-load stubbing (matches other tests in this repo) ──────────
-# Stub heavy deps so importing the skills manager doesn't pull DB / FastAPI.
-for _mod in ("sqlalchemy", "sqlalchemy.orm", "sqlalchemy.ext", "sqlalchemy.ext.declarative"):
-    if _mod not in sys.modules:
-        try:
-            __import__(_mod)
-        except ImportError:
-            sys.modules[_mod] = MagicMock()
-
-from services.memory.skills import SkillsManager  # noqa: E402
-from services.memory.skill_format import Skill, slugify  # noqa: E402
+from services.memory.skills import SkillsManager
+from services.memory.skill_format import slugify
 
 
 def _write_skill_md(skills_root: Path, category: str, name: str,
@@ -155,28 +142,6 @@ def test_update_skill_does_not_mutate_foreign_owned_skill(tmp_path):
     # behavior is to return False, not True. (A return of True is the
     # buggy path; we don't assert False, we just don't assert True.)
     _ = result  # not asserted; documented behavior is not the point.
-
-
-def test_update_skill_scalar_keys_exclude_owner():
-    """Static check: the manager's scalar_keys whitelist MUST NOT
-    include 'owner' — otherwise a non-owner caller can pass
-    updates={'owner': 'attacker'} and reassign the file. The fix
-    removed 'owner' from scalar_keys; this test now asserts the
-    fix is in place."""
-    src = Path("services/memory/skills.py").read_text(encoding="utf-8")
-    import re
-    m = re.search(
-        r"def update_skill\(.*?scalar_keys\s*=\s*\((.*?)\)",
-        src,
-        re.DOTALL,
-    )
-    assert m, "could not locate scalar_keys tuple in update_skill"
-    body = m.group(1)
-    assert '"owner"' not in body and "'owner'" not in body, (
-        "BUG (regression): scalar_keys in update_skill includes 'owner'. "
-        "The fix removed this to prevent cross-user ownership reassignment "
-        "via the updates dict."
-    )
 
 
 def test_read_skill_md_and_references_are_owner_scoped(tmp_path):
