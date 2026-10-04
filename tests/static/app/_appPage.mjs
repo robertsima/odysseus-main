@@ -49,7 +49,7 @@ export async function openAppPage({ routes = () => {} } = {}) {
   document.body.innerHTML = pageBody();
   await import('../../../static/app.js');
   const sessionModule = window.sessionModule;
-  await waitFor(() => fake.calls.some((c) => c.url.pathname === '/api/sessions'), { what: 'the session list request' });
+  await waitFor(() => fake.calls.some((c) => c.url.pathname === '/api/sessions'), { what: 'the session list request', timeout: 15000 });
   await new Promise((resolve) => setTimeout(resolve, 50));
   return { fake, sessionModule };
 }

@@ -31,6 +31,9 @@ globalThis.fetch = (input, init = {}) => {
   return fakeFetch(input, init);
 };
 
+// The lifecycle poll runs every 1.2 s; give it a few rounds on a slow runner.
+const POLL_WAIT = 6000;
+
 function steerBubble(id) {
   return page.box.querySelector(`.msg-user[data-steer-id="${id}"]`);
 }
@@ -77,7 +80,7 @@ test('a steer read by the agent joins the transcript as a user message', async (
   assert.ok(steerBubble(id).classList.contains('msg-user-steered'));
 
   stream.event({ type: 'steer_applied', steer_id: id, round: 2 });
-  await waitFor(() => !steerBubble(id).classList.contains('msg-user-steered'), { what: 'the promotion' });
+  await waitFor(() => !steerBubble(id).classList.contains('msg-user-steered'), { what: 'the promotion', timeout: POLL_WAIT });
 
   const bubble = steerBubble(id);
   assert.equal(bubble.parentNode, page.box);
@@ -91,7 +94,7 @@ test('the lifecycle poll promotes an injected steer and marks itself as a poll',
   const id = await steer('also drop the temp tables');
   poll = { messages: [{ id, state: 'injected' }] };
 
-  await waitFor(() => !steerBubble(id).classList.contains('msg-user-steered'), { what: 'the promotion' });
+  await waitFor(() => !steerBubble(id).classList.contains('msg-user-steered'), { what: 'the promotion', timeout: POLL_WAIT });
 
   assert.ok(pollHeaders.length > 0);
   assert.ok(pollHeaders.every((h) => h['X-Odysseus-Poll'] === '1'), JSON.stringify(pollHeaders));
@@ -104,7 +107,7 @@ test('a failed steer leaves the page and says it failed', async () => {
   const id = await steer('rename the column');
   poll = { messages: [{ id, state: 'failed', reason: 'turn ended' }] };
 
-  await waitFor(() => !steerBubble(id), { what: 'the failed bubble to go' });
+  await waitFor(() => !steerBubble(id), { what: 'the failed bubble to go', timeout: POLL_WAIT });
 
   assert.match(toastText(), /Steering failed: turn ended/);
   await endTurn(stream);
@@ -121,7 +124,7 @@ test('an injected steer whose bubble a redraw removed comes back once, with its 
   assert.equal(steerBubble(id), null);
   poll = { messages: [{ id, state: 'injected', text: text.slice(0, 40) }] };
 
-  await waitFor(() => steerBubble(id), { what: 'the restored bubble' });
+  await waitFor(() => steerBubble(id), { what: 'the restored bubble', timeout: POLL_WAIT });
   const restored = page.box.querySelectorAll(`.msg-user[data-steer-id="${id}"]`);
   assert.equal(restored.length, 1);
   assert.equal(restored[0].dataset.raw, text);
