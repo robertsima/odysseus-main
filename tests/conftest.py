@@ -218,6 +218,24 @@ def _fresh_settings_cache():
 
 
 @pytest.fixture(autouse=True)
+def _fresh_host_health():
+    """Start each test with no upstream host cooled down.
+
+    After two failed connects src.llm_core cools a host for DEAD_HOST_COOLDOWN
+    (20 s) in process-wide dicts, and the network guard makes every call to a
+    real provider fail. A test whose call to https://api.openai.com failed
+    therefore made the next 20 s of tests get "Upstream ... marked
+    unreachable (cooldown active)" from that host: on nightly seed 971003926
+    test_email_urgency_checkpoint.py lost its faked LLM synthesis that way.
+    """
+    mod = sys.modules.get("src.llm_core")
+    if mod is not None:
+        mod._dead_hosts.clear()
+        mod._host_fails.clear()
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _clear_embedding_and_cache_key_memory():
     """Process-level memos (query-embedding LRU, per-session prompt_cache_key)
     must not carry one test's fake embedder output or session keys into the next."""
