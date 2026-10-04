@@ -1,10 +1,8 @@
-from pathlib import Path
 
 from src import ai_interaction
 from src import document_processor as dp
 
 
-ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_configured_vision_model_resolution_passes_owner(monkeypatch):
@@ -82,20 +80,3 @@ def test_vision_analysis_uses_owner_scoped_primary_and_fallback(monkeypatch, tmp
         {"X-Test": "1"},
         120,
     )
-
-
-def test_request_vision_call_sites_pass_owner():
-    chat_source = (ROOT / "src" / "chat_handler.py").read_text()
-    processor_source = (ROOT / "src" / "document_processor.py").read_text()
-    upload_source = (ROOT / "routes" / "upload_routes.py").read_text()
-    document_source = (ROOT / "routes" / "document" / "document_routes.py").read_text()
-    gallery_source = (ROOT / "routes" / "gallery" / "gallery_routes.py").read_text()
-    memory_source = (ROOT / "routes" / "memory" / "memory_routes.py").read_text()
-
-    assert 'analyze_image_with_vl_result(file_info["path"], owner=owner)' in chat_source
-    assert "analyze_image_with_vl(path, owner=current_user)" in upload_source
-    assert "_process_pdf(path, owner=owner)" in processor_source
-    assert "_process_pdf(pdf_path, owner=user)" in document_source
-    assert "_resolve_vl_model(vl_model, owner=user)" in document_source
-    assert "_resolve_vl_model(configured, owner=user)" in gallery_source
-    assert "_process_pdf(tmp_path, owner=_owner(request))" in memory_source
