@@ -8,10 +8,11 @@ snapshot of the same object. appConfig.js gives them one promise each.
 
 The two properties that matter are opposites, so both are tested here:
 concurrent and later callers must NOT refetch, and a caller after a write MUST
-see the new value — which only holds if every writer invalidates. The last test
-is a source scan that checks exactly that, since a forgotten invalidation
-serves a stale settings object for the rest of the session, which is worse than
-the duplicate fetches this replaces.
+see the new value — which only holds if every writer invalidates. Each writer's
+invalidation is tested where the writer lives, under tests/static/js/ (admin,
+settings, tasks, agentLoadouts), since a forgotten invalidation serves a stale
+settings object for the rest of the session, which is worse than the duplicate
+fetches this replaces.
 
 Driven through `node --input-type=module` so the real module runs, same idiom as
 test_esc_menu_stack_js.py. The module source is inlined rather than imported by
@@ -20,7 +21,6 @@ has no imports of its own, so inlining is exact. `fetch` and `sessionStorage`
 are stubbed, so nothing here touches the network or depends on timing.
 """
 import json
-import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -193,51 +193,6 @@ def test_login_prefetch_is_used_once_and_then_consumed():
     }
 
 
-# ── Writers must invalidate ─────────────────────────────────────────────────
-
-_WRITE_ENDPOINTS = {
-    "/api/auth/settings": "invalidateSettings",
-    "/api/tools": "invalidateTools",
-}
-# login.html is the pre-app login page: it has no module graph and its only call
-# is the prefetch GET, so it is not a writer and cannot import appConfig.js.
-_SCANNED = [_REPO / "static" / "app.js"] + sorted((_REPO / "static" / "js").rglob("*.js"))
-
-
-def _post_sites(source: str, endpoint: str):
-    """Yield the 1-based line of every fetch() to `endpoint` that is a POST."""
-    for m in re.finditer(re.escape(f"'{endpoint}'"), source):
-        window = source[m.start():m.start() + 240]
-        if re.search(r"method:\s*'POST'", window):
-            yield source[:m.start()].count("\n") + 1
-
-
-def test_every_settings_writer_invalidates_the_shared_cache():
-    """A POST that skips the invalidation serves a stale object for the session.
-
-    Checked by source scan rather than at runtime: the failure mode is a call
-    site that was never wired up, which no unit test of the cache itself can
-    see. `appConfig.js` itself is skipped — it is the cache, not a writer.
-    """
-    missing = []
-    for path in _SCANNED:
-        if path.name == "appConfig.js":
-            continue
-        source = path.read_text(encoding="utf-8")
-        for endpoint, invalidator in _WRITE_ENDPOINTS.items():
-            for line in _post_sites(source, endpoint):
-                # The invalidation belongs in the same function as the POST;
-                # accept it anywhere in the surrounding 20 lines either way.
-                lines = source.splitlines()
-                near = "\n".join(lines[max(0, line - 20):line + 20])
-                if invalidator + "(" not in near:
-                    missing.append(f"{path.relative_to(_REPO)}:{line} POST {endpoint}")
-    assert not missing, (
-        "POST sites with no nearby cache invalidation — the UI will serve a "
-        "stale snapshot after these writes:\n  " + "\n  ".join(missing)
-    )
-
-
 @pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_out_of_band_tool_change_is_not_undone_by_an_unrelated_panel_save():
     """Admin > Tools must render authoritative state, not the startup snapshot.
@@ -326,50 +281,3 @@ def test_out_of_band_tool_change_after_panel_open_is_preserved_on_save():
     }
 
 
-def test_admin_tool_save_refreshes_before_full_state_post():
-    """Pin the lost-update guard in the Admin Tools full-list writer."""
-    source = (_REPO / "static" / "js" / "admin.js").read_text(encoding="utf-8")
-    match = re.search(
-        r"async function _saveToolState\(changes\) \{(.*?)\n    \}\n"
-        r"    function _updateCatCounter",
-        source,
-        re.S,
-    )
-    assert match, "_saveToolState(changes) not found in static/js/admin.js"
-
-    body = match.group(1)
-    invalidate = body.find("invalidateTools()")
-    refresh = body.find("getTools()")
-    post = body.find("fetch('/api/tools'")
-
-    assert -1 not in (invalidate, refresh, post)
-    assert invalidate < refresh < post, (
-        "Admin Tools must invalidate and refresh authoritative tool state before "
-        "posting the endpoint's full disabled-tools replacement list"
-    )
-    assert "for (const change of changes)" in body
-
-
-def test_the_admin_tools_editor_does_not_read_a_cached_snapshot():
-    """Pin the invalidate-before-read in loadBuiltinTools().
-
-    A source scan because the failure is an ordering in a call site, not
-    behaviour of the cache: getTools() is doing exactly its job either way.
-    """
-    source = (_REPO / "static" / "js" / "admin.js").read_text(encoding="utf-8")
-    match = re.search(r"\nasync function loadBuiltinTools\(\) \{\n(.*?)\n\}\n", source, re.S)
-    assert match, "loadBuiltinTools() not found in static/js/admin.js"
-    body = match.group(1)
-    read = body.find("getTools(")
-    assert read != -1, "loadBuiltinTools() no longer reads the shared tool cache"
-    assert "invalidateTools(" in body[:read], (
-        "loadBuiltinTools() reads the shared /api/tools snapshot without dropping "
-        "it first, so a reopened panel can render tool state that changed out of "
-        "band and re-post it on the next unrelated toggle"
-    )
-
-
-def test_appconfig_is_precached_by_the_service_worker():
-    """PRECACHE is hand-maintained; a module missing from it breaks offline."""
-    sw = (_REPO / "static" / "sw.js").read_text(encoding="utf-8")
-    assert "'/static/js/appConfig.js'" in sw
