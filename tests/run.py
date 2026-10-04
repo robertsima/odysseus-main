@@ -46,7 +46,11 @@ def pytest(args: list[str], parallel: bool = False) -> int:
     if parallel and _has_xdist():
         command += ["-n", "auto"]
     print("$", " ".join(command[1:] + args), flush=True)
-    return subprocess.run(command + args, cwd=ROOT).returncode
+    code = subprocess.run(command + args, cwd=ROOT).returncode
+    if code == 5:  # pytest: no tests collected, e.g. a marker nothing carries yet
+        print("No tests selected.")
+        return 0
+    return code
 
 
 def node(files: list[str]) -> int:

@@ -9,7 +9,7 @@ Run tests with `python -m tests.run <lane>` (`affected`, `full`, `browser`,
 
 `tests/run_order_report.py` runs pytest with the collected tests shuffled by a
 printed seed, to find tests that depend on what ran before them. The nightly
-workflow runs it; locally: `python tests/run_order_report.py --seed 123 -- tests/cli/ -q`.
+workflow runs it; locally: `python -m tests.run_order_report --seed 123 -- tests/cli/ -q`.
 
 ## Fixtures in `tests/plugins/`
 

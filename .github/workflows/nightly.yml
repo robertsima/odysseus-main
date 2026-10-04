@@ -30,6 +30,7 @@ jobs:
   random-order:
     name: Random order (serial)
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -44,11 +45,12 @@ jobs:
       - run: pip install -r requirements.txt
       - run: mkdir -p data
       # Order-dependent leaks show up here before they show up in CI.
-      - run: python tests/run_order_report.py -- -q -m "not browser" -rfE -p no:cacheprovider
+      - run: python -m tests.run_order_report -- -q -m "not browser" -rfE -p no:cacheprovider
 
   coverage-map:
     name: Coverage map and nightly tests
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     permissions:
       contents: write   # publishes test_map.json to the test-map branch
     steps:
@@ -93,6 +95,7 @@ jobs:
   browser:
     name: All browser tests
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -109,6 +112,7 @@ jobs:
   orchestration:
     name: Orchestration scenarios (scripts/e2e_orchestration)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -127,7 +131,9 @@ jobs:
         run: |
           python -m venv "$HOME/ci-repro/venv"
           "$HOME/ci-repro/venv/bin/pip" install -q -r requirements.txt
-      - run: E2E_SCENARIOS=all bash scripts/e2e_orchestration/run.sh
+      # ssh_remote needs a git host that refuses at once; on the runner the
+      # fetch hangs until the 60 s bash timeout instead, so it runs in WSL only.
+      - run: E2E_SCENARIOS=broad_parent,feature_base,interactive,stop_worker,stop_parent,parallel,publish bash scripts/e2e_orchestration/run.sh
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: failure()
         with:
@@ -137,6 +143,7 @@ jobs:
   windows:
     name: Windows (green but partial)
     runs-on: windows-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -157,6 +164,7 @@ jobs:
     name: Mutation benchmark
     if: github.event.schedule == '47 7 * * 0' || inputs.mutants
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -178,6 +186,7 @@ jobs:
     needs: [random-order, coverage-map, browser, orchestration, windows, mutants]
     if: failure() && github.ref == 'refs/heads/dev'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       issues: write
     steps:
