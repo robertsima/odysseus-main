@@ -9,10 +9,11 @@ gpt-4o rates (~16x) with the wrong context window.
 """
 import json
 import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
+
+from tests.helpers.node import module_url, run_module
 
 _REPO = Path(__file__).resolve().parent.parent
 _HELPER = _REPO / "static" / "js" / "model" / "matchKey.js"
@@ -23,13 +24,10 @@ _KEYS = ["gpt-4o", "gpt-4o-mini", "gpt-4", "o1", "o1-mini", "o1-pro", "o3", "o3-
 
 def _match(name):
     js = (
-        f"import {{ matchModelKey }} from '{_HELPER.as_posix()}';"
+        f"import {{ matchModelKey }} from '{module_url(_HELPER)}';"
         f"console.log(JSON.stringify(matchModelKey({json.dumps(name)}, {json.dumps(_KEYS)})));"
     )
-    proc = subprocess.run(
-        ["node", "--input-type=module"],
-        input=js, capture_output=True, text=True, cwd=str(_REPO), timeout=30,
-    )
+    proc = run_module(js)
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout.strip())
 

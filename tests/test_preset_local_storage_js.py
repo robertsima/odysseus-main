@@ -1,9 +1,10 @@
 import json
 import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
+
+from tests.helpers.node import module_url, run_module
 
 _REPO = Path(__file__).resolve().parent.parent
 _MODULE = _REPO / "static" / "js" / "presets.js"
@@ -21,7 +22,7 @@ def _load_values():
         }}[key] ?? null;
       }},
     }};
-    const presets = await import('{_MODULE.as_posix()}');
+    const presets = await import('{module_url(_MODULE)}');
     console.log(JSON.stringify({{
       brokenArray: presets.loadStoredArray('broken'),
       wrongArray: presets.loadStoredArray('object'),
@@ -30,14 +31,7 @@ def _load_values():
       object: presets.loadStoredObject('object'),
     }}));
     """
-    proc = subprocess.run(
-        ["node", "--input-type=module"],
-        input=js,
-        capture_output=True,
-        text=True,
-        cwd=str(_REPO),
-        timeout=30,
-    )
+    proc = run_module(js)
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout.strip())
 

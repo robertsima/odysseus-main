@@ -3,10 +3,11 @@ non-string To/Cc. Driven through `node --input-type=module`; skips without node.
 """
 import json
 import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
+
+from tests.helpers.node import module_url, run_module
 
 _REPO = Path(__file__).resolve().parent.parent
 _HELPER = _REPO / "static" / "js" / "emailLibrary" / "replyRecipients.js"
@@ -15,13 +16,10 @@ _HAS_NODE = shutil.which("node") is not None
 
 def _cc(data, mine):
     js = f"""
-    import {{ buildReplyAllCc }} from '{_HELPER.as_posix()}';
+    import {{ buildReplyAllCc }} from '{module_url(_HELPER)}';
     console.log(JSON.stringify(buildReplyAllCc({json.dumps(data)}, {json.dumps(mine)})));
     """
-    proc = subprocess.run(
-        ["node", "--input-type=module"],
-        input=js, capture_output=True, text=True, cwd=str(_REPO), timeout=30,
-    )
+    proc = run_module(js)
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout.strip())
 

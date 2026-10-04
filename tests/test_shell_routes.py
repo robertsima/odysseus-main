@@ -174,6 +174,10 @@ class TestRunningInContainer:
 class TestAppleSiliconDetection:
     """APFEL should only surface as available on native Apple Silicon Macs."""
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="IS_APPLE_SILICON also requires a POSIX os.name, which reloading the module cannot fake on Windows",
+    )
     def test_reports_true_on_macos_arm64(self, monkeypatch):
         import core.platform_compat as platform_compat
 
@@ -277,6 +281,12 @@ class TestDockerRowStatus:
         assert "docker/host-docker.yml" in lowered
 
 
+_NEEDS_AF_UNIX = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Python on Windows has no socket.AF_UNIX to create the Docker socket with",
+)
+
+
 class TestHostDockerAccess:
     def test_opt_in_without_socket_is_disabled(self, monkeypatch, tmp_path):
         monkeypatch.setenv("ODYSSEUS_ENABLE_HOST_DOCKER", "true")
@@ -290,6 +300,7 @@ class TestHostDockerAccess:
 
         assert _host_docker_access_enabled(str(socket_path)) is False
 
+    @_NEEDS_AF_UNIX
     @pytest.mark.parametrize("flag", [None, "false"])
     def test_socket_without_explicit_opt_in_is_disabled(
         self,
@@ -307,6 +318,7 @@ class TestHostDockerAccess:
 
             assert _host_docker_access_enabled(str(socket_path)) is False
 
+    @_NEEDS_AF_UNIX
     def test_explicit_opt_in_with_unix_socket_is_enabled(
         self,
         monkeypatch,
@@ -418,11 +430,13 @@ class TestPackageProbeStatus:
         user_base = tmp_path / "user-base"
         monkeypatch.setattr("site.USER_BASE", str(user_base))
         monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        # expanduser reads USERPROFILE on Windows and HOME elsewhere.
+        monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
         monkeypatch.setenv("PATH", "/usr/bin")
 
         _prepend_user_install_bins_to_path()
 
-        parts = os.environ["PATH"].split(os.pathsep)
+        parts = [os.path.normpath(p) for p in os.environ["PATH"].split(os.pathsep)]
         assert str(user_base / "bin") in parts
         assert str(tmp_path / "home" / ".local" / "bin") in parts
 

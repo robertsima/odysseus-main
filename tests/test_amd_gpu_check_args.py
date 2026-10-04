@@ -1,13 +1,18 @@
 import subprocess
 from pathlib import Path
 
+from core.platform_compat import find_bash
 
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "check-docker-amd-gpu.sh"
+# A bare "bash" on Windows can resolve to the WSL launcher in System32, which
+# cannot read a Windows path. find_bash picks the bash the product uses, and
+# that bash reads forward-slash paths on every platform.
+BASH = find_bash() or "bash"
 
 
 def test_amd_gpu_check_rejects_unknown_extra_arg_before_diagnostics():
     proc = subprocess.run(
-        ["bash", str(SCRIPT), "--bad-option"],
+        [BASH, SCRIPT.as_posix(), "--bad-option"],
         capture_output=True,
         text=True,
         check=False,
@@ -18,4 +23,4 @@ def test_amd_gpu_check_rejects_unknown_extra_arg_before_diagnostics():
 
 
 def test_amd_gpu_check_shell_syntax():
-    subprocess.run(["bash", "-n", str(SCRIPT)], check=True)
+    subprocess.run([BASH, "-n", SCRIPT.as_posix()], check=True)

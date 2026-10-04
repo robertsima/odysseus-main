@@ -5,10 +5,11 @@ Driven through `node --input-type=module` (same approach as the other
 """
 import json
 import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
+
+from tests.helpers.node import module_url, run_module
 
 _REPO = Path(__file__).resolve().parent.parent
 _HELPER = _REPO / "static" / "js" / "cookbookPorts.js"
@@ -17,13 +18,10 @@ _HAS_NODE = shutil.which("node") is not None
 
 def _run(expr):
     js = (
-        f"import {{ portOf, nextFreePort }} from '{_HELPER.as_posix()}';"
+        f"import {{ portOf, nextFreePort }} from '{module_url(_HELPER)}';"
         f"console.log(JSON.stringify({expr}));"
     )
-    proc = subprocess.run(
-        ["node", "--input-type=module"],
-        input=js, capture_output=True, text=True, cwd=str(_REPO), timeout=30,
-    )
+    proc = run_module(js)
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout.strip())
 

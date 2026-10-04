@@ -74,7 +74,13 @@ def test_bash_tool_returns_the_redirect_instead_of_running_claude():
     assert "delegate_to_claude_code" in result["error"]
 
 
-def test_bash_tool_still_runs_ordinary_commands():
+def test_bash_tool_still_runs_ordinary_commands(monkeypatch, tmp_path):
+    from src import tool_execution
+
+    # Run in a folder this test owns. Without it the shell starts in whatever
+    # workspace or data folder earlier tests in the same worker left behind,
+    # which may no longer exist (WinError 267 on a full Windows run).
+    monkeypatch.setattr(tool_execution, "get_active_workspace", lambda: str(tmp_path))
     result = asyncio.run(TOOL_HANDLERS["bash"]("echo claude-ok", {"allow_private": True}))
     assert result.get("exit_code") == 0
     assert "claude-ok" in (result.get("output") or result.get("stdout") or "")

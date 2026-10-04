@@ -1,8 +1,16 @@
 import asyncio
 import os
+import sys
 from pathlib import Path
 
+import pytest
+
 from routes import personal_routes
+
+_NEEDS_SYMLINKS = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Creating a symlink on Windows needs a privilege test runners usually lack (WinError 1314).",
+)
 
 
 class _FakePersonalDocs:
@@ -30,6 +38,7 @@ def _delete_endpoint(personal_docs):
     raise AssertionError("DELETE /api/personal/file endpoint not found")
 
 
+@_NEEDS_SYMLINKS
 def test_delete_file_refuses_symlink_directory_escape(tmp_path, monkeypatch):
     uploads = tmp_path / "uploads"
     uploads.mkdir()

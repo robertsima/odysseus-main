@@ -23,10 +23,6 @@ the turn it was meant for.
 
 import pytest
 
-_REPORT_BACKLOG = pytest.mark.skip(
-    reason="Re-port backlog: uses fork-only internals replaced by upstream's agent core (website/upstream-sync-2026-09-18.md)"
-)
-
 
 @pytest.fixture(autouse=True)
 def _clear_steer_queue(tmp_path, monkeypatch):
@@ -315,29 +311,6 @@ class TestSteerIsObservable:
         assert agent_control.clear_steer("s") == []
         assert agent_control.pending_steer("s", run_id="specific-run") == [rec]
         assert agent_control.drain_steer("s", run_id="specific-run") == [rec["text"]]
-
-    @_REPORT_BACKLOG
-    def test_persisted_steering_keeps_human_and_peer_attribution(self):
-        from types import SimpleNamespace
-        from src import agent_control
-        from src.agent_loop import _user_intent_text
-        from services.memory.extraction_context import conversation_for_extraction
-
-        history = []
-        sess = SimpleNamespace(add_message=history.append)
-        for kind, steer_id in (("user", "human-id"), ("peer", "peer-id")):
-            agent_control.persist_applied_steer(sess, {
-                "text": "Check the tests", "kind": kind, "steer_id": steer_id,
-                "from_session": "worker", "from_session_name": "Reviewer",
-            })
-        human, peer = [m.to_dict() for m in history]
-        assert human["metadata"] == {"source": "steer", "steer_id": "human-id"}
-        assert peer["metadata"]["source"] == "agent"  # renderer's peer badge, not You
-        assert peer["metadata"]["from_session_name"] == "Reviewer"
-        assert _user_intent_text(peer) is None
-        assert conversation_for_extraction([human, peer], limit=6) == [
-            {"role": "user", "content": "Check the tests"},
-        ]
 
     def test_queue_drain_and_injection_are_three_separate_facts(self):
         from src import agent_control

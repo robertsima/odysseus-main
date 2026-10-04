@@ -13,56 +13,7 @@ import pytest
 from dulwich.objects import Blob, Commit, Tree
 from dulwich.repo import Repo
 
-from src import tool_approvals
 from src.agent_worktree import repository_local, repository_sync
-
-# The fork's approval store (once/always grants handed back to the loop) was
-# replaced by upstream's in the 2026-09-18 sync. These tests pin how that
-# store behaved and come back with it; see website/upstream-sync-2026-09-18.md.
-_FORK_APPROVALS = pytest.mark.skip(
-    reason="Re-port backlog: the fork's tool approval store (website/upstream-sync-2026-09-18.md)"
-)
-
-
-# ── approval: the approved call is handed back, verbatim ──────────────────────
-
-
-@_FORK_APPROVALS
-def test_an_approved_call_is_returned_exactly_until_it_runs():
-    """"Issue exactly the same call again" failed in practice: the model
-    re-inspected state and re-issued the merge with different arguments, a
-    different hash, and it was held again. The exact call is on the record."""
-    content = json.dumps({"action": "merge", "repository": "/r", "ref": "upstream/dev",
-                          "expected_head": "a" * 40, "expected_target": "b" * 40})
-    pending = tool_approvals.request("chat", "manage_git", content, "merges")
-    assert tool_approvals.approved_unused_calls("chat") == []   # undecided
-
-    tool_approvals.decide("chat", pending["id"], "once")
-    calls = tool_approvals.approved_unused_calls("chat")
-    assert calls == [{"id": pending["id"], "tool": "manage_git", "command": content}]
-
-    assert tool_approvals.consume_once_grant("chat", "manage_git", content)
-    assert tool_approvals.approved_unused_calls("chat") == []   # used up
-
-
-@_FORK_APPROVALS
-def test_a_denied_or_foreign_approval_is_never_handed_back():
-    content = json.dumps({"action": "reset", "repository": "/r",
-                          "expected_head": "a" * 40, "expected_target": "b" * 40})
-    denied = tool_approvals.request("chat", "manage_git", content, "resets")
-    tool_approvals.decide("chat", denied["id"], "deny")
-    other = tool_approvals.request("other", "manage_git", content, "resets")
-    tool_approvals.decide("other", other["id"], "once")
-
-    assert tool_approvals.approved_unused_calls("chat") == []
-
-
-@_FORK_APPROVALS
-def test_a_truncated_command_is_not_offered_because_it_could_never_match():
-    content = json.dumps({"action": "commit", "repository": "/r", "message": "x" * 5000})
-    pending = tool_approvals.request("chat", "manage_git", content, "commits")
-    tool_approvals.decide("chat", pending["id"], "once")
-    assert tool_approvals.approved_unused_calls("chat") == []
 
 
 # ── roots: the harness can reach the worktrees it creates ─────────────────────
@@ -324,9 +275,6 @@ async def test_resolving_and_committing_records_a_real_two_parent_merge(conflict
 # The three calls from the 2026-09-18 log, each approved by the user and each
 # rejected only when it ran -- then handed back at the start of every turn.
 
-import inspect
-
-import src.agent_loop as agent_loop
 from src.agent_tools.git_tools import GitTool
 
 STASH_POP_WITHOUT_PROOF = json.dumps({"action": "stash_pop", "repository": "/r", "index": 0})
@@ -360,36 +308,3 @@ def test_precheck_rejects_a_push_the_publish_flow_forbids(monkeypatch):
 
 def test_precheck_lets_a_valid_call_through_to_be_held():
     assert GitTool.precheck(VALID_MERGE) is None
-
-
-@_FORK_APPROVALS
-def test_the_loop_prechecks_before_it_holds():
-    src = inspect.getsource(agent_loop.stream_agent_loop)
-    precheck = src.index("_git_precheck_error(full_command)")
-    hold = src.index("_tool_approvals.request(session_id, block.tool_type, full_command")
-    assert precheck < hold, "validation must come before the approval card"
-
-
-@_FORK_APPROVALS
-def test_a_retired_approval_is_not_handed_back():
-    pending = tool_approvals.request("chat", "manage_git", STASH_POP_WITHOUT_PROOF, "drops")
-    tool_approvals.decide("chat", pending["id"], "once")
-    assert tool_approvals.approved_unused_calls("chat")          # would be re-offered
-
-    assert tool_approvals.retire_approved_call("chat", "manage_git", STASH_POP_WITHOUT_PROOF)
-    assert tool_approvals.approved_unused_calls("chat") == []
-    assert not tool_approvals.retire_approved_call("chat", "manage_git", STASH_POP_WITHOUT_PROOF)
-
-
-@_FORK_APPROVALS
-@pytest.mark.asyncio
-async def test_running_an_approved_but_invalid_call_retires_its_approval(monkeypatch):
-    """The loop the log shows: approved, rejected, re-offered, rejected, ..."""
-    monkeypatch.setattr("src.tool_security.owner_is_admin_or_single_user", lambda owner: True)
-    pending = tool_approvals.request("chat", "manage_git", PUSH_WITH_FOREIGN_ARG, "publishes")
-    tool_approvals.decide("chat", pending["id"], "once")
-
-    result = await GitTool().execute(PUSH_WITH_FOREIGN_ARG, {"owner": "admin", "session_id": "chat"})
-
-    assert result["code"] == "invalid_arguments"
-    assert tool_approvals.approved_unused_calls("chat") == []

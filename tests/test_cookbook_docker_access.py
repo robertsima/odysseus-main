@@ -1,4 +1,5 @@
 import socket
+import sys
 from unittest.mock import AsyncMock
 
 import pytest
@@ -56,6 +57,10 @@ async def test_container_cli_only_is_rejected(monkeypatch, tmp_path):
     assert "docker/host-docker.yml" in message
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Python on Windows has no socket.AF_UNIX to create the Docker socket with",
+)
 @pytest.mark.asyncio
 async def test_container_opt_in_with_unix_socket_is_allowed(monkeypatch, tmp_path):
     monkeypatch.setattr(cookbook_routes.shutil, "which", lambda binary: "/usr/bin/docker")
@@ -202,6 +207,9 @@ async def test_local_container_serve_allows_generated_docker_exec_when_enabled(
 
     monkeypatch.setattr(cookbook_routes, "require_admin", lambda request: None)
     monkeypatch.setattr(cookbook_routes, "_binary_available", binary_available)
+    # The container is Linux even when the test host is Windows, where a local
+    # serve would otherwise skip tmux and take the detached-process path.
+    monkeypatch.setattr(cookbook_routes, "IS_WINDOWS", False)
     monkeypatch.setattr(cookbook_routes, "running_in_container", lambda: True)
     monkeypatch.setattr(
         cookbook_routes,

@@ -3,10 +3,11 @@ Driven through `node --input-type=module`; skips without node.
 """
 import json
 import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
+
+from tests.helpers.node import module_url, run_module
 
 _REPO = Path(__file__).resolve().parent.parent
 _HELPER = _REPO / "static" / "js" / "langIcons.js"
@@ -15,13 +16,10 @@ _HAS_NODE = shutil.which("node") is not None
 
 def _icon(lang, size, opts):
     js = f"""
-    import {{ langIcon }} from '{_HELPER.as_posix()}';
+    import {{ langIcon }} from '{module_url(_HELPER)}';
     console.log(langIcon({json.dumps(lang)}, {json.dumps(size)}, {json.dumps(opts)}));
     """
-    proc = subprocess.run(
-        ["node", "--input-type=module"],
-        input=js, capture_output=True, text=True, cwd=str(_REPO), timeout=30,
-    )
+    proc = run_module(js)
     assert proc.returncode == 0, proc.stderr
     return proc.stdout.strip()
 

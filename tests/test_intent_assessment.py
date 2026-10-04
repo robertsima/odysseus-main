@@ -15,10 +15,6 @@ from src.intent_assessment import (
 )
 from src.tool_selection import plan_tool_selection
 
-_REPORT_BACKLOG = pytest.mark.skip(
-    reason="Re-port backlog: uses fork-only internals replaced by upstream's agent core (website/upstream-sync-2026-09-18.md)"
-)
-
 
 _ROUTING_CASES = {
     case["id"]: case
@@ -45,15 +41,6 @@ def test_unknown_substantive_paraphrase_is_not_low_signal():
         assert not assessment.low_signal, text
         assert assessment.domains == frozenset()
         assert assessment.retrieval_query == text
-
-
-@_REPORT_BACKLOG
-def test_agent_compatibility_classifier_preserves_domain_free_discovery():
-    from src.agent_loop import _classify_agent_request
-
-    for text in ("take care of the broken export", "work out what happened to the deployment"):
-        result = _classify_agent_request([{"role": "user", "content": text}], text)
-        assert result["low_signal"] is False, text
 
 
 def test_changed_topic_does_not_inherit_old_retrieval_query():
@@ -155,22 +142,6 @@ def test_runtime_or_untrusted_locator_cannot_ground_a_task(runtime_message):
     assert "attacker/repo" not in assessment.retrieval_query
 
 
-@_REPORT_BACKLOG
-def test_agent_classifier_keeps_file_intent_when_url_grounds_git_request():
-    from src.agent_loop import _classify_agent_request
-
-    locator = "https://github.com/robertsima/Umni PLEASE"
-    messages = [
-        {"role": "user", "content": "git pull!!"},
-        {"role": "assistant", "content": "I can't run that without the correct repository."},
-        {"role": "user", "content": locator},
-    ]
-    intent = _classify_agent_request(messages, locator)
-    assert intent["continuation"] is True
-    assert "git pull!!" in intent["retrieval_query"]
-    assert "files" in intent["domains"]
-
-
 @pytest.mark.parametrize("followup", [
     "you had the paths before!",
     "you already had that earlier",
@@ -213,21 +184,6 @@ def test_backward_reference_with_new_task_does_not_inherit(followup):
     assessment = assess_request(messages)
     assert assessment.continuation is False
     assert assessment.retrieval_query == followup
-
-
-@_REPORT_BACKLOG
-def test_agent_classifier_does_not_turn_mcp_use_feedback_into_settings_admin():
-    from src.agent_loop import _classify_agent_request, _detect_admin_tools
-    messages = [
-        {"role": "user", "content": "pull the dog-trainer repository"},
-        {"role": "assistant", "content": "I could not access it."},
-        {"role": "user", "content": "use your mcp tools brah wtf"},
-    ]
-    result = _classify_agent_request(messages, "use your mcp tools brah wtf")
-    assert result["continuation"] is True
-    assert "pull the dog-trainer repository" in result["retrieval_query"]
-    assert "settings" not in result["domains"]
-    assert "manage_mcp" not in _detect_admin_tools(messages)
 
 
 def test_terse_followup_inherits_only_human_turns():

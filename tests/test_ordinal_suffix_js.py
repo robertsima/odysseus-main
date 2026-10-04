@@ -6,10 +6,11 @@ which only handles single digits, so a monthly task on day 21/22/23/31 rendered
 """
 import json
 import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
+
+from tests.helpers.node import module_url, run_module
 
 _REPO = Path(__file__).resolve().parent.parent
 _HELPER = _REPO / "static" / "js" / "util" / "ordinal.js"
@@ -19,11 +20,10 @@ _HAS_NODE = shutil.which("node") is not None
 def _suffixes(nums):
     arr = json.dumps(nums)
     js = f"""
-    import {{ ordinalSuffix }} from '{_HELPER.as_posix()}';
+    import {{ ordinalSuffix }} from '{module_url(_HELPER)}';
     console.log(JSON.stringify({arr}.map(n => n + ordinalSuffix(n))));
     """
-    proc = subprocess.run(["node", "--input-type=module"], input=js,
-                          capture_output=True, text=True, cwd=str(_REPO), timeout=30)
+    proc = run_module(js)
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout.strip())
 

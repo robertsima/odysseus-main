@@ -12,9 +12,17 @@ confinement principle.
 """
 import ast
 import os
+import sys
 from pathlib import Path
 
+import pytest
+
 SRC = Path(__file__).resolve().parent.parent / "routes" / "personal_routes.py"
+
+_NEEDS_SYMLINKS = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Creating a symlink on Windows needs a privilege test runners usually lack (WinError 1314).",
+)
 
 
 def _function_source(src_text, name):
@@ -37,6 +45,7 @@ def test_confinement_uses_realpath_not_abspath():
     )
 
 
+@_NEEDS_SYMLINKS
 def test_realpath_catches_symlink_escape(tmp_path):
     # The principle the fix relies on: abspath keeps the symlink path inside the
     # base (confinement fooled); realpath resolves it outside (confinement holds).

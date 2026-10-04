@@ -23,10 +23,6 @@ from src.lotus_notifications import (
     settings_override_for,
 )
 
-_REPORT_BACKLOG = pytest.mark.skip(
-    reason="Re-port backlog: uses fork-only internals replaced by upstream's agent core (website/upstream-sync-2026-09-18.md)"
-)
-
 NOTE_TEXT = "A private synthetic note that must never leave the database."
 
 
@@ -650,32 +646,6 @@ def test_wellbeing_session_access_policy_fails_closed(monkeypatch, tmp_path):
 
     LotusCheckinStore("alice").save_preferences({"access_api": True})
     assert is_local_session("s1", owner="alice") is True
-
-
-@_REPORT_BACKLOG
-def test_wellbeing_tool_is_wired_into_the_agent_surfaces():
-    from src.agent_loop import (
-        _DOMAIN_RULES,
-        _DOMAIN_TOOL_MAP,
-        _STARVED_DOMAIN_LABELS,
-        TOOL_SECTIONS,
-        _classify_agent_request,
-    )
-    from src.agent_tools import TOOL_TAGS
-    from src.tool_index import BUILTIN_TOOL_DESCRIPTIONS
-    from src.tool_schemas import FUNCTION_TOOL_SCHEMAS
-
-    assert "manage_wellbeing" in TOOL_TAGS
-    assert "manage_wellbeing" in TOOL_SECTIONS
-    assert "manage_wellbeing" in BUILTIN_TOOL_DESCRIPTIONS
-    assert _DOMAIN_TOOL_MAP["wellbeing"] == {"manage_wellbeing"}
-    assert "wellbeing" in _DOMAIN_RULES and "wellbeing" in _STARVED_DOMAIN_LABELS
-    assert any(
-        s.get("function", {}).get("name") == "manage_wellbeing" for s in FUNCTION_TOOL_SCHEMAS
-    )
-
-    for phrase in ("how has my mood been lately", "plan my week", "am I burning out"):
-        assert "wellbeing" in _classify_agent_request([], phrase)["domains"], phrase
 
 
 # ---------------------------------------------------------------------------

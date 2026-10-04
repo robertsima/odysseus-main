@@ -1,13 +1,14 @@
 import json
 import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
 
+from tests.helpers.node import module_url, run_module
+
 
 _REPO = Path(__file__).resolve().parent.parent
-_UTILS = (_REPO / "static" / "js" / "emailLibrary" / "utils.js").as_posix()
+_UTILS = module_url(_REPO / "static" / "js" / "emailLibrary" / "utils.js")
 _HAS_NODE = shutil.which("node") is not None
 
 pytestmark = pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
@@ -37,14 +38,7 @@ def test_email_summary_renderer_ignores_untrusted_provider_error_text():
       }}));
     """
 
-    proc = subprocess.run(
-        ["node", "--input-type=module"],
-        input=script,
-        capture_output=True,
-        text=True,
-        cwd=str(_REPO),
-        timeout=30,
-    )
+    proc = run_module(script)
 
     assert proc.returncode == 0, proc.stderr
     rendered = json.loads(proc.stdout)

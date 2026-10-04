@@ -233,8 +233,10 @@ def test_invalid_limit_exits_cleanly(capsys):
     assert "must be a positive integer" in capsys.readouterr().err
 
 
-def test_help_includes_limit():
+def test_help_includes_limit(monkeypatch):
     audit = load_module()
+    # Python 3.14 argparse colors help text when FORCE_COLOR is set.
+    monkeypatch.setenv("NO_COLOR", "1")
 
     help_text = audit.build_parser().format_help()
 
@@ -725,6 +727,9 @@ def test_color_auto_requires_terminal_and_support(monkeypatch):
     args = audit.argparse.Namespace(format="terminal", color="auto", output=None)
 
     monkeypatch.setattr(audit.sys.stdout, "isatty", lambda: True)
+    # On Windows the answer also needs a console that accepts VT mode, and
+    # pytest's captured stdout is not one.
+    monkeypatch.setattr(audit, "enable_windows_vt_mode", lambda: True)
     monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.setitem(audit.os.environ, "TERM", "xterm-256color")
     assert audit.should_use_color(args)

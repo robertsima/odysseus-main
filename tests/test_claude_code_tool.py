@@ -7,6 +7,7 @@ tool that is in the policy sets but not dispatchable is dead code.
 """
 import asyncio
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -173,6 +174,10 @@ async def test_tool_rejects_missing_prompt(approved_repo):
     assert "prompt" in result["error"]
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows has no POSIX mode bits, so the product skips the token file mode check there",
+)
 def test_callback_token_file_must_be_private(tmp_path, monkeypatch):
     token_file = tmp_path / "token"
     token_file.write_text("ody_secret", encoding="utf-8")
@@ -266,6 +271,10 @@ def test_child_environment_has_no_github_credentials_by_default(server_env):
     assert "SSH_AUTH_SOCK" not in child
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="runs a #!/bin/sh stub as the claude binary, which Windows cannot execute",
+)
 async def test_binary_probe_uses_the_allowlisted_environment(server_env, tmp_path):
     script = tmp_path / "printenv-claude"
     script.write_text("#!/bin/sh\nenv\n", encoding="utf-8")
@@ -324,7 +333,7 @@ def test_redact_result_masks_server_secrets_and_known_shapes(server_env):
 
 
 async def test_run_output_is_redacted_before_it_is_returned(server_env, monkeypatch, tmp_path, fake_binary_info):
-    monkeypatch.setattr(cct, "DEFAULT_BINARY", "/bin/sh")
+    monkeypatch.setattr(cct, "DEFAULT_BINARY", sys.executable)  # any real executable; the process is faked
     monkeypatch.setattr(cct, "_git_report", lambda repository: _async_result({}))
     monkeypatch.setattr(cct, "_git_changes", lambda repository, start: _async_result({}))
     monkeypatch.setattr(cct, "_git_head", lambda repository: _async_result(None))
@@ -352,7 +361,7 @@ async def test_run_output_is_redacted_before_it_is_returned(server_env, monkeypa
 
 async def test_repo_lock_serializes_concurrent_runs(monkeypatch, tmp_path, fake_binary_info):
     """Two delegations against the same repo must not run concurrently."""
-    monkeypatch.setattr(cct, "DEFAULT_BINARY", "/bin/sh")
+    monkeypatch.setattr(cct, "DEFAULT_BINARY", sys.executable)  # any real executable; the process is faked
     monkeypatch.setattr(cct, "_git_report", lambda repository: _async_result({}))
     order = []
 
@@ -383,7 +392,7 @@ async def test_repo_lock_serializes_concurrent_runs(monkeypatch, tmp_path, fake_
 
 
 async def test_global_process_limit_bounds_different_repositories(monkeypatch, tmp_path, fake_binary_info):
-    monkeypatch.setattr(cct, "DEFAULT_BINARY", "/bin/sh")
+    monkeypatch.setattr(cct, "DEFAULT_BINARY", sys.executable)  # any real executable; the process is faked
     monkeypatch.setattr(cct, "_PROCESS_LIMIT", asyncio.Semaphore(1))
     monkeypatch.setattr(cct, "_git_report", lambda repository: _async_result({}))
     active = 0
@@ -584,7 +593,8 @@ def test_task_store_is_private_and_does_not_persist_prompt(tmp_path, monkeypatch
     store = asyncio.run(exercise())
     persisted = store.read_text(encoding="utf-8")
     assert "sensitive task instructions" not in persisted
-    assert store.stat().st_mode & 0o777 == 0o600
+    if sys.platform != "win32":  # Windows files have no POSIX mode bits to check
+        assert store.stat().st_mode & 0o777 == 0o600
 
 
 def test_task_records_are_owner_scoped(tmp_path):

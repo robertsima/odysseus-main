@@ -16,16 +16,9 @@ The pasted log of one 21-round turn showed:
   consecutive rounds of one conversation: no shard affinity.
 """
 import inspect
-import re
 import uuid
 
-import pytest
-
 from src.tool_execution import _command_preview, _failure_detail
-
-_REPORT_BACKLOG = pytest.mark.skip(
-    reason="Re-port backlog: the fork's agent-loop routing (website/upstream-sync-2026-09-18.md)"
-)
 
 
 # ── bash / script previews ──
@@ -108,18 +101,6 @@ def test_tool_executed_log_line_carries_the_failure_reason():
     assert 'f" error={_detail}" if _detail else ""' in src
 
 
-# ── per-round tool-set diff logging ──
-
-@_REPORT_BACKLOG
-def test_tool_set_diff_line_is_info_only_when_the_set_changes():
-    from src import agent_loop
-    src = inspect.getsource(agent_loop.stream_agent_loop)
-    assert "_last_tool_debug_sig = None" in src
-    assert "_tool_debug_log = logger.info if _tool_debug_sig != _last_tool_debug_sig else logger.debug" in src
-    # The old unconditional INFO must be gone.
-    assert re.search(r'logger\.info\(\s*"\[agent-debug\] round=%s model=%s', src) is None
-
-
 # ── native-call conversion logging ──
 #
 # One INFO line per native tool call, per round, for a mapping that changed
@@ -136,28 +117,11 @@ def _conversion_records(caplog, calls):
     return [r for r in caplog.records if "-> converted:" in r.getMessage()]
 
 
-@_REPORT_BACKLOG
-def test_an_unchanged_tool_name_logs_at_debug(caplog):
-    records = _conversion_records(caplog, [
-        {"name": "read_file", "arguments": '{"path": "a.py"}'},
-        {"name": "grep", "arguments": '{"pattern": "x"}'},
-    ])
-    assert [r.levelname for r in records] == ["DEBUG", "DEBUG"]
-
-
 def test_a_real_rename_is_still_info(caplog):
     # `shell` really does execute as `bash` — that one is worth seeing.
     records = _conversion_records(caplog, [{"name": "shell", "arguments": '{"command": "ls"}'}])
     assert [r.levelname for r in records] == ["INFO"]
     assert "shell -> bash" in records[0].getMessage()
-
-
-@_REPORT_BACKLOG
-def test_image_generation_off_disables_generate_image_in_the_selection():
-    from src import agent_loop
-    src = inspect.getsource(agent_loop.stream_agent_loop)
-    assert 'if not get_setting("image_gen_enabled", False):\n        disabled_tools.add("generate_image")' in src
-    assert "_relevant_tools = set(_relevant_tools) - disabled_tools" in src
 
 
 # ── Codex cache-shard affinity ──

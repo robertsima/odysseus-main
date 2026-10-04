@@ -35,7 +35,9 @@ def test_embedded_soldiers_match_canonical_licensed_paths():
 
 
 def test_review_fixtures_embed_original_helmet_without_network_access():
-    helmet = (ROOT / 'static/branding/agamemnon-trojan-helmet.svg').read_bytes()
+    # A Windows checkout with core.autocrlf gives the SVG CRLF line endings;
+    # the embedded copy keeps the LF bytes stored in git.
+    helmet = (ROOT / 'static/branding/agamemnon-trojan-helmet.svg').read_bytes().replace(b'\r\n', b'\n')
     for page in ('agents', 'chat', 'workbench'):
         text = (ROOT / f'website/agamemnon-preview-{page}.html').read_text()
         src = re.search(r'<img class="brand-crest" src="data:image/svg\+xml;base64,([^"]+)" data-source="agamemnon-trojan-helmet.svg" alt=""', text)

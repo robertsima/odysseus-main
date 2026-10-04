@@ -20,6 +20,13 @@ COMPOSE_FILES = (
     ROOT / "docker-compose.zimaos-local.yml",
 )
 
+# The migration runs inside the Linux SearXNG container. When it rewrites a
+# file it copies ownership with os.fchown and os.fchmod, which Windows lacks.
+_REWRITES_FILE = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the migration rewrites through os.fchown and os.fchmod, which Windows lacks",
+)
+
 
 def _run(path: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -38,6 +45,7 @@ def _load_migration_module():
     return module
 
 
+@_REWRITES_FILE
 def test_retained_settings_gain_defaults_without_changing_custom_content(tmp_path):
     settings = tmp_path / "settings.yml"
     retained = (
@@ -111,6 +119,7 @@ def test_explicit_top_level_setting_is_not_overridden(tmp_path, key):
     assert settings.read_bytes() == original
 
 
+@_REWRITES_FILE
 def test_key_is_inserted_inside_explicit_yaml_document(tmp_path):
     settings = tmp_path / "settings.yml"
     original = b"\xef\xbb\xbf# header\r\n---\r\nserver:\r\n  secret_key: retained\r\n"
@@ -125,6 +134,7 @@ def test_key_is_inserted_inside_explicit_yaml_document(tmp_path):
     )
 
 
+@_REWRITES_FILE
 def test_indented_root_mapping_keeps_its_existing_indent(tmp_path):
     settings = tmp_path / "settings.yml"
     original = b"  server:\n    secret_key: retained\n  search:\n    safe_search: 1\n"
@@ -136,6 +146,7 @@ def test_indented_root_mapping_keeps_its_existing_indent(tmp_path):
     assert settings.read_bytes() == b"  use_default_settings: true\n" + original
 
 
+@_REWRITES_FILE
 @pytest.mark.parametrize(
     "property_line",
     (b"!!map\n", b"&settings\n", b"--- !!map\n"),
@@ -157,6 +168,7 @@ def test_block_mapping_properties_stay_attached_to_the_root(tmp_path, property_l
     assert migrated_data == original_data
 
 
+@_REWRITES_FILE
 def test_flow_mapping_gains_default_inheritance_without_reformatting(tmp_path):
     settings = tmp_path / "settings.yml"
     original = b"{server: {secret_key: retained}, search: {safe_search: 1}}\n"
@@ -170,6 +182,7 @@ def test_flow_mapping_gains_default_inheritance_without_reformatting(tmp_path):
     )
 
 
+@_REWRITES_FILE
 @pytest.mark.parametrize(
     ("original", "expected"),
     (
@@ -248,6 +261,7 @@ def test_invalid_utf8_is_not_replaced(tmp_path):
     assert after.st_ino == before.st_ino
 
 
+@_REWRITES_FILE
 def test_temporary_file_is_chmodded_before_it_is_chowned(tmp_path, monkeypatch):
     # The Compose cap set is `cap_drop: ALL` plus CHOWN/SETGID/SETUID/
     # DAC_OVERRIDE and carries no FOWNER, and searxng's entrypoint chowns
@@ -286,6 +300,7 @@ def test_temporary_file_is_chmodded_before_it_is_chowned(tmp_path, monkeypatch):
     )
 
 
+@_REWRITES_FILE
 def test_replace_failure_preserves_original_and_removes_temporary_file(
     tmp_path, monkeypatch
 ):

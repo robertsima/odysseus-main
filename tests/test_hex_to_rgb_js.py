@@ -9,10 +9,11 @@ expanded shorthand correctly — theme parsing did not).
 """
 import json
 import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
+
+from tests.helpers.node import module_url, run_module
 
 _REPO = Path(__file__).resolve().parent.parent
 _HELPER = _REPO / "static" / "js" / "color" / "hex.js"
@@ -21,13 +22,10 @@ _HAS_NODE = shutil.which("node") is not None
 
 def _rgb(hex_str: str):
     js = (
-        f"import {{ hexToRgb }} from '{_HELPER.as_posix()}';"
+        f"import {{ hexToRgb }} from '{module_url(_HELPER)}';"
         f"console.log(JSON.stringify(hexToRgb({json.dumps(hex_str)})));"
     )
-    proc = subprocess.run(
-        ["node", "--input-type=module"],
-        input=js, capture_output=True, text=True, cwd=str(_REPO), timeout=30,
-    )
+    proc = run_module(js)
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout.strip())
 

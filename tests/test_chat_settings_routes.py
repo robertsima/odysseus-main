@@ -1,21 +1,13 @@
-"""Per-chat settings storage, the settings/approval routes, and fork lineage,
-against a throwaway SQLite database."""
+"""Per-chat settings storage and fork lineage, against a throwaway SQLite database."""
 import asyncio
 import json
 import uuid
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
-from fastapi import HTTPException
 
 import core.database as cdb
 from core.database import Session as DbSession
-from src import tool_approvals
-
-_REPORT_BACKLOG = pytest.mark.skip(
-    reason="Re-port backlog: uses fork-only internals replaced by upstream's agent core (website/upstream-sync-2026-09-18.md)"
-)
 
 
 @pytest.fixture
@@ -43,55 +35,12 @@ def test_settings_helpers_merge_and_remove(db):
     assert cdb.update_session_settings("missing", {"x": 1}) is None
 
 
-def _routes(monkeypatch, db):
-    import routes.session_routes as sr
-
-    monkeypatch.setattr(sr, "SessionLocal", db.SessionLocal)
-    monkeypatch.setattr(sr, "_verify_session_owner", lambda *a, **k: None)
-    # session_routes registers onto a module-level router; drop what this call
-    # adds afterwards so later tests don't pick up these mocked endpoints first.
-    before = len(sr.router.routes)
-    router = sr.setup_session_routes(MagicMock(), {})
-    endpoints = {(m, r.path): r.endpoint for r in router.routes[before:] for m in r.methods}
-    del sr.router.routes[before:]
-    return endpoints
-
-
 def _req(body=None):
     async def _json():
         if isinstance(body, Exception):
             raise body
         return body
     return SimpleNamespace(json=_json)
-
-
-@_REPORT_BACKLOG
-def test_settings_and_approval_routes(db, monkeypatch):
-    ep = _routes(monkeypatch, db)
-    src_id, fork_id = str(uuid.uuid4()), str(uuid.uuid4())
-    _add(db, src_id, name="Original")
-    _add(db, fork_id, name="⫝ Original", forked_from=src_id)
-
-    out = asyncio.run(ep[("PATCH", "/api/session/{session_id}/settings")](
-        _req({"approval_mode": "ask_all", "disabled_tools": ["web_fetch"]}), session_id=fork_id))
-    assert out["settings"] == {"approval_mode": "ask_all", "disabled_tools": ["web_fetch"]}
-    assert out["approval_mode"] == "ask_all" and out["forked_from"] == {"id": src_id, "name": "Original", "archived": False}
-
-    with pytest.raises(HTTPException) as exc:
-        asyncio.run(ep[("PATCH", "/api/session/{session_id}/settings")](_req({"approval_mode": "yolo"}), session_id=fork_id))
-    assert exc.value.status_code == 400
-
-    rec = tool_approvals.request(fork_id, "bash", "git push", "pushes to a remote")
-    decide = ep[("POST", "/api/session/{session_id}/approvals/{approval_id}")]
-    res = asyncio.run(decide(_req({"decision": "always"}), session_id=fork_id, approval_id=rec["id"]))
-    assert res["always_allowed_tools"] == ["bash"]
-    got = asyncio.run(ep[("GET", "/api/session/{session_id}/settings")](SimpleNamespace(), session_id=fork_id))
-    assert got["always_allowed_tools"] == ["bash"]
-    with pytest.raises(HTTPException) as exc:
-        asyncio.run(decide(_req({"decision": "once"}), session_id=fork_id, approval_id="gone"))
-    assert exc.value.status_code == 404
-    asyncio.run(ep[("DELETE", "/api/session/{session_id}/approvals")](SimpleNamespace(), session_id=fork_id))
-    assert tool_approvals.chat_grants(fork_id) == []
 
 
 def test_fork_records_its_source_copies_settings_and_defaults_to_everything(db, monkeypatch):
