@@ -111,7 +111,7 @@ jobs:
       - name: Node tests
         run: |
           npm ci --ignore-scripts
-          node --test "tests/**/*.test.mjs"
+          node --test --test-timeout=60000 "tests/**/*.test.mjs"
 
   python-tests:
     name: Python tests (pytest)

@@ -54,6 +54,20 @@ def test_affected_splits_python_and_node_tests(calls, monkeypatch):
                      ("node", ["tests/static/js/x/x.test.mjs"])]
 
 
+@pytest.mark.parametrize("env,expected", [
+    ({}, "4"),
+    ({"CI": "true"}, "auto"),
+    ({"CI": "true", "ODYSSEUS_TEST_WORKERS": "2"}, "2"),
+    ({"ODYSSEUS_TEST_WORKERS": "8"}, "8"),
+])
+def test_workstations_get_a_bounded_number_of_workers(monkeypatch, env, expected):
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.delenv("ODYSSEUS_TEST_WORKERS", raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    assert run.workers() == expected
+
+
 @pytest.mark.parametrize("lane,marker", [("browser", "browser"), ("security", "security or area_security"),
                                          ("nightly", "nightly")])
 def test_marker_lanes_select_by_marker(calls, lane, marker):

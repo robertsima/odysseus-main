@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import os
 import shutil
 import subprocess
 import sys
@@ -28,6 +29,21 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 LANES = ("affected", "full", "browser", "security", "nightly")
 _PARALLEL_FROM = 15  # below this many files, xdist start-up costs more than it saves
+NODE_TEST_TIMEOUT_MS = 60_000  # a hung node test is killed instead of holding its memory
+
+
+def workers() -> str:
+    """How many parallel test processes to start.
+
+    CI gets one per CPU. On a workstation, every pytest worker imports the app
+    and every node test file is its own process, so one per CPU multiplied by
+    several agents running at once exhausted 64 GB of RAM (2026-10-04). Four
+    is the local default; ODYSSEUS_TEST_WORKERS overrides it.
+    """
+    configured = os.environ.get("ODYSSEUS_TEST_WORKERS", "").strip()
+    if configured:
+        return configured
+    return "auto" if os.environ.get("CI") else "4"
 
 
 def _has_xdist() -> bool:
@@ -44,7 +60,7 @@ def _affected_module():
 def pytest(args: list[str], parallel: bool = False) -> int:
     command = [sys.executable, "-m", "pytest", "-q"]
     if parallel and _has_xdist():
-        command += ["-n", "auto"]
+        command += ["-n", workers()]
     print("$", " ".join(command[1:] + args), flush=True)
     code = subprocess.run(command + args, cwd=ROOT).returncode
     if code == 5:  # pytest: no tests collected, e.g. a marker nothing carries yet
@@ -60,8 +76,11 @@ def node(files: list[str]) -> int:
     if not exe:
         print("node not found: skipping", len(files), "node test file(s)")
         return 0
-    print("$ node --test", " ".join(files), flush=True)
-    return subprocess.run([exe, "--test", *files], cwd=ROOT).returncode
+    limits = [f"--test-timeout={NODE_TEST_TIMEOUT_MS}"]
+    if workers() != "auto":
+        limits.append(f"--test-concurrency={workers()}")
+    print("$ node --test", " ".join(limits + files), flush=True)
+    return subprocess.run([exe, "--test", *limits, *files], cwd=ROOT).returncode
 
 
 def node_tests() -> list[str]:

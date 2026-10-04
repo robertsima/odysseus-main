@@ -41,7 +41,8 @@ def run_suite(extra: list[str]) -> set[str]:
     if node:
         files = sorted(p.relative_to(ROOT).as_posix() for p in (ROOT / "tests").rglob("*.test.mjs"))
         for path in files:
-            if subprocess.run([node, "--test", path], cwd=ROOT, capture_output=True).returncode:
+            if subprocess.run([node, "--test", "--test-timeout=60000", path], cwd=ROOT,
+                              capture_output=True).returncode:
                 failed.add(path)
     return failed
 

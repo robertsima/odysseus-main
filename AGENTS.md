@@ -10,6 +10,8 @@ Run tests through `python -m tests.run <lane>`:
 - `full` once before a push or a hand-back.
 - `browser` as well when `static/` or a page-serving route changed.
 
+On a workstation the lanes run 4 test processes at a time (`ODYSSEUS_TEST_WORKERS` changes that). When several agents share one machine, run only `affected` locally and let CI run `full`: parallel full runs exhausted 64 GB of RAM once.
+
 Writing a test:
 
 1. Name the realistic production bug it catches that no other test catches. If you can't name one, the test doesn't earn its run time.
