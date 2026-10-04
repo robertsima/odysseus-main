@@ -16,7 +16,6 @@
     "tests/test_loop_breaker_runaway.py": "stubs modules at import time; move the stub into a fixture with monkeypatch.setitem (D12)",
     "tests/test_model_routes.py": "stubs modules at import time; move the stub into a fixture with monkeypatch.setitem (D12)",
     "tests/test_prompt_injection_audit.py": "stubs modules at import time; move the stub into a fixture with monkeypatch.setitem (D12)",
-    "tests/test_research_endpoint_owner_scope.py": "stubs modules at import time; move the stub into a fixture with monkeypatch.setitem (D12)",
     "tests/test_sanitize_preserves_reasoning.py": "stubs modules at import time; move the stub into a fixture with monkeypatch.setitem (D12)",
     "tests/test_session_ghost_delete.py": "stubs modules at import time; move the stub into a fixture with monkeypatch.setitem (D12)",
     "tests/test_skill_index_prompt_injection.py": "stubs modules at import time; move the stub into a fixture with monkeypatch.setitem (D12)",
