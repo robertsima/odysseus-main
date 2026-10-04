@@ -46,7 +46,7 @@ jobs:
       - run: mkdir -p data
       # Order-dependent leaks show up here before they show up in CI.
       - if: always()
-        run: rm -rf data && mkdir data && python -m tests.run_order_report --seed 1154452316 -- -q -m "not browser" -rfE -p no:cacheprovider
+        run: rm -rf data && mkdir data && python -m tests.run_order_report --seed 971003926 -- -q -m "not browser" -rfE -p no:cacheprovider
       - if: always()
         run: rm -rf data && mkdir data && python -m tests.run_order_report --seed 79814556 -- -q -m "not browser" -rfE -p no:cacheprovider
       - if: always()
