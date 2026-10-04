@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.helpers.live_app import ADMIN, PASSWORD, LiveApp, MockModel
+from tests.helpers.live_app import LiveApp, MockModel
 from tests.helpers.static_app import SESSION_ID, StaticAppServer, wait_ready
 
 
@@ -93,9 +93,7 @@ def live_page(live_app, new_page):
     """``live_page(width=1440, path="/")`` -> a page signed in as the admin."""
     def _open(width: int = 1440, path: str = "/"):
         page = new_page(width)
-        resp = page.request.post(live_app.url + "/api/auth/login",
-                                 data={"username": ADMIN, "password": PASSWORD})
-        assert resp.ok, resp.text()
+        page.context.add_cookies(live_app.browser_cookies())
         # The real app does more per page load than the canned API.
         page.set_default_navigation_timeout(30_000)
         try:

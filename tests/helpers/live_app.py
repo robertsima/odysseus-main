@@ -255,6 +255,7 @@ class LiveApp:
         self.port = free_port()
         self.log_path = root / "app.stdout.log"
         self.endpoint_id: str | None = None
+        self.cookies: dict[str, str] = {}
         self.proc: subprocess.Popen | None = None
 
     @property
@@ -304,13 +305,19 @@ class LiveApp:
 
     @contextlib.contextmanager
     def client(self):
-        """``with live_app.client() as client:`` an httpx client signed in as the admin."""
+        """``with live_app.client() as client:`` an httpx client signed in as the admin.
+
+        Every client and page reuses the one sign-in from start-up: the login
+        route is rate limited, and a sign-in per test hit 429 in CI.
+        """
         import httpx
 
-        with httpx.Client(base_url=self.url, timeout=30) as client:
-            resp = client.post("/api/auth/login", json={"username": ADMIN, "password": PASSWORD})
-            assert resp.status_code == 200 and resp.json().get("ok"), resp.text
+        with httpx.Client(base_url=self.url, timeout=30, cookies=self.cookies) as client:
             yield client
+
+    def browser_cookies(self) -> list[dict]:
+        """The admin's session cookies, for ``context.add_cookies``."""
+        return [{"name": name, "value": value, "url": self.url} for name, value in self.cookies.items()]
 
     def _provision(self) -> None:
         import httpx
@@ -318,6 +325,9 @@ class LiveApp:
         with httpx.Client(base_url=self.url, timeout=30) as setup:
             resp = setup.post("/api/auth/setup", json={"username": ADMIN, "password": PASSWORD})
             assert resp.status_code == 200, resp.text
+            resp = setup.post("/api/auth/login", json={"username": ADMIN, "password": PASSWORD})
+            assert resp.status_code == 200 and resp.json().get("ok"), resp.text
+            self.cookies = dict(setup.cookies)
         with self.client() as client:
             resp = client.post("/api/model-endpoints", data={
                 "name": "browser-mock", "base_url": self.model.url, "skip_probe": "true",
