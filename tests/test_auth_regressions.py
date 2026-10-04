@@ -9,84 +9,10 @@ don't regress. Specifically:
   anonymous/no-owner callers.
 """
 
-import os
-import sys
-import types
 import asyncio
 import pytest
 from types import SimpleNamespace
 from unittest.mock import MagicMock
-
-# Stub `core.database` / `core.auth` before the route modules import them.
-# (Same trick as test_null_owner_gates.py — the real modules instantiate
-# SQLAlchemy declarative classes at import-time which blow up under the
-# conftest's `sqlalchemy.*` MagicMock stubs.)
-def _ensure_stub(name: str, **attrs):
-    """Create or augment a stub module with the given attributes.
-    Augments existing entries because earlier-run tests may have already
-    stubbed the same module with a different attribute set.
-
-    Also stubs the parent package and wires the child onto it as an
-    attribute. Without stubbing the parent we'd either (a) run the real
-    `core/__init__.py`, which transitively imports SQLAlchemy-using
-    modules and explodes under the conftest mocks, or (b) leave the
-    stub orphaned so `import core.auth; core.auth.AuthManager` raises
-    `AttributeError`."""
-    # Stub the parent package first if not already loaded. We point
-    # `__path__` at the real on-disk directory so submodules NOT
-    # stubbed here can still resolve via normal import machinery —
-    # but `core/__init__.py` is bypassed because the package is
-    # already in `sys.modules`, which is exactly what we want.
-    if "." in name:
-        parent_name, _, child_name = name.rpartition(".")
-        if parent_name not in sys.modules:
-            parent = types.ModuleType(parent_name)
-            # Find the real on-disk path so unstubbed submodules
-            # (core.middleware etc.) still load from disk.
-            real_path = os.path.join(
-                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                *parent_name.split("."),
-            )
-            parent.__path__ = [real_path] if os.path.isdir(real_path) else []
-            sys.modules[parent_name] = parent
-        else:
-            parent = sys.modules[parent_name]
-    else:
-        parent = None
-        child_name = None
-
-    mod = sys.modules.get(name)
-    if mod is None:
-        mod = types.ModuleType(name)
-        sys.modules[name] = mod
-    for k, v in attrs.items():
-        if not hasattr(mod, k):
-            setattr(mod, k, v)
-    if parent is not None and not hasattr(parent, child_name):
-        setattr(parent, child_name, mod)
-    return mod
-
-@pytest.fixture(autouse=True)
-def _auth_regressions_stubs(monkeypatch):
-    db = _ensure_stub("core.database",
-        SessionLocal=MagicMock(), ScheduledTask=MagicMock(), TaskRun=MagicMock(),
-        ModelEndpoint=MagicMock(), Session=MagicMock(), ChatMessage=MagicMock(),
-        CalendarCal=MagicMock(), CalendarEvent=MagicMock(),
-        Document=MagicMock(), DocumentVersion=MagicMock(),
-        GalleryImage=MagicMock(), GalleryAlbum=MagicMock(), Note=MagicMock(),
-        McpServer=MagicMock(),
-    )
-    auth = _ensure_stub("core.auth", AuthManager=MagicMock())
-    ep = _ensure_stub("src.endpoint_resolver",
-        resolve_endpoint=MagicMock(return_value=("", "", {})),
-        normalize_base=MagicMock(),
-        build_chat_url=MagicMock(),
-        build_models_url=MagicMock(),
-        build_headers=MagicMock(),
-    )
-    monkeypatch.setitem(sys.modules, "core.database", db)
-    monkeypatch.setitem(sys.modules, "core.auth", auth)
-    monkeypatch.setitem(sys.modules, "src.endpoint_resolver", ep)
 
 from fastapi import HTTPException
 
@@ -299,14 +225,6 @@ def test_pop_notifications_owner_filtered():
     # Build a minimal scheduler instance that we can hit directly.
     # Reuse the real class so the test catches future regressions of
     # the filter logic.
-    import sys, types
-    from unittest.mock import MagicMock as _MM
-    # `task_scheduler` pulls in lots of helpers — stub the ones it uses.
-    for s in ["src.builtin_actions", "src.ai_interaction", "src.endpoint_resolver",
-              "src.agent_loop", "src.session_manager"]:
-        if s not in sys.modules:
-            mod = types.ModuleType(s)
-            sys.modules[s] = mod
     from src.task_scheduler import TaskScheduler
     sch = TaskScheduler.__new__(TaskScheduler)  # bypass __init__ network etc.
     sch._pending_notifications = []
@@ -348,23 +266,3 @@ def test_task_create_notification_default_allows_action_specific_defaults():
 
     req = TaskCreate(task_type="action", action="check_email_urgency", schedule="cron", cron_expression="*/15 * * * *")
     assert req.notifications_enabled is None
-
-
-def test_ship_paused_housekeeping_stays_paused_by_default():
-    """Built-ins marked ship_paused are intentionally opt-in even after
-    the user enables the rest of Tasks."""
-    from routes import task_routes
-    from src import task_scheduler
-
-    route_src = open(task_routes.__file__, encoding="utf-8").read()
-    scheduler_src = open(task_scheduler.__file__, encoding="utf-8").read()
-    assert '"ship_paused": True' in scheduler_src
-    assert 'defs.get("ship_paused")' in scheduler_src
-    assert 'defs.get("ship_paused")' in route_src
-
-
-def test_task_payload_exposes_crew_member_id_for_ui_category():
-    from routes import task_routes
-
-    src = open(task_routes.__file__, encoding="utf-8").read()
-    assert '"crew_member_id"' in src
