@@ -164,7 +164,10 @@ async def test_batch_binary_still_works_and_reports_a_run(data_dir, tmp_path, mo
     monkeypatch.setattr(cct, "binary_info", fake_info)
     with cct.run_context(session_id="chat-8", owner="alice"):
         out = await cct._run_claude(tmp_path, "ping", 30, ["Read"])
-    assert out["result"] == "PONG" and "transcript" not in out
+    print("DIAG", {k: v for k, v in out.items() if k != "claude"})
+    import src.settings as _s
+    print("DIAG settings", _s.SETTINGS_FILE, {k: v for k, v in _s.load_settings().items() if k.startswith("claude_code")})
+    assert out.get("result") == "PONG" and "transcript" not in out, out
     assert [e["kind"] for e in act.history("chat-8")] == ["run_started", "run_finished"]
 
 
