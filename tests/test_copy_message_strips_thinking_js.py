@@ -9,14 +9,11 @@ The fix adds chatRenderer.copyMessageText(), which mirrors the display
 pipeline (``stripToolBlocks()`` then ``extractThinkingBlocks()``), and routes
 both AI-message copy buttons (createMsgFooter and the slash-reply footer)
 through it. extractThinkingBlocks() behavior is pinned here under node
-(including on the payload from the issue report); the helper and handler
-wiring are guarded at the source level because chatRenderer.js pulls in
-browser globals and can't be imported under node (same approach as
-test_new_chat_clears_input.py).
+(including on the payload from the issue report); the Copy button itself is
+tested in tests/static/js/chat/copy_streamed_reply.test.mjs.
 """
 
 import json
-import re
 import shutil
 import subprocess
 import textwrap
@@ -152,30 +149,3 @@ def test_thinking_only_message_yields_empty_content(node_available):
     # still copies something for turns interrupted mid-thinking.
     out = _extract_thinking_blocks("<think>only reasoning, no reply yet</think>")
     assert out["content"] == ""
-
-
-def _function_body(text: str, marker: str) -> str:
-    start = text.index(marker)
-    rest = text[start + len(marker):]
-    m = re.search(r"\nexport function |\nfunction ", rest)
-    return rest[: m.start()] if m else rest
-
-
-def test_copy_message_text_mirrors_display_pipeline():
-    text = (_REPO / "static/js/chatRenderer.js").read_text(encoding="utf-8")
-    body = _function_body(text, "export function copyMessageText")
-    # Mirrors the display path: tool blocks stripped, then thinking extracted.
-    assert "extractThinkingBlocks" in body
-    assert "stripToolBlocks" in body
-    assert "dataset.raw" in body
-
-
-def test_copy_handlers_route_through_copy_message_text():
-    for path, count in (("static/js/chatRenderer.js", 1), ("static/js/slashCommands.js", 1)):
-        text = (_REPO / path).read_text(encoding="utf-8")
-        assert text.count("copyToClipboard(copyMessageText(") + text.count(
-            "copyToClipboard(chatRenderer.copyMessageText("
-        ) == count, path
-        # The old behavior passed dataset.raw straight to the clipboard.
-        assert "copyToClipboard(msgElement.dataset.raw" not in text, path
-        assert "copyToClipboard(msgEl.dataset.raw" not in text, path

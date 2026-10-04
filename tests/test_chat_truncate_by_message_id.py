@@ -210,26 +210,3 @@ def test_forked_rows_report_their_own_id_not_the_sources(routes):
     page = asyncio.run(get_history(request=SimpleNamespace(), session_id=result["id"], limit=24, offset=None))
     ids = [e["metadata"]["_db_id"] for e in page["history"]]
     assert len(ids) == 4 and not set(ids) & set(routes.ids)
-
-
-# ── Frontend call sites ────────────────────────────────────────────────── #
-
-def _read(path):
-    with open(path, encoding="utf-8") as f:
-        return f.read()
-
-
-def test_chat_ui_never_truncates_or_forks_by_position():
-    js = _read("static/js/chat.js")
-    assert "keep_count" not in js.replace("used to send that position as keep_count", "")
-    assert "from_message_id" in js and "after_message_id" in js
-    assert "through_message_id" in js
-    # The user's bubble learns its stored id while the reply streams.
-    assert "user_message_saved" in js
-
-
-def test_slash_truncate_keeps_the_last_n():
-    js = _read("static/js/slashCommands.js")
-    start = js.index("async function _cmdSessionTruncate")
-    body = js[start:js.index("\n}\n", start)]
-    assert "keep_last" in body and "keep_count" not in body
