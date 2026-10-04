@@ -1,0 +1,9 @@
+# Test-only dependencies. requirements.txt builds the production image, so
+# these stay out of it; CI installs both files.
+
+# The browser tier (pytest -m browser, tests/plugins/browser.py) drives the
+# system Chrome through Python Playwright with channel="chrome", so neither CI
+# nor a developer machine downloads a browser.
+playwright>=1.49,<2
+# Per-test coverage for the nightly coverage map (scripts/build_test_map.py).
+pytest-cov
