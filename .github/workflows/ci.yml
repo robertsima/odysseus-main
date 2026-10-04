@@ -106,8 +106,12 @@ jobs:
           for f in static/app.js static/js/**/*.js; do
             node --check "$f"
           done
-      - name: Skill tooling and plugin UI contracts
-        run: node --test tests/frontend/*.test.mjs
+      # Every node test under tests/. The glob is quoted so node expands it,
+      # and npm ci installs the DOM library the frontend tests import.
+      - name: Node tests
+        run: |
+          npm ci --ignore-scripts
+          node --test "tests/**/*.test.mjs"
 
   python-tests:
     name: Python tests (pytest)
