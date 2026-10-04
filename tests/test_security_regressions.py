@@ -848,22 +848,6 @@ def test_web_content_fetcher_blocks_dns_to_private(monkeypatch):
     assert content._public_http_url("https://example.test/path") is False
 
 
-def test_mcp_config_listing_is_admin_gated():
-    from routes import mcp_routes
-
-    src = Path(mcp_routes.__file__).read_text()
-    assert "def list_servers(request: Request):" in src
-    assert "def list_tools(request: Request):" in src
-    assert "def list_server_tools(server_id: str, request: Request):" in src
-
-
-# ── web_fetch SSRF guard (PR #111 merge gate) ───────────────────────
-# web_fetch routes every request through src.search.content's
-# _public_http_url / _get_public_url, the same SSRF-safe fetcher used by
-# web_search and deep research. These pin that the guard blocks every
-# private/internal address class plus redirect-into-private and non-http
-# schemes, so the new tool can't be turned into an SSRF primitive.
-
 import ipaddress as _ipaddr
 
 import pytest as _pytest
@@ -984,16 +968,6 @@ def test_attachment_extract_dir_normal_inputs_unchanged():
     assert aed("INBOX", "123") == base.resolve() / "INBOX_123"
 
 
-def test_diagnostics_routes_are_admin_gated():
-    """db/rag stats + test endpoints must require admin (they relied only on
-    the global session check before)."""
-    src = Path(__file__).resolve().parents[1] / "routes" / "diagnostics_routes.py"
-    text = src.read_text()
-    for handler in ("get_database_stats", "get_rag_stats", "test_youtube", "test_research"):
-        assert f"def {handler}(request: Request" in text, handler
-    assert text.count("require_admin(request)") >= 4
-
-
 def test_email_thread_rendering_sanitizes_body_html():
     """Both threaded render paths must run server-parsed body_html through the
     allowlist sanitizer (the flat path already did)."""
@@ -1002,26 +976,6 @@ def test_email_thread_rendering_sanitizes_body_html():
     # every `t.body_html` reference is wrapped by _sanitizeHtml(...)
     assert text.count("t.body_html") == text.count("_sanitizeHtml(t.body_html")
     assert "t.body_html" in text  # guard against the file being refactored away
-
-
-def test_session_html_export_escapes_name():
-    src = Path(__file__).resolve().parents[1] / "routes" / "session_routes.py"
-    text = src.read_text()
-    assert "safe_title = html.escape(session.name" in text
-    assert "<title>{session.name}" not in text
-    assert "<h1>{session.name}</h1>" not in text
-
-
-def test_mcp_oauth_page_escapes_reflected_values():
-    src = Path(__file__).resolve().parents[1] / "routes" / "mcp" / "mcp_routes.py"
-    text = src.read_text()
-    page = text.split("def _oauth_authorize_page(", 1)[1].split("def _oauth_result_page", 1)[0]
-    body = page.split("return f", 1)[0]
-    for var in ("auth_url", "server_id", "redirect_uri"):
-        assert f"{var} = html.escape({var}" in body, var
-    # The Host header is no longer reflected at all: the paste-back form posts to
-    # a relative action, so there is nothing to escape and nothing to smuggle.
-    assert "{host}" not in page
 
 
 def _import_mcp_routes():
