@@ -88,7 +88,7 @@ def test_heading_shows_the_selected_chat_model_and_response_state(open_app):
 
 
 def test_send_button_submits_the_typed_message(open_app):
-    # The canned API cannot answer; tests/static/index/test_live_flows.py
+    # The canned API cannot answer; tests/static/index/test_live_chat.py
     # covers the reply. This checks the visible control reaches the real
     # form handler with the typed text.
     page = open_app(1440)
