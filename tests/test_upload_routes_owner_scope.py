@@ -31,13 +31,15 @@ class _Request:
 
 def _upload_endpoints(upload_handler, monkeypatch):
     import fastapi.dependencies.utils as dependency_utils
-    from routes.upload_routes import router, setup_upload_routes
+    from fastapi import APIRouter
+    from routes import upload_routes
 
     monkeypatch.setattr(dependency_utils, "ensure_multipart_is_installed", lambda: None)
-    before = len(router.routes)
-    setup_upload_routes(upload_handler)
-    routes = router.routes[before:]
-    return {route.endpoint.__name__: route.endpoint for route in routes}
+    # setup_upload_routes adds its routes to the module-level router that
+    # app.py includes; an empty one keeps this test's handler out of it.
+    monkeypatch.setattr(upload_routes, "router", APIRouter(prefix="/api/upload", tags=["upload"]))
+    upload_routes.setup_upload_routes(upload_handler)
+    return {route.endpoint.__name__: route.endpoint for route in upload_routes.router.routes}
 
 
 def _make_upload_store(tmp_path, monkeypatch):
