@@ -850,7 +850,9 @@ class SkillsManager:
             raise ValueError("Resource path already exists with different casing")
         os.makedirs(os.path.dirname(target), exist_ok=True)
         self._package_path(root, rel)  # recheck after mkdir
-        atomic_write_text(target, content)
+        # newline='': keep the text as sent. Windows would write CRLF, and the
+        # version hash and scripts run by bash would then differ from the edit.
+        atomic_write_text(target, content, newline="")
         return self.package_file(name, rel, owner)
 
     def validate_skill_links(self, name: str, related_skills: list, related_scripts: list,

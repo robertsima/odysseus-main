@@ -1,221 +1,86 @@
-# Odysseus Testing Standard & Taxonomy
+# Testing standard
 
-## Purpose
+How tests are written, placed and run in Odysseus. `AGENTS.md` carries the short version; this file is the reference behind it. The reasoning and the measurements are in `website/testing-restructure-2026-10-03.md`.
 
-This document defines *how we write and refactor tests* in Odysseus. It is the
-standard that the incremental test-suite refactor (issue #2523) works toward,
-and it applies to both human contributors and coding agents.
+Linux CI decides whether the suite is green. A Windows run skips POSIX-only tests, so it is green but partial.
 
-It is intentionally split from [`tests/README.md`](./README.md):
+## Running tests
 
-- **`README.md`** - the concrete, current helper reference: what each helper in
-  `tests/helpers/` does and how to call it.
-- **`TESTING_STANDARD.md`** (this file) - the rules and taxonomy: what a good
-  test looks like, where it belongs, and the policy refactor PRs must follow.
+| Lane | Command | When |
+|---|---|---|
+| affected | `python -m tests.run affected` | While working: the tests covering what you changed. |
+| full | `python -m tests.run full` | Once before a push or a hand-back. Everything except browser and nightly tests, in parallel, plus the node tests. |
+| browser | `python -m tests.run browser` | When `static/` or a page-serving route changed. |
+| security | `python -m tests.run security` | Owner scope, auth, confinement, SSRF, sensitivity, approval. `full` includes it. |
+| nightly | `python -m tests.run nightly` | The slow tier; the nightly workflow runs it. |
 
-When the two ever disagree, this file states the *intent* and `README.md` states
-the *current mechanics*; fix whichever is stale.
+Arguments after `--` go to pytest: `python -m tests.run full -- -x --lf`.
 
-This document changes no test behavior. It is guidance only.
+`affected` reads, in order: the coverage map the nightly workflow publishes on the `test-map` branch, the mirrored test folder of each changed file, and tests that mention the changed module. A change to `tests/conftest.py`, `tests/plugins/`, `tests/helpers/`, `pyproject.toml` or a requirements file selects everything (`scripts/affected_tests.py`).
 
-## What the test suite is for
+### CI
 
-The goal is not only to reorganize `tests/`. The goal is for the suite to be a
-reliable foundation for future development: deterministic, modular, informative,
-behavior-focused, and complete enough to replace manual QA wherever practical.
+On every push to dev and every PR (`.github/workflows/ci.yml`):
 
-Run tests with the project virtualenv interpreter (`./venv/bin/python -m pytest`).
-The system `python3` may be missing pinned dependencies (e.g. `nh3`), which
-shows up as import/collection errors that are environmental, not real failures.
+- `python-tests`: the full lane, `-n auto`.
+- `browser-tests`: the browser lane.
+- `node-syntax`: `node --check` on the frontend and the node tests.
+- `red-evidence` (PRs, report-only until calibrated): reruns the PR's new and changed tests against the base commit's production code; each must fail there and pass on head.
+- `affected-tests` (PRs, report-only): lists the tests that cover the change.
 
-## What "done" means for a single test
+Nightly (`.github/workflows/nightly.yml`): random test order, the coverage map, nightly-marked and all browser tests, the orchestration scenarios, a Windows run, and on Sundays the mutation benchmark. A failure on dev opens or updates one issue labelled `nightly-red`.
 
-Every new or refactored test should be:
+## Where a test goes
 
-- **Deterministic** - same result every run, no reliance on wall-clock, network,
-  RNG seeds, or collection order.
-- **Behavior-first** - asserts on observable behavior, not on the source text or
-  AST of the code under test (see [Behavioral-first policy](#behavioral-first-policy)).
-- **Explicit** - setup and expected result are visible in the test, not hidden in
-  broad fixtures.
-- **Isolated from global process state** - no leaked `sys.modules`, `os.environ`,
-  CWD, or package parent-attribute mutation (see [Determinism & isolation](#determinism--isolation-rules)).
-- **Order-independent** - passes regardless of which tests ran before it.
-- **Environment-independent** - does not assume a venv layout, a developer's home
-  directory, an existing `./data` dir, or optional packages that may be absent.
-- **Informative on failure** - the assertion message or structure makes the cause
-  obvious without a debugger.
-- **Small** - understandable quickly; one behavior per test where practical.
-- **Backed by shared helpers only when duplication is proven** - not abstracted
-  preemptively.
+A test lives at the mirror of the production file it exercises, one folder per production module:
 
-## Test taxonomy
+| Production file | Tests |
+|---|---|
+| `src/agent_loop.py` | `tests/src/agent_loop/test_<behavior>.py` |
+| `routes/document/document_routes.py` | `tests/routes/document/document_routes/test_<behavior>.py` |
+| `static/js/chat.js` | `tests/static/js/chat/<behavior>.test.mjs` |
+| `scripts/affected_tests.py` | `tests/scripts/affected_tests/test_<behavior>.py` |
+| `.github/scripts/red_evidence.py` | `tests/github/scripts/red_evidence/test_<behavior>.py` |
 
-Tests are classified by the categories below. Today the suite is mostly flat
-under `tests/` (the current `area_cli` set has moved to `tests/cli/`); the
-**Target dir** column is the phased layout from #2523 that we move toward
-*after* helpers and determinism are stable. Until a category is moved, new
-tests in that category stay in flat `tests/` but should still follow this
-standard.
+Every Python test folder has an `__init__.py`; `tests/` is a package, so `tests/routes/` never shadows the production `routes` package. A test that drives several modules goes with the one whose behavior it asserts. Tests about the suite itself (guards, the lane runner) live in `tests/suite/`.
 
-| Category | What it covers | Examples today | Target dir |
-|---|---|---|---|
-| **Route / API integration** | Real ASGI request/response, auth gates, admin gates, owner isolation through the app | files using `TestClient` | `tests/routes/` |
-| **CLI / script** | `scripts/` entry points and dev tooling | `tests.helpers.cli_loader.load_script` users, `test_pr_blocker_audit.py` | `tests/cli/` |
-| **Frontend / JS** | Browser-coupled JS run via Node subprocess; streaming-render invariants | `*_js.py` wrappers, `tests/streaming/*.test.mjs` | `tests/js/` |
-| **Tool execution / parsing** | Tool-call parsing, malformed/nonstring args, tool policy | `test_unknown_tool_calls.py`, `test_tool_policy.py`, `*_nonstring.py` | `tests/unit/` or `tests/services/` |
-| **LLM / provider** | Provider response parsing, streaming, sanitize, reasoning fallback | `test_llm_core_*`, `test_anthropic_response_parse.py` | `tests/services/` |
-| **Session / history / DB** | Session lifecycle, history, schema, ownership at the data layer | `test_session_*`, `test_sqlite_foreign_keys.py` | `tests/services/` or `tests/unit/` |
-| **Security / owner-scope / regression** | Owner isolation, auth, SSRF, path confinement, XSS, prompt injection, pinned regressions | `*_owner_scope.py`, `test_security_regressions.py`, `test_*ssrf*`, `test_*confinement*` | `tests/security/` |
-| **Cookbook / bootstrap** | Model serve lifecycle, dependency completion | `test_cookbook_*` | `tests/services/` |
-| **Scheduler / background** | Cron computation, background jobs, delivery | `test_compute_next_run_*`, `test_bg_*`, `test_task_scheduler_*` | `tests/services/` |
-| **Import / module isolation** | The isolation helpers themselves and their guarantees | `test_helpers_import_state.py` | `tests/unit/` |
+Kind and speed are markers, not folders (`pyproject.toml` lists them): `security`, `browser`, `nightly`, `allow_network`.
 
-A test that genuinely spans categories (e.g. a route test that also pins a
-security invariant) is classified by its **primary** assertion target and may be
-split if it grows.
+## What a test must be
 
-## Fast lane policy
+**Worth keeping.** Before writing a test, name the realistic production bug it catches and no other test catches. A test whose only failure mode is a change of wording, formatting or file layout is not worth its run time.
 
-The fast lane is `not slow`: `tests/run_focus.py --fast` selects every test that
-is not marked `slow`. The `slow` marker is **opt-in**, and slow marks must be
-**evidence-driven from `--durations` output** - mark a test slow only when its
-measured duration shows it is genuinely expensive, never by guessing. The fast
-lane exists for quick local and reviewer feedback; it is **not** a replacement
-for broader focused or full-suite validation before merge, and a test must never
-be marked `slow` to hide a failure or skip coverage.
+**Red first.** Watch the test fail without the fix, for the reason you expect, then pass with it. A test written after the code that passes on its first run shows nothing. On a PR, CI checks this: the `red-evidence` job reruns new and changed tests against the base commit. A behavior-preserving refactor carries the `refactor` label and one line in the PR description instead.
 
-## Determinism & isolation rules
+**Behavior, not source.** Call the function, route or module and assert on what it returns, stores or renders. A test that reads production source as text (`read_text`, `open`, `inspect.getsource`, `ast.parse` of a file) breaks on harmless reformatting and passes when behavior breaks; the hygiene guard rejects new ones.
 
-Do not mutate shared process state without a controlled helper and guaranteed
-cleanup. Specifically:
+**Real code under test.** Fake what the code calls out to: the network, the model, the clock, the filesystem outside `tmp_path`. Keep the function the test is named after real. A test that mocks `get_sessions_for_user` cannot catch a broken owner filter in `get_sessions_for_user`.
 
-- **`sys.modules` / parent-package attributes** - never assign at module scope.
-  Use `tests.helpers.import_state.preserve_import_state`, `clear_module`, or
-  `monkeypatch.setitem(sys.modules, ...)`. Restoring `sys.modules` alone is not
-  enough; the parent-package attribute must be restored too (the import-state
-  helpers handle both).
-- **`os.environ`** - use `monkeypatch.setenv` / `monkeypatch.delenv`, never raw
-  `os.environ[...] = ...` that outlives the test.
-- **Current working directory** - never `chdir` without restoring; never assert
-  against cwd-relative paths like `./data`. Use a temp workspace helper instead.
-- **Database** - the root `conftest.py` defaults `DATABASE_URL` to an in-memory
-  SQLite for collection safety. A test that needs a real file-backed DB must opt
-  in explicitly via `tests.helpers.sqlite_db.make_temp_sqlite` and bind its
-  `SessionLocal` onto the module under test. Do not rely on a persistent
-  on-disk DB existing.
-- **Optional dependencies** - do not require packages that may be absent in a
-  clean environment (e.g. `python-multipart`). Guard or stub them locally.
-- **Node-subprocess JS tests** - skip cleanly when `node` is absent
-  (`shutil.which("node")`), matching the existing wrappers. Treat a skip as a
-  coverage gap to be aware of, not a pass.
-- **Order independence** - a test must not depend on a sibling having imported,
-  cached, or stubbed something first. Order-sensitivity is a bug to fix, not a
-  constraint to encode.
+**Routes through HTTP.** Test a route with the `api` fixture (`tests/plugins/http_app.py`): the real app, its real auth middleware, and three users (alice, bob and an admin). A direct call to the route function skips auth, validation and serialization, which is where owner scope and admin gates live.
 
-## Behavioral-first policy
+**Frontend logic in node.** Import the real module in a `*.test.mjs` file run by `node --test`, with the shared DOM and fetch fakes in `tests/static/js/_support/`. A browser test is for layout and flows that need a real page.
 
-Prefer tests that exercise real behavior over tests that inspect source code.
+**Browser tests assert on structure.** Roles, state, geometry and data attributes. Visible label text only when the label is what the test is about.
 
-- **Avoid** `read_text()` + substring assertions, `ast.parse`, and
-  `inspect.getsource` checks when the behavior can be driven directly. Source-text
-  assertions break on benign refactors (renames, reformatting) and can pass even
-  when behavior regresses, because the asserted string still appears somewhere.
-- **Prefer** calling the function/route and asserting the outcome. Example: to
-  pin owner-scoping of `get_upcoming_events`, seed a temp DB with two owners and
-  assert one owner cannot see the other's events - rather than asserting the
-  source contains `q.filter(CalendarCal.owner == owner)`.
-- **Narrow exception** - a source-text/AST assertion is acceptable only when the
-  invariant cannot be practically exercised at runtime (e.g. pinning that a
-  required constant or guard literally exists in a module that is hard to drive).
-  When used, say *why* in the test docstring so it is a deliberate choice, not a
-  shortcut.
-- Do not convert source-text assertions to behavioral ones in the *same* PR that
-  moves files or changes unrelated setup.
+**One behavior per test**, named for that behavior.
 
-## Helper & factory extraction rules
+## Isolation
 
-- Extract a shared helper only when the duplicated shape is **proven** - the same
-  setup repeated (ideally byte-identical) across multiple files.
-- Prefer **plain functions** in `tests/helpers/` over fixtures. Reach for a
-  fixture only when it is clearly scoped to one directory/category, and put it in
-  that directory's `conftest.py`, not the root.
-- Keep the **root `conftest.py` minimal** - `sys.path`, the DB-URL default, and
-  not-installed heavy-dependency stubs only. It is not a place for
-  feature-specific fixtures.
-- Each helper documents its **intended use and its limits** ("do not stretch this
-  to cover X"), as the existing helpers in `README.md` do.
-- Do not build a generic abstraction layer (factory framework, broad base
-  fixtures) before the repeated semantics are clear. Small and boring beats
-  clever and general.
-- Candidate factories, to add only after the duplication audit confirms the
-  shapes: fake users, fake sessions, fake requests, fake DB rows, fake LLM
-  responses, fake tool calls.
+- `monkeypatch` for environment variables, module attributes and `sys.modules` entries; a fixture for any stub a module needs at import.
+- The database: `app_db` (and `make_test_db` for other schemas or an in-memory copy) gives each test a fresh copy of a schema built once per process, from `tests/plugins/database.py`. Without them, each test process still shares one SQLite file across its threads.
+- The network: `tests/plugins/network_guard.py` fails DNS lookups of names and connections beyond loopback at once. A test that needs the network carries `@pytest.mark.allow_network` and a comment saying why.
+- The repo's `data/` folder can hold a real deployment's data. Tests and local app runs use a temporary data dir.
 
-## PR discipline for #2523 refactor slices
+The hygiene guard (`tests/suite/test_hygiene.py`) fails on module-scope `sys.modules` writes, `importlib.reload`, raw `os.environ` writes and source-text reads. Today's offenders are listed in `tests/suite/hygiene_allowlist.json`, which only shrinks: when a listed file is fixed, moved or deleted, run `python -m tests.suite.hygiene --prune`. A new entry needs a specific reason.
 
-- Keep each PR small, reviewable, and behavior-preserving - unless the PR's stated
-  purpose is to add new coverage.
-- **One kind of change per PR.** Do not mix:
-  - file moves with assertion changes;
-  - helper extraction with logic changes;
-  - import-state cleanup with DB-fixture changes.
-- Do not weaken assertions, add `skip`/`xfail`, or delete coverage just to make CI
-  green. A red test is a signal to investigate, not to silence.
-- Prefer 3-6 files per refactor batch, and only when they share the *same*
-  pattern.
-- Distinguish a stale test expectation from a real production-policy change before
-  "fixing" a failing test - never edit a test to match a regression.
+## Windows
 
-## Validation expectations
+A test that cannot run on Windows (POSIX permissions, bwrap, tmux) carries `pytest.mark.skipif(sys.platform == "win32", reason=...)` with the specific reason. A failure that looks like a real Windows bug in production code gets fixed or reported, not skipped.
 
-Run locally before opening or approving a refactor PR:
+## The mutation benchmark
 
-- `git diff --check` - whitespace and conflict-marker errors.
-- `./venv/bin/python -m py_compile <changed .py files>` - changed files compile.
-- Focused `./venv/bin/python -m pytest` on the changed files.
-- `./venv/bin/python -m pytest` on neighboring / order-sensitive groups that
-  share import state with the changed files.
-- When replacing boilerplate, `grep` for the old pattern to confirm no stragglers.
-- When changing a helper itself, validate in a fresh worktree so stale
-  `__pycache__` or import state cannot mask a regression.
-- For order-sensitivity, a randomized run (once `pytest-randomly` is available in
-  the dev environment) is the strongest check; record the seed on failures.
+`tests/mutants/` holds patches that plant a realistic bug (`B*.patch`) or make a behavior-preserving refactor (`N*.patch`), and `expected.json` says what each should do: a planted bug must make some test fail, a refactor must not. `scripts/mutation_benchmark.py` applies each patch, runs the suite and reverts it; the nightly workflow runs it on Sundays. When CI catches a real regression, add it here as a new `B*` patch (`git diff > tests/mutants/B14.patch` on the buggy change) with an entry in `expected.json`.
 
-## Target directory structure (phased)
+## Tests from upstream
 
-Move toward this layout *gradually*, only after helper conventions and
-determinism are stable. Low-risk categories move first; oversized catch-all files
-are split last.
-
-```
-tests/
-  conftest.py        # stays minimal
-  README.md          # helper reference
-  TESTING_STANDARD.md
-  helpers/           # plain helper functions (exists)
-  unit/              # pure helper/module tests
-  cli/               # scripts/ + CLI tests
-  js/                # node-subprocess + streaming tests
-  security/          # owner-scope, auth, SSRF, confinement, regressions
-  routes/            # TestClient integration (per-dir conftest for the client)
-  services/          # service-layer tests
-  integration/       # only if a cross-cutting flow needs it, later
-```
-
-Suggested move order: **js / cli first → security / routes / services → split
-oversized catch-all files last.** Each move is mechanical (no assertion changes
-in the same PR), with an identical pass set before and after.
-
-## Related: CI-hardening track (tracked separately)
-
-Making the suite an enforced gate is broader than #2523's organization scope and
-should be tracked as its own effort. The intended sequence:
-
-1. Add non-blocking randomized pytest reporting (`pytest-randomly`) so hidden
-   order-dependence becomes visible without changing any test.
-2. Fix surfaced order-dependence in small same-pattern batches.
-3. Add coverage reporting with no threshold gate.
-4. Only then make the pytest job a blocking CI gate.
-5. Consider `pytest-xdist` / parallel isolation after deterministic
-   single-process randomized runs are stable.
+On an upstream sync, take upstream's production code and adopt its tests one at a time: move each into the mirrored layout, hold it to this standard, or drop it.

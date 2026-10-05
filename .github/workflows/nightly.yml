@@ -1,0 +1,203 @@
+name: Nightly
+
+# The slow tier from website/testing-restructure-2026-10-03.md (D15, D16, D28):
+# random test order, the coverage map, nightly-marked and browser tests, the
+# orchestration scenarios, a Windows run, and the weekly mutation benchmark.
+# A failure opens or updates one issue labelled nightly-red.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"     # every night
+    - cron: "47 7 * * 0"     # Sundays: also the mutation benchmark
+  workflow_dispatch:
+    inputs:
+      mutants:
+        description: "Also run the mutation benchmark"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  random-order:
+    name: Random order (serial)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.11"
+          cache: pip
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version-file: ".nvmrc"
+      - run: pip install -r requirements.txt
+      - run: mkdir -p data
+      # Order-dependent leaks show up here before they show up in CI.
+      - run: python -m tests.run_order_report -- -q -m "not browser" -rfE -p no:cacheprovider
+
+  coverage-map:
+    name: Coverage map and nightly tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write   # publishes test_map.json to the test-map branch
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.11"
+          cache: pip
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version-file: ".nvmrc"
+      - run: pip install -r requirements.txt pytest-cov
+      - run: mkdir -p data
+      - name: Suite with per-test coverage contexts
+        run: >
+          python -m pytest -q -n auto -m "not browser and not nightly" -rfE -p no:cacheprovider
+          --cov=core --cov=src --cov=routes --cov=services --cov-context=test --cov-report=term:skip-covered
+      - name: Nightly-marked tests
+        if: always()
+        run: python -m tests.run nightly -- -rfE
+      - name: Build test_map.json
+        if: always()
+        run: python scripts/build_test_map.py --coverage .coverage --out "$RUNNER_TEMP/test_map.json"
+      - name: Publish to the test-map branch
+        if: github.ref == 'refs/heads/dev'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          map_dir="$RUNNER_TEMP/test-map"
+          mkdir -p "$map_dir"
+          cp "$RUNNER_TEMP/test_map.json" "$map_dir/"
+          cd "$map_dir"
+          git init -q -b test-map
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add test_map.json
+          git commit -qm "Test map for ${GITHUB_SHA}"
+          git push -qf "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" test-map
+
+  browser:
+    name: All browser tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: if [ -f requirements-test.txt ]; then pip install -r requirements-test.txt; fi
+      - run: mkdir -p data
+      - run: python -m pytest -q -m browser -rfEs -p no:cacheprovider
+
+  orchestration:
+    name: Orchestration scenarios (scripts/e2e_orchestration)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Sandbox tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq bubblewrap tmux python3-pytest python-is-python3
+          # Ubuntu 24.04 blocks the unprivileged user namespaces bwrap needs.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          echo "127.0.0.1 git.e2e.test" | sudo tee -a /etc/hosts
+      - name: App venv
+        run: |
+          python -m venv "$HOME/ci-repro/venv"
+          "$HOME/ci-repro/venv/bin/pip" install -q -r requirements.txt
+      # ssh_remote needs a git host that refuses at once; on the runner the
+      # fetch hangs until the 60 s bash timeout instead, so it runs in WSL only.
+      - run: E2E_SCENARIOS=broad_parent,feature_base,interactive,stop_worker,stop_parent,parallel,publish bash scripts/e2e_orchestration/run.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: failure()
+        with:
+          name: e2e-logs
+          path: ~/e2e/logs
+
+  windows:
+    name: Windows (green but partial)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.11"
+          cache: pip
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version-file: ".nvmrc"
+      - run: pip install -r requirements.txt
+      - run: python -m pytest -q -n auto -m "not browser and not nightly" -rfE -p no:cacheprovider
+        env:
+          PYTHONUTF8: "1"
+
+  mutants:
+    name: Mutation benchmark
+    if: github.event.schedule == '47 7 * * 0' || inputs.mutants
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.11"
+          cache: pip
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version-file: ".nvmrc"
+      - run: pip install -r requirements.txt
+      - run: npm ci --ignore-scripts
+      - run: mkdir -p data
+      - run: python scripts/mutation_benchmark.py | tee -a "$GITHUB_STEP_SUMMARY"
+
+  report:
+    name: Open or update the nightly-red issue
+    needs: [random-order, coverage-map, browser, orchestration, windows, mutants]
+    if: failure() && github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          failed=$(echo "$RESULTS" | python3 -c 'import json,sys; print(", ".join(k for k,v in json.load(sys.stdin).items() if v["result"]=="failure"))')
+          body="Nightly run failed on $(date -u +%F) in: ${failed}. Logs: ${RUN_URL}"
+          gh label create nightly-red --color B60205 --description "Nightly workflow failure" -R "$GITHUB_REPOSITORY" 2>/dev/null || true
+          number=$(gh issue list -R "$GITHUB_REPOSITORY" --label nightly-red --state open --json number --jq '.[0].number')
+          if [ -n "$number" ]; then
+            gh issue comment "$number" -R "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create -R "$GITHUB_REPOSITORY" --label nightly-red --title "Nightly tests are red" --body "$body"
+          fi

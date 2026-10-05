@@ -1,0 +1,152 @@
+"""Regression coverage for issue #3722 — the message copy button copied the
+full raw model output (``dataset.raw``), which still contains the
+``<think time="...">...</think>`` reasoning block that the renderer strips for
+display. Pasting therefore leaked the model's thinking, and the first heading
+after ``</think>`` lost its markdown formatting because it was glued to the
+closing tag.
+
+The fix adds chatRenderer.copyMessageText(), which mirrors the display
+pipeline (``stripToolBlocks()`` then ``extractThinkingBlocks()``), and routes
+both AI-message copy buttons (createMsgFooter and the slash-reply footer)
+through it. extractThinkingBlocks() behavior is pinned here under node
+(including on the payload from the issue report); the Copy button itself is
+tested in tests/static/js/chat/copy_streamed_reply.test.mjs.
+"""
+
+import json
+import shutil
+import subprocess
+import textwrap
+from pathlib import Path
+
+import pytest
+from tests import REPO_ROOT
+
+_REPO = REPO_ROOT
+_HAS_NODE = shutil.which("node") is not None
+
+
+@pytest.fixture(scope="module")
+def node_available():
+    if not _HAS_NODE:
+        pytest.skip("node binary not on PATH")
+
+
+def _extract_thinking_blocks(text: str) -> dict:
+    """Run markdown.js extractThinkingBlocks(text) under node."""
+    script = textwrap.dedent(
+        r"""
+        import fs from 'node:fs';
+
+        globalThis.window = { location: { origin: 'http://localhost' }, katex: null };
+        globalThis.document = {
+          readyState: 'loading',
+          addEventListener() {},
+          createElement(tag) {
+            if (tag !== 'template') throw new Error(`unsupported element: ${tag}`);
+            return {
+              _html: '',
+              content: { querySelectorAll() { return []; } },
+              set innerHTML(value) { this._html = value; },
+              get innerHTML() { return this._html; },
+            };
+          },
+        };
+        globalThis.MutationObserver = class { observe() {} };
+
+        let source = fs.readFileSync('./static/js/markdown.js', 'utf8');
+        source = source.replace(
+          /import uiModule from ['"]\.\/ui\.js['"];/,
+          ''
+        );
+        source = source.replace(
+          /import \{ splitTableRow \} from ['"]\.\/markdown\/tableRow\.js['"];/,
+          `function splitTableRow(row) {
+            return (row || '').replace(/^\\s*\\|/, '').replace(/\\|\\s*$/, '').split('|').map(c => c.trim());
+          }`
+        );
+        const emojiSource = fs.readFileSync('./static/js/emojiShortcodes.js', 'utf8')
+          .replace(/^export default .*$/m, '')
+          .replace(/export const /g, 'const ')
+          .replace(/export function /g, 'function ');
+        source = source.replace(
+          /import \{ replaceEmojiShortcodes, hasEmojiShortcode \} from ['"]\.\/emojiShortcodes\.js['"];/,
+          () => emojiSource
+        );
+        source = source.replace(
+          /var escapeHtml = uiModule\.esc;/,
+          `var escapeHtml = (value) => String(value ?? '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');`
+        );
+
+        const moduleUrl = 'data:text/javascript;base64,' + Buffer.from(source).toString('base64');
+        const mod = await import(moduleUrl);
+        const input = JSON.parse(process.argv[1]);
+        console.log(JSON.stringify({ out: mod.extractThinkingBlocks(input) }));
+        """
+    )
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script, json.dumps(text)],
+        cwd=_REPO,
+        capture_output=True,
+        timeout=15,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise AssertionError(f"node failed:\nSTDERR:\n{result.stderr}\nSTDOUT:\n{result.stdout}")
+    return json.loads(result.stdout.splitlines()[-1])["out"]
+
+
+def test_issue_payload_copy_text_excludes_thinking(node_available):
+    # Shape reported in #3722: timed think block glued to the reply heading.
+    raw = (
+        '<think time="24.5">\n'
+        "Here's a thinking process that leads to the desired summary:\n\n"
+        "6.  **Generate the Output.** (This matches the final provided response.)"
+        "</think>### Juxtaposition: Interweaving Cultural Norms in Lesson Design\n"
+        "The most effective lesson structure is created by deliberately juxtaposing."
+    )
+    out = _extract_thinking_blocks(raw)
+
+    assert out["content"].startswith("### Juxtaposition:"), out["content"]
+    assert "thinking process" not in out["content"]
+    assert "<think" not in out["content"]
+    assert out["thinkingTime"] == "24.5"
+
+
+def test_plain_reply_copy_text_is_unchanged(node_available):
+    raw = "### Heading\nJust a normal reply with no reasoning markup."
+    out = _extract_thinking_blocks(raw)
+    assert out["content"] == raw
+
+
+def test_minimax_namespaced_thinking_is_extracted(node_available):
+    raw = (
+        '<mm:think>The user said "idk" - just casual.</mm:think>'
+        "Haha fair. Well, I'm here whenever you figure it out."
+    )
+    out = _extract_thinking_blocks(raw)
+
+    assert out["thinkingBlocks"] == ['The user said "idk" - just casual.']
+    assert out["content"] == "Haha fair. Well, I'm here whenever you figure it out."
+    assert "mm:think" not in out["content"]
+
+
+def test_minimax_orphan_closing_tag_drops_leaked_reasoning(node_available):
+    raw = "</mm:think>Hi! What can I do for you?"
+    out = _extract_thinking_blocks(raw)
+
+    assert out["thinkingBlocks"] == []
+    assert out["content"] == "Hi! What can I do for you?"
+    assert "mm:think" not in out["content"]
+
+
+def test_thinking_only_message_yields_empty_content(node_available):
+    # The copy handler falls back to the raw text in this case so the button
+    # still copies something for turns interrupted mid-thinking.
+    out = _extract_thinking_blocks("<think>only reasoning, no reply yet</think>")
+    assert out["content"] == ""

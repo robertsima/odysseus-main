@@ -1,29 +1,19 @@
-"""Construct a file-backed temp sqlite DB for tests.
+"""A fresh SQLite copy of a schema for code that cannot take a fixture.
 
-Only builds the SQLAlchemy objects from the repeated temp-sqlite block. It
-does not patch modules, manage cleanup, or own any global state — the caller
-keeps the returned objects alive and binds ``SessionLocal`` where needed.
+Prefer the ``app_db`` and ``make_test_db`` fixtures from
+tests/plugins/database.py; they delete their copy after the test. This helper
+makes the same copy, and the file is deleted when the test process exits. It
+does not patch modules: the caller binds ``SessionLocal`` onto whatever module
+the code under test reads.
 """
-import tempfile
-
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import NullPool
+from tests.plugins.database import new_unscoped_database
 
 
-def make_temp_sqlite(metadata):
-    """Build a file-backed temp sqlite database and create its tables.
+def make_temp_sqlite(metadata=None):
+    """Copy ``metadata``'s schema (core.database's by default) into a temp file.
 
-    Returns ``(SessionLocal, engine, tmpfile)``. The caller must keep these
-    references alive (temp file and engine GC are the caller's concern) and
-    bind ``SessionLocal`` onto whatever module the code under test reads.
+    Returns ``(SessionLocal, engine, path)``. The engine uses NullPool, so
+    each session opens its own connection to the file.
     """
-    tmpfile = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-    engine = create_engine(
-        f"sqlite:///{tmpfile.name}",
-        connect_args={"check_same_thread": False},
-        poolclass=NullPool,
-    )
-    metadata.create_all(engine)
-    SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
-    return SessionLocal, engine, tmpfile
+    db = new_unscoped_database(metadata)
+    return db.SessionLocal, db.engine, db.path

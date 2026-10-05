@@ -126,7 +126,7 @@ async def list_tools() -> list[Tool]:
             name="manage_memory",
             # Same text as the native manage_memory schema in src/tool_schemas.py
             # (that file is read statically, so it cannot import this constant);
-            # tests/test_tool_schema_budget.py asserts the two stay equal.
+            # tests/src/tool_schemas/test_tool_schema_budget.py asserts the two stay equal.
             description=MANAGE_MEMORY_DESCRIPTION,
             inputSchema={
                 "type": "object",
