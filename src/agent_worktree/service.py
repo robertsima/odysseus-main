@@ -68,7 +68,7 @@ logger = logging.getLogger(__name__)
 MAX_CHANGED_FILES = 500
 
 __all__ = [
-    "WorktreeError", "ensure_worktree", "status", "commit", "diff_summary",
+    "WorktreeError", "ensure_worktree", "status", "diagnose", "commit", "diff_summary",
     "request_publish", "publish", "cleanup", "remove_worktree", "repository_config",
 ]
 
@@ -534,9 +534,11 @@ def _verify_membership(cfg: WorktreeConfig, path: str) -> None:
             # worktrees share the main repository's common directory.
             source = str(linked_worktree_main(source))
     except RepositorySyncError as exc:
-        raise WorktreeError(f"worktree {path} failed its metadata check: {exc}")
+        raise WorktreeError(f"worktree {path} failed its metadata check: {exc}",
+                            code="WORKTREE_METADATA_INVALID")
     if not _same_path(main, source):
-        raise WorktreeError(f"worktree {path} does not belong to {cfg.source_repo}")
+        raise WorktreeError(f"worktree {path} does not belong to {cfg.source_repo}",
+                            code="WORKTREE_METADATA_INVALID")
 
 
 def _verify_ok(cfg: WorktreeConfig, path: str) -> bool:
@@ -668,7 +670,7 @@ async def ensure_worktree(
     try:
         with file_lock(_lock_path(cfg)):
             # Reuse an existing, healthy worktree.
-            if _worktree_exists(path):
+            if os.path.lexists(path):
                 _verify_membership(rcfg, path)
                 current = await _current_branch(rcfg, path)
                 if current != new_branch:
@@ -871,13 +873,48 @@ async def status(
             "project pass repository=<absolute checkout path> (and base=<ref> on start)."
         ),
     }
+    # A named call is one worktree, not an inventory of every project.
+    if branch:
+        lcfg, resolved, path = await _locate(cfg, branch, repository)
+        rcfg = lcfg
+        meta = _load_meta(lcfg, resolved)
+        out.update(repository=lcfg.source_repo, repo=lcfg.repo_slug or None,
+                   branch_prefix=lcfg.branch_prefix, base_branch=lcfg.base_branch or None,
+                   publish_blockers=publish_blockers(lcfg), branch=resolved, path=path,
+                   exists=os.path.lexists(path), base=meta.get("base"),
+                   base_sha=meta.get("base_sha"), pr_base=meta.get("pr_base") or lcfg.base_branch or None)
+        if out["exists"]:
+            try:
+                _verify_membership(lcfg, path)
+            except WorktreeError as exc:
+                out.update(error=str(exc), code=exc.code,
+                           next_action={"action": "diagnose", "repository": lcfg.source_repo,
+                                        "branch": resolved})
+            else:
+                current = await _current_branch(lcfg, path)
+                out.update(head_sha=await _head_sha(lcfg, path), dirty=await _is_dirty(lcfg, path),
+                           current_branch=current)
+                if current != resolved:
+                    out.update(code="WORKTREE_BRANCH_MISMATCH",
+                               error=f"worktree is on {current or 'a detached HEAD'}, expected {resolved}")
+                block = _publish_block(resolved, out["head_sha"], meta.get("base_sha"))
+                if block:
+                    out["publish"] = block
+            out["worktrees"] = [{key: value for key, value in out.items() if key in {
+                "path", "repository", "branch", "current_branch", "head_sha", "dirty", "base",
+                "base_sha", "publish", "error", "code", "next_action"}}]
+        return out
     metas = {
         os.path.normcase(os.path.realpath(str(m.get("path") or ""))): m
         for m in _all_meta(cfg) if m.get("path")
     }
+    omitted = 0
     for path in _worktree_dirs(cfg):
         main = _main_repository_of(path)
-        if rcfg.repository_key and (main is None or not _same_path(main, rcfg.source_repo)):
+        if (repository or rcfg.repository_key) and (main is None or not _same_path(main, rcfg.source_repo)):
+            continue
+        if len(out["worktrees"]) >= 50:
+            omitted += 1
             continue
         meta = metas.get(os.path.normcase(os.path.realpath(path)), {})
         # git runs in a worktree only when its pointer leads to a repository
@@ -913,29 +950,96 @@ async def status(
             info["publish"] = block
         out["worktrees"].append(info)
 
-    if branch:
-        try:
-            lcfg, resolved, path = await _locate(cfg, branch, repository)
-        except WorktreeError:
-            lcfg, resolved, path = rcfg, "", ""
-        if resolved:
-            meta = _load_meta(lcfg, resolved)
-            out["repository"] = lcfg.source_repo
-            out["repo"] = lcfg.repo_slug or None
-            out["branch"] = resolved
-            out["path"] = path
-            out["exists"] = _worktree_exists(path)
-            out["base"] = meta.get("base")
-            out["base_sha"] = meta.get("base_sha")
-            out["pr_base"] = meta.get("pr_base") or lcfg.base_branch or None
-            if out["exists"] and not _verify_ok(lcfg, path):
-                out["error"] = "worktree metadata could not be verified"
-            elif out["exists"]:
-                out["head_sha"] = await _head_sha(lcfg, path)
-                out["dirty"] = await _is_dirty(lcfg, path)
-                block = _publish_block(resolved, out["head_sha"], meta.get("base_sha"))
-                if block:
-                    out["publish"] = block
+    if omitted:
+        out.update(worktrees_omitted=omitted,
+                   hint="Inventory limited to 50 entries. Pass repository and branch for one worktree.")
+    return out
+
+
+def _expected_head(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if not is_valid_sha(text):
+        raise WorktreeError("expected_head must be a full 40- or 64-character commit SHA",
+                            code="INVALID_EXPECTED_HEAD")
+    return text
+
+
+async def _diagnostic_git(cfg: WorktreeConfig, args: List[str], *, cwd: str,
+                          check: bool = True):
+    # Missing objects in a promisor repository otherwise trigger an implicit
+    # fetch. The protocol allowlist is a fail-closed fallback for older Git;
+    # optional locks off also prevents status from refreshing the index.
+    return await _git(cfg, args, cwd=cwd, check=check, extra_env={
+        "GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": "", "GIT_OPTIONAL_LOCKS": "0",
+    })
+
+
+async def diagnose(
+    branch: str, *, cfg: Optional[WorktreeConfig] = None,
+    repository: Optional[str] = None, expected_head: Optional[str] = None,
+    workspace: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Read-only local publication identity check. No credentials or network.
+
+    Git runs only against verified managed metadata. The active workspace's
+    object-store path is read from the filesystem, never its Git config.
+    """
+    from pathlib import Path
+    from src.agent_worktree.ownership import git_common_dir
+
+    cfg = cfg or load_config()
+    expected = _expected_head(expected_head)
+    rcfg, resolved, path = await _locate(cfg, branch, repository)
+    where = {"repository": rcfg.source_repo, "branch": resolved}
+    out: Dict[str, Any] = {**where, "path": path, "expected_head": expected,
+                           "read_only": True, "network_used": False}
+    if not os.path.lexists(path):
+        return {**out, "code": "WORKTREE_NOT_STARTED",
+                "next_action": {"action": "start", **where},
+                "hint": "Create the registered worktree before editing. Do not make a replacement clone."}
+    try:
+        _verify_membership(rcfg, path)
+    except WorktreeError as exc:
+        return {**out, "code": "WORKTREE_METADATA_INVALID", "error": str(exc),
+                "recovery": {"requires": "host_metadata_repair", "repository": rcfg.source_repo,
+                             "path": path},
+                "hint": "The host cannot verify this pointer. Preserve files and refs; do not rewrite .git, "
+                        "reset, or clone over it. An administrator must repair the registered metadata."}
+    head = await _diagnostic_git(rcfg, ["rev-parse", "HEAD"], cwd=path)
+    current = await _diagnostic_git(rcfg, ["symbolic-ref", "--quiet", "--short", "HEAD"],
+                                    cwd=path, check=False)
+    pending = await _diagnostic_git(rcfg, ["status", "--porcelain", "--untracked-files=normal"], cwd=path)
+    out.update(head_sha=head.stdout.strip(), current_branch=current.stdout.strip() if current.ok else "",
+               dirty=bool(pending.stdout.strip()))
+    common = git_common_dir(Path(path))
+    out["git_common_dir"] = str(common) if common else None
+    if workspace:
+        workspace_common = git_common_dir(Path(workspace))
+        out["workspace_shares_objects"] = bool(common and workspace_common == common)
+    if expected:
+        available = await _diagnostic_git(rcfg, ["cat-file", "-e", f"{expected}^{{commit}}"],
+                                          cwd=path, check=False)
+        out["expected_head_available"] = available.ok
+    if out["current_branch"] != resolved:
+        code = "WORKTREE_BRANCH_MISMATCH"
+        hint = "Preserve both refs. Review the registered worktree's branch before committing or publishing."
+    elif expected and expected != out["head_sha"]:
+        code = "HEAD_MISMATCH" if out["expected_head_available"] else "OBJECT_STORE_DRIFT"
+        hint = ("The tested HEAD is not the registered HEAD. A separate clone does not update this branch. "
+                "Preserve both histories. Integrate the tested commit into the registered worktree through "
+                "an approved local Git route, then verify the resulting tree and rerun affected checks. "
+                "Do not change publishing credentials or make another request to bypass this.")
+    elif out.get("workspace_shares_objects") is False:
+        code = "WORKSPACE_OBJECT_STORE_MISMATCH"
+        hint = "This workspace uses a different object store. Work in the registered path above, not a clone."
+    else:
+        code = "WORKTREE_DIRTY" if out["dirty"] else "READY"
+        hint = ("Inspect and commit the owned changes in the registered worktree." if out["dirty"]
+                else "Local identity verified. Pass the tested HEAD as expected_head for publication. "
+                     "Human approval and credential checks still apply.")
+    out.update(code=code, hint=hint, next_action={"action": "diff", **where})
     return out
 
 
@@ -947,6 +1051,8 @@ async def _started(
 ) -> Tuple[WorktreeConfig, str, str]:
     rcfg, resolved, path = await _locate(cfg, branch, repository)
     if not _worktree_exists(path):
+        if os.path.lexists(path):
+            _verify_membership(rcfg, path)
         raise WorktreeError("worktree does not exist yet; start it first", code="WORKTREE_NOT_STARTED")
     _verify_membership(rcfg, path)
     return rcfg, resolved, path
@@ -1133,10 +1239,19 @@ async def request_publish(
     cfg: Optional[WorktreeConfig] = None,
     repository: Optional[str] = None,
     session_id: Optional[str] = None,
+    expected_head: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Freeze the change and record an approval request. Publishes nothing."""
     cfg = cfg or load_config()
+    expected = _expected_head(expected_head)
     rcfg, resolved, path = await _started(cfg, branch, repository)
+    # Reject a clone's tested receipt before credentials, network or request state.
+    if expected:
+        actual = await _head_sha(rcfg, path)
+        if actual != expected:
+            raise WorktreeError(f"registered worktree HEAD is {actual}, not tested HEAD {expected}; "
+                                "call diagnose with the same repository, branch and expected_head. "
+                                "Nothing was requested or published.", code="HEAD_MISMATCH")
     pcfg = _publish_cfg(rcfg, resolved)
     blockers = publish_blockers(pcfg) + _foreign_publish_blockers(pcfg)
     if not pcfg.base_branch:
@@ -1146,6 +1261,9 @@ async def request_publish(
         raise WorktreeError("publishing is not available: " + "; ".join(blockers))
 
     summary = await _summary(pcfg, resolved, path)
+    if expected and summary["head_sha"] != expected:
+        raise WorktreeError("HEAD moved during publication preflight; diagnose and review again",
+                            code="HEAD_MISMATCH")
     if summary["dirty"]:
         raise WorktreeError(
             "worktree has uncommitted changes; commit them so the approval "

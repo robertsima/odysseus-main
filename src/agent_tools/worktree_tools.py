@@ -20,7 +20,7 @@ from src.tool_utils import _parse_tool_args
 
 logger = logging.getLogger(__name__)
 
-_ACTIONS = ("status", "start", "commit", "diff", "request_publish",
+_ACTIONS = ("status", "diagnose", "start", "commit", "diff", "request_publish",
             "publish", "list_requests", "show_request", "checks", "cleanup",
             "repo_list", "repo_status", "repo_pull")
 
@@ -159,7 +159,7 @@ def _similar_request_hint(request_id: str, cfg, ctx: Dict[str, Any] | None = Non
 
 
 # Actions that work on one named worktree, in the order an agent needs them.
-_BRANCH_ACTIONS = ("commit", "diff", "request_publish", "checks", "cleanup")
+_BRANCH_ACTIONS = ("diagnose", "commit", "diff", "request_publish", "checks", "cleanup")
 
 
 def _next_step(code: str, action: str, branch: str, repository: str = "",
@@ -168,6 +168,9 @@ def _next_step(code: str, action: str, branch: str, repository: str = "",
     rounds guessing the publish sequence (start → edit → commit →
     request_publish)."""
     where = {"repository": repository} if repository else {}
+    if code in ("HEAD_MISMATCH", "WORKTREE_METADATA_INVALID"):
+        return {"code": code, "next_action": {"action": "diagnose", "branch": branch, **where},
+                "hint": "Use the registered worktree. Diagnose before changing settings or making a clone."}
     if code in ("BRANCH_IS_BASE", "BASE_MISMATCH", "BASE_NOT_FOUND", "BASE_REQUIRED", "INVALID_BASE"):
         return {"code": code, "required_fields": ["name", "base"],
                 "next_action": {"action": "start", "name": "<task-name>", "base": "origin/main", **where},
@@ -242,7 +245,8 @@ def _worktree_path_as_name(cfg, branch: str, repository: str) -> tuple[str, str]
     required", "only physical checkouts ..."). A worktree under
     ``_repos/<key>/<leaf>`` is named by its leaf and belongs to the main
     repository its verified `.git` pointer names. Anything else is returned
-    unchanged, so every other path keeps its existing checks.
+    unchanged, so every other path keeps its existing checks. The source
+    repository's direct-root layout uses the same verified routing.
     """
     import os
 
@@ -255,7 +259,8 @@ def _worktree_path_as_name(cfg, branch: str, repository: str) -> tuple[str, str]
     group = os.path.dirname(path)
     if (
         not is_inside(path, cfg.worktree_root)
-        or os.path.basename(os.path.dirname(group)) != REPOSITORY_WORKTREE_DIR
+        or not (group == os.path.realpath(cfg.worktree_root)
+                or os.path.basename(os.path.dirname(group)) == REPOSITORY_WORKTREE_DIR)
         or not os.path.isfile(os.path.join(path, ".git"))
     ):
         return branch, repository
@@ -352,6 +357,15 @@ class AgentWorktreeTool:
                     owner=str(ctx.get("owner") or "") or None,
                     session_id=str(ctx.get("session_id") or "") or None)}
 
+            if action == "diagnose":
+                from src.agent_worktree.repository_sync import workspace_repository
+
+                workspace = workspace_repository()
+                return {"exit_code": 0, "diagnosis": await service.diagnose(
+                    branch, cfg=cfg, repository=repository or None,
+                    expected_head=args.get("expected_head"),
+                    workspace=str(workspace) if workspace else None)}
+
             if action == "start":
                 name = _text_arg(args, "name")
                 requested = _text_arg(args, "branch")
@@ -423,6 +437,7 @@ class AgentWorktreeTool:
                     cfg=cfg,
                     repository=repository or None,
                     session_id=str(ctx.get("session_id") or "") or None,
+                    expected_head=args.get("expected_head"),
                 )
                 return {
                     "exit_code": 0,
@@ -473,6 +488,10 @@ class AgentWorktreeTool:
             hint = (_similar_request_hint(str(args.get("request_id") or ""), cfg, ctx)
                     if action in ("publish", "show_request") and "no approval request" in str(exc) else "")
             can_discard = (code == "WORKTREE_DIRTY" and _discard_authorised(ctx)[0])
+            if code == "HEAD_MISMATCH":
+                recovery = _next_step(code, action, branch, repository)
+                recovery["next_action"]["expected_head"] = args.get("expected_head")
+                return _err(f"manage_agent_worktree {action}: {exc}", **recovery)
             return _err(f"manage_agent_worktree {action}: {exc}{hint}",
                         **(_next_step(code, action, branch, repository, can_discard) if code else {}))
 
