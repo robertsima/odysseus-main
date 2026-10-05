@@ -125,6 +125,19 @@ The vault root is `vault_root()` in `src/rag_sensitivity.py`: the
 (`data/personal_docs`). Notes inherit the vault's folder sensitivity labels by
 being files in it — that was the point of the move.
 
+The human Vault files editor (`/api/personal/vault/file`) saves through
+`vault_write_root()` instead: the `vault_write_directory` setting when set,
+otherwise the vault root. That lets a deployment mount `personal_docs`
+read-only for models and mount the same vault read-write elsewhere for the
+person's own edits. Edits are re-indexed under the read path. Agents never
+write through the write root; `path_is_readonly` treats all of it as
+read-only, and the shell sandbox refuses a workspace that overlaps it. When
+saving is impossible (read-only vault and no write folder, a missing write
+folder, or one that overlaps the vault), `GET /vault/tree` reports
+`write.writable = false` with a reason, the editor goes read-only, and saves
+return 409 naming the setting. The Notes panel (`notes_store`) still writes at
+the vault root.
+
 The `notes` table in `core/database.py` is **legacy**. `routes/note/note_routes.py`
 imports `src.notes_store.STORE` and never touches it; the only live reader is
 `src/notes_vault_migration.py`, which copies rows out to `.md` at startup (from

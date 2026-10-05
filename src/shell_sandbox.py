@@ -439,13 +439,17 @@ def workspace_problem(workspace: Optional[str], *, extra_allowed: Optional[str] 
         return "the workspace is a filesystem root"
     try:
         from src.constants import AGENT_WORKSPACE_DIR, DATA_DIR, PERSONAL_DIR
-        from src.rag_sensitivity import vault_root
+        from src.rag_sensitivity import vault_root, vault_write_root
     except Exception:
         return "the app's protected directories could not be determined"
     data = os.path.realpath(DATA_DIR)
     if _within(data, ws):
         return "the workspace contains the app's data directory"
-    for protected in {os.path.realpath(PERSONAL_DIR), os.path.realpath(vault_root())}:
+    for protected in {
+        os.path.realpath(PERSONAL_DIR),
+        os.path.realpath(vault_root()),
+        os.path.realpath(vault_write_root()),
+    }:
         if _within(protected, ws) or _within(ws, protected):
             return "the workspace overlaps the document vault"
     if _within(ws, data):

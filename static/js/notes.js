@@ -35,6 +35,9 @@ let _vaultFile = null;
 let _vaultLoading = false;
 let _vaultDirty = false;
 let _vaultNewOpen = false; // the inline "New note" form in the tree pane
+// Where human saves go (GET /api/personal/vault/tree `write`): when
+// `writable` is false the editor is read-only and `reason` says what to fix.
+let _vaultWrite = null;
 // Folders start collapsed and only open after a human toggles them. Keep that
 // explicit state across file loads/search rerenders without persisting it as a
 // surprising default for the next browser session.
@@ -508,6 +511,7 @@ async function _fetchVaultTree() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     _vaultTree = data.tree || null;
+    _vaultWrite = data.write || null;
   } catch (e) {
     console.error('Failed to fetch vault tree:', e);
     _vaultTree = { type: 'error', message: 'Could not load the vault. Check that its Docker path is mounted.' };
@@ -547,7 +551,7 @@ async function _openVaultFile(path) {
 }
 
 async function _saveVaultFile() {
-  if (!_vaultFile?.path) return;
+  if (!_vaultFile?.path || _vaultWrite?.writable === false) return;
   const editor = document.getElementById('vault-file-editor');
   const save = document.getElementById('vault-file-save');
   if (!editor || !save) return;
@@ -633,7 +637,11 @@ async function _createVaultNote(folder, name) {
     segments.forEach((_, i) => _vaultExpandedFolders.add(segments.slice(0, i + 1).join('/')));
     await _fetchVaultTree();
     _renderVault();
-    uiModule.showToast(`Created ${created.path}`);
+    if (created.visible_in_vault === false) {
+      uiModule.showError(`Saved ${created.path} to the vault write folder, but it does not appear in the vault folder. The write folder should be a writable mount of the same vault.`);
+    } else {
+      uiModule.showToast(`Created ${created.path}`);
+    }
     const editor = document.getElementById('vault-file-editor');
     if (editor) {
       editor.focus();
@@ -771,13 +779,18 @@ function _renderVault() {
   const policies = _vaultPolicyLabels(_vaultFile);
   const policyText = policies.join(' + ');
   const policyBadges = policies.map(policy => `<span class="vault-policy-badge ${_attrEsc(policy)}" title="This label limits LLM and agent access only">${_esc(policy)}</span>`).join('');
+  const readOnly = _vaultWrite?.writable === false;
+  const writeNote = readOnly
+    ? `<div class="vault-human-note vault-write-blocked" role="status">Editing is off: ${_esc(_vaultWrite.reason || 'the vault cannot be saved.')}</div>`
+    : '';
+  const off = readOnly ? ' disabled' : '';
   body.innerHTML = `
     <div class="vault-browser">
       <aside class="vault-tree-pane">
         <div class="vault-tree-heading">
           <span><b>${_searchQuery ? 'Results' : 'Files'}</b><small>${_searchQuery ? 'filtered' : `${fileCount} Markdown`}</small></span>
           <div class="vault-tree-actions">
-            <button type="button" id="vault-new-note" class="vault-new-btn${_vaultNewOpen ? ' active' : ''}" title="New note" aria-label="New note" aria-expanded="${_vaultNewOpen ? 'true' : 'false'}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h8l4 4v16H6z"/><path d="M14 2v5h5"/><path d="M12 11v6M9 14h6"/></svg><span>New</span></button>
+            <button type="button" id="vault-new-note" class="vault-new-btn${_vaultNewOpen ? ' active' : ''}" title="New note" aria-label="New note" aria-expanded="${_vaultNewOpen ? 'true' : 'false'}"${off}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h8l4 4v16H6z"/><path d="M14 2v5h5"/><path d="M12 11v6M9 14h6"/></svg><span>New</span></button>
             ${!_searchQuery ? `<button type="button" id="vault-tree-collapse" title="Collapse all folders" aria-label="Collapse all folders"${_vaultExpandedFolders.size ? '' : ' hidden'}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/><path d="m7 5 5 5 5-5"/></svg></button>` : ''}
             <button type="button" id="vault-tree-refresh" title="Refresh vault tree" aria-label="Refresh vault tree"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg></button>
           </div>
@@ -790,18 +803,20 @@ function _renderVault() {
           <div class="vault-editor-header">
             <div class="vault-editor-title"><b>${_esc(_vaultFile.name || _vaultFile.path)}</b><small>${_esc(_vaultFile.path)}</small></div>
             <span class="vault-policy-badges">${policyBadges}</span>
-            <button type="button" id="vault-file-delete" class="vault-delete-btn" title="Delete: moves the note to the vault's .trash folder" aria-label="Delete note"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg></button>
-            <button type="button" id="vault-file-save" class="vault-save-btn"${_vaultDirty ? '' : ' disabled'}>Save</button>
+            <button type="button" id="vault-file-delete" class="vault-delete-btn" title="Delete: moves the note to the vault's .trash folder" aria-label="Delete note"${off}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg></button>
+            <button type="button" id="vault-file-save" class="vault-save-btn"${_vaultDirty && !readOnly ? '' : ' disabled'}>Save</button>
           </div>
           <div class="vault-human-note">Model access: ${_esc(policyText)}. That limits models and agents only; you can always edit this note.</div>
-          <textarea id="vault-file-editor" spellcheck="true" aria-label="Markdown file editor"></textarea>
+          ${writeNote}
+          <textarea id="vault-file-editor" spellcheck="true" aria-label="Markdown file editor"${readOnly ? ' readonly' : ''}></textarea>
         ` : `
           <div class="vault-editor-empty">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v16H4z"/><path d="M8 9h8M8 13h8M8 17h5"/></svg>
             <b>Select a note, or create one</b>
             <span>Private, readonly and public limit what models and agents may do. You can open, edit, create and delete every note here.</span>
-            <button type="button" class="vault-empty-new" id="vault-empty-new">New note</button>
+            <button type="button" class="vault-empty-new" id="vault-empty-new"${off}>New note</button>
           </div>
+          ${writeNote}
         `}
       </section>
     </div>`;
@@ -812,7 +827,7 @@ function _renderVault() {
     editor.addEventListener('input', () => {
       _vaultDirty = editor.value !== (_vaultFile.content || '');
       const save = document.getElementById('vault-file-save');
-      if (save) save.disabled = !_vaultDirty;
+      if (save) save.disabled = !_vaultDirty || readOnly;
     });
     editor.addEventListener('keydown', (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {

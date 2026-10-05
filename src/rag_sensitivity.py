@@ -238,6 +238,40 @@ def vault_root() -> str:
     return PERSONAL_DIR
 
 
+def configured_vault_write_directory() -> str:
+    """The ``vault_write_directory`` setting, stripped; ``""`` when unset."""
+    from src.settings import get_setting
+
+    configured = get_setting("vault_write_directory", "")
+    if isinstance(configured, str) and configured.strip():
+        return os.path.expanduser(configured.strip())
+    return ""
+
+
+def vault_write_root() -> str:
+    """Folder the signed-in human's vault editor saves into.
+
+    Model/agent reads, retrieval and the ``readonly`` folder policy all use
+    `vault_root`. A deployment can mount that tree read-only for the model and
+    give the human editor a writable mount of the same tree at another path
+    through ``vault_write_directory``. Unset means "save where the vault is
+    read", the behaviour before the setting existed.
+    """
+    return configured_vault_write_directory() or vault_root()
+
+
+def _separate_vault_write_root() -> Optional[str]:
+    """Real path of a configured human-write folder that differs from the
+    read folder, else ``None``."""
+    configured = configured_vault_write_directory()
+    if not configured:
+        return None
+    write_real = os.path.realpath(configured)
+    if write_real == os.path.realpath(vault_root()):
+        return None
+    return write_real
+
+
 def _looks_absolute(path: str) -> bool:
     """True if ``path`` is (or resembles) a real filesystem reference rather
     than an already vault-relative logical path such as ``"Journal/note.md"``.
@@ -457,9 +491,16 @@ def path_is_readonly(path: str) -> bool:
     explicitly opt back into writes with ``{"readonly": false}``. Paths
     outside the configured vault are unaffected. As with privacy, malformed
     admin policy fails closed for paths inside the vault.
+
+    A separate human-write folder (``vault_write_directory``) is read-only to
+    agents as a whole: it is the human's writable view of the vault, and
+    reaching it must not bypass the folder rules applied at the read path.
     """
     vault_rel = _to_vault_relative(str(path), vault_root())
     if vault_rel is None:
+        write_root = _separate_vault_write_root()
+        if write_root and _to_vault_relative(str(path), write_root) is not None:
+            return True
         return False
     folder_map, config_is_valid = _safe_folder_policy_map()
     if not config_is_valid:

@@ -615,6 +615,7 @@ async def do_manage_settings(content: str, owner: Optional[str] = None,
         # The human-owned Settings UI remains the authority for these values.
         _PRIVACY_POLICY_KEYS = {
             "vault_directory",
+            "vault_write_directory",
             "vault_default_sensitivity",
             "vault_folder_sensitivity",
         }

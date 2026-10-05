@@ -35295,6 +35295,10 @@ body.notes-drag-mode .note-card-pin svg {
   background: color-mix(in srgb, var(--accent, var(--red)) 4%, transparent);
   font-size: 9px;
 }
+.vault-human-note.vault-write-blocked {
+  color: var(--fg);
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+}
 #vault-file-editor {
   flex: 1;
   min-height: 0;

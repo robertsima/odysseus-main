@@ -483,6 +483,7 @@ def _norm_search_fallback_chain(value: Any) -> List[str]:
 NORMALIZERS: Dict[str, Callable[[Any], Any]] = {
     "claude_code_repository_roots": _norm_repository_roots,
     "claude_code_binary": _norm_absolute_path,
+    "vault_write_directory": _norm_absolute_path,
     "claude_code_home": _norm_absolute_path,
     "claude_code_default_repository": _norm_absolute_path,
     "claude_code_odysseus_token_file": _norm_absolute_path,
@@ -771,6 +772,21 @@ register_all([
         group="Knowledge",
         env_override="ODYSSEUS_PERSONAL_DIR",
         placeholder="/app/data/personal_docs",
+    ),
+    SettingSpec(
+        key="vault_write_directory",
+        type="path",
+        label="Vault write folder",
+        help=(
+            "Where your own edits in the Vault files editor are saved. Leave "
+            "empty to save into the vault folder above. Set it to a writable "
+            "mount of the same vault when the vault folder is mounted "
+            "read-only, so models keep read access while you can still save. "
+            "Models and agents never write here; folder privacy and readonly "
+            "rules still apply to them at the vault folder."
+        ),
+        group="Knowledge",
+        placeholder="(same as the vault folder)",
     ),
     SettingSpec(
         key="notes_directory",
