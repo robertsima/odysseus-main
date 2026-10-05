@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 
+from core.platform_compat import find_bash
+
 from routes.cookbook_helpers import (
     _cached_model_scan_script,
     _append_llama_cpp_linux_accel_build_lines,
@@ -349,7 +351,7 @@ def test_pip_install_fallback_chain_propagates_failure_in_venv():
         "&& echo user_attempt; }"
     )
     result = subprocess.run(
-        ["bash", "-c", script],
+        [find_bash() or "bash", "-c", script],
         capture_output=True, text=True, timeout=10,
     )
     assert "user_attempt" not in result.stdout
@@ -367,7 +369,7 @@ def test_pip_install_fallback_chain_tries_user_outside_venv():
         "&& echo user_attempt; }"
     )
     result = subprocess.run(
-        ["bash", "-c", script],
+        [find_bash() or "bash", "-c", script],
         capture_output=True, text=True, timeout=10,
     )
     assert "user_attempt" in result.stdout, "Chain should try --user when not in venv and base fails"

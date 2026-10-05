@@ -442,7 +442,7 @@ async def test_diff_oversized_unchanged_file_is_not_reported(repository, monkeyp
     # Force the hash path (stat can no longer vouch for the file).
     monkeypatch.setattr(local, "_stat_clean", lambda *a: False)
     result = await local.execute_local("diff", str(repository))
-    assert result["changed_files"] == 0 and result["diff"] == ""
+    assert result["changed_files"] == 0 and result["diff"] == "", result
 
 
 @pytest.mark.asyncio
