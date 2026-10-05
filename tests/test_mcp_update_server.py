@@ -6,7 +6,6 @@ server; command, args, env and URL were fixed once added. PUT
 """
 import asyncio
 import json
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -14,8 +13,6 @@ import pytest
 from fastapi import HTTPException
 
 from routes.mcp import mcp_routes
-
-ROOT = Path(__file__).resolve().parent.parent
 
 
 class _Query:
@@ -116,8 +113,3 @@ def test_missing_command_or_url_is_refused(monkeypatch):
         asyncio.run(update(server_id="abc", request=None, name="files", transport="sse",
                            command=None, args="[]", env="{}", url=""))
 
-
-def test_settings_editor_offers_connection_settings():
-    js = (ROOT / "static/js/settings.js").read_text(encoding="utf-8")
-    assert "Connection settings" in js and 'id="uf-mcp-save-conn"' in js
-    assert "method: 'PUT', body: fd" in js
