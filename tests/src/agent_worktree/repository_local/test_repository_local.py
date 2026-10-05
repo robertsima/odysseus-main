@@ -8,11 +8,9 @@ from dulwich.index import IndexEntry
 from dulwich.objects import Blob, Commit, Tree
 from dulwich.repo import Repo
 
-from src import tool_approvals
 from src.agent_tools.git_tools import GitTool
 from src.agent_worktree import repository_local as local
 from src.agent_worktree import repository_sync as sync
-
 
 def test_status_rejects_ntfs_alternate_stream_before_content_helpers(monkeypatch):
     # Model a dulwich validator that permits colons, as in the failing CI run.
@@ -67,7 +65,6 @@ _REPORT_BACKLOG = pytest.mark.skip(
     reason="Re-port backlog: uses fork-only internals replaced by upstream's agent core (website/upstream-sync-2026-09-18.md)"
 )
 
-
 _NEUTRAL_GIT_FIELDS = {
     "repository": "",
     "paths": [],
@@ -107,7 +104,10 @@ def repository(tmp_path, monkeypatch):
     path = root / "project"
     path.mkdir()
     repo = porcelain.init(str(path))
-    (path / "README.md").write_text("one\n", encoding="utf-8")
+    # Bytes, not write_text: on Windows write_text stores CRLF, but the commit
+    # holds LF (core.autocrlf=true on the runner), and the diff hashes raw
+    # worktree bytes, so README.md would read as changed.
+    (path / "README.md").write_bytes(b"one\n")
     porcelain.add(repo, ["README.md"])
     porcelain.commit(
         repo,
@@ -282,33 +282,6 @@ async def test_expanded_risky_git_call_refuses_empty_revision_proofs(
 
     assert result["exit_code"] == 1
     assert result["code"] == expected_code
-
-
-@_REPORT_BACKLOG
-@pytest.mark.asyncio
-async def test_expanded_merge_preserves_required_empty_ref(repository, monkeypatch):
-    _allow_git_tool(monkeypatch)
-    monkeypatch.setattr(
-        "src.agent_tools.git_tools._repository_read_token", lambda _ctx: None
-    )
-    with Repo(str(repository)) as repo:
-        head = repo.refs[b"HEAD"].decode()
-    args = _expanded_git_args(
-        "merge", repository, expected_head=head, expected_target=head
-    )
-    content = json.dumps(args)
-    pending = tool_approvals.request(
-        "empty-merge-ref", "manage_git", content, "merge"
-    )
-    tool_approvals.decide("empty-merge-ref", pending["id"], "once")
-
-    result = await GitTool().execute(
-        content,
-        {"owner": "admin", "session_id": "empty-merge-ref"},
-    )
-
-    assert result["exit_code"] == 1
-    assert result["code"] == "invalid_branch"
 
 
 @pytest.mark.asyncio
@@ -525,7 +498,8 @@ async def test_diff_oversized_unchanged_file_is_not_reported(repository, monkeyp
     # Force the hash path (stat can no longer vouch for the file).
     monkeypatch.setattr(local, "_stat_clean", lambda *a: False)
     result = await local.execute_local("diff", str(repository))
-    assert result["changed_files"] == 0 and result["diff"] == ""
+    if result["changed_files"] or result["diff"]:
+        pytest.fail(f"changed={result['changed_files']} diff={result['diff']!r}")
 
 
 @pytest.mark.asyncio
