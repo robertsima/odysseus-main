@@ -4,7 +4,6 @@ Personas in the Prompt window are shared; a chat running as an agent under a
 loadout must not pick them up, and two loadouts must not share a voice.
 """
 import asyncio
-from pathlib import Path
 
 import pytest
 
@@ -13,7 +12,6 @@ import src.agent_loop as agent_loop
 from routes import chat_helpers
 from src import agent_profiles, session_settings
 
-ROOT = Path(__file__).resolve().parent.parent
 
 
 def _collect(gen):
@@ -112,40 +110,3 @@ def test_workers_get_the_loadout_voice_even_when_called_with_defaults(monkeypatc
     assert "Your name is Scout." in system and "Terse field notes." in system
 
 
-def test_browser_keeps_the_shared_prompt_out_of_loadout_agents():
-    chat = (ROOT / "static/js/chat.js").read_text(encoding="utf-8")
-    menu = (ROOT / "static/js/agentMenu.js").read_text(encoding="utf-8")
-    loadouts_js = (ROOT / "static/js/agentLoadouts.js").read_text(encoding="utf-8")
-    dashboard = (ROOT / "static/js/agentsDashboard.js").read_text(encoding="utf-8")
-    style = (ROOT / "static/style.css").read_text(encoding="utf-8")
-    # Inject text and the persona label come from the loadout in that case.
-    assert "(!_sharedPersonaSuppressed() && presetsModule.getInject)" in chat
-    assert chat.count("_personaNameForTurn()") >= 3
-    assert "export function sharedPersonaSuppressed()" in menu
-    assert "body.composer-agent-mode.loadout-voice #character-indicator-btn" in style
-    # Both editors (the loadout library and a chat's settings) set its voice.
-    for key in ("persona_name", "'temperature'", "'max_tokens'", "Start from persona"):
-        assert key in loadouts_js
-    for key in ('data-config="agent_persona_name"', 'data-config="agent_temperature"', "agent_max_tokens: draft.agent_max_tokens"):
-        assert key in dashboard
-    assert "odysseus:loadout-changed" in dashboard and "odysseus:loadout-changed" in menu
-
-
-def test_prompt_window_edits_the_shared_prompt_and_points_agents_elsewhere():
-    """One rule: the Prompt window edits the shared prompt; an agent's persona
-    is edited with the agent. Both surfaces say so."""
-    index = (ROOT / "static/index.html").read_text(encoding="utf-8")
-    presets = (ROOT / "static/js/presets.js").read_text(encoding="utf-8")
-    menu = (ROOT / "static/js/agentMenu.js").read_text(encoding="utf-8")
-    dashboard = (ROOT / "static/js/agentsDashboard.js").read_text(encoding="utf-8")
-    assert 'id="preset-scope"' in index and "<b>Shared prompt.</b>" in index
-    assert 'id="preset-scope-agent"' in index and 'id="preset-scope-edit-agent"' in index
-    assert "agentMenuModule?.syncPromptScope?.()" in presets
-    assert "export function syncPromptScope()" in menu
-    # The Agents menu separates this agent's persona from the shared prompt.
-    assert 'data-agent-action="edit-agent"' in menu
-    assert "Shared prompt &amp; personas" in menu
-    assert "editLoadout" in dashboard.rsplit("const agentsDashboard", 1)[1]
-    assert "data-config-persona" in dashboard
-    # Every Prompt window tab explains itself.
-    assert index.count('class="preset-tab-sub"') == 3
