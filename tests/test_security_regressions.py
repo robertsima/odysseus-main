@@ -19,6 +19,26 @@ from pathlib import Path
 
 import pytest
 
+from tests.helpers.import_state import preserve_import_state
+
+# Modules a test below drops from sys.modules to import a fresh copy. Left
+# dropped, later tests get a second copy of src.secret_storage with its own key
+# while modules imported earlier keep the first, so a value one encrypts the
+# other cannot decrypt (nightly seed 2785305766).
+_RELOADED_MODULES = (
+    "src.secret_storage",
+    "src.integrations",
+    "src.auth_helpers",
+    "routes.email_helpers",
+    "routes.email_pollers",
+)
+
+
+@pytest.fixture(autouse=True)
+def _restore_reimported_modules():
+    with preserve_import_state(*_RELOADED_MODULES):
+        yield
+
 
 # ── prompt-injection context wrapper ────────────────────────────
 
