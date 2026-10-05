@@ -25,9 +25,9 @@ import pytest
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 
 import routes.chat_routes as chat_routes
-from tests.test_foreground_model_routing import _RouteRequest, _chat_stream_endpoint
+from tests.src.foreground_model_routing.test_foreground_model_routing import _RouteRequest, _chat_stream_endpoint
 # Fixtures for the worker-status tests.
-from tests.test_loadout_repo_tools import _fresh_status_backoff, runs, store  # noqa: F401
+from tests.src.agent_tools.loadout_tools.test_loadout_repo_tools import _fresh_status_backoff, runs, store  # noqa: F401
 
 def _frame(**data):
     return f"data: {json.dumps(data)}\n\n"

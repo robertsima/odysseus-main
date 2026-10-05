@@ -9,7 +9,7 @@ import pytest
 import src.llm_core as llm_core
 from src.chatgpt_subscription import build_responses_input
 from src.llm_core import _build_chatgpt_responses_payload
-from tests.test_chatgpt_responses_tools import CHAT_TOOL, _collect
+from tests.src.llm_core.test_chatgpt_responses_tools import CHAT_TOOL, _collect
 
 MSGS = [{"role": "user", "content": "hi"}]
 URL = "https://chatgpt.com/backend-api/codex/responses"

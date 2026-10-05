@@ -13,7 +13,7 @@ import pytest
 
 import src.agent_loop as al
 from src.agent_loop import _STICKY_TOOLS, _sticky_tool_selection
-from tests.test_same_turn_tool_attachment import _collect, _patch
+from tests.src.agent_loop.test_same_turn_tool_attachment import _collect, _patch
 
 
 @pytest.fixture(autouse=True)

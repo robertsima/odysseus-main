@@ -237,7 +237,7 @@ def test_text_only_round_also_keeps_items():
 
 
 async def test_stream_captures_encrypted_reasoning_items(monkeypatch):
-    from tests.test_chatgpt_responses_tools import _collect
+    from tests.src.llm_core.test_chatgpt_responses_tools import _collect
 
     item = {"type": "reasoning", "id": "rs_1", "encrypted_content": "abc"}
     bare = {"type": "reasoning", "id": "rs_2"}

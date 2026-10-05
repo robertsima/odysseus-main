@@ -31,7 +31,7 @@ from src.agent_loop import (
     _sticky_tool_selection,
 )
 from src.tool_discovery import TurnToolDiscovery
-from tests.test_same_turn_tool_attachment import _collect, _patch
+from tests.src.agent_loop.test_same_turn_tool_attachment import _collect, _patch
 
 ALL_NATIVE = {s["function"]["name"] for s in FUNCTION_TOOL_SCHEMAS}
 

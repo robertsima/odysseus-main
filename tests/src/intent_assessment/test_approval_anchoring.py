@@ -41,7 +41,7 @@ from src.intent_assessment import (
 from src.objective_guard import distinctive_words, launch_task_text, stale_objective_refusal
 from src.prompt_security import UNTRUSTED_CONTEXT_POLICY, untrusted_context_message
 from src.user_time import current_datetime_context_message
-from tests.test_same_turn_tool_attachment import _collect, _events, _patch
+from tests.src.agent_loop.test_same_turn_tool_attachment import _collect, _events, _patch
 
 OLD_TASK = (
     "audit and improve RAG retrieval/chunking in the vault indexer, implement using "

@@ -11,7 +11,7 @@ import json
 import pytest
 
 import routes.chat_routes as chat_routes
-from tests.test_foreground_model_routing import _RouteRequest, _chat_stream_endpoint
+from tests.src.foreground_model_routing.test_foreground_model_routing import _RouteRequest, _chat_stream_endpoint
 
 
 def _delta(text, **extra):

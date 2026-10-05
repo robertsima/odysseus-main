@@ -26,7 +26,7 @@ import src.agent_loop as al
 from src.agent_loop import _STICKY_TOOLS, _sticky_tool_selection
 from src.llm_core import _build_chatgpt_responses_payload
 from src.prompt_security import UNTRUSTED_CONTEXT_POLICY, untrusted_context_message
-from tests.test_same_turn_tool_attachment import _collect, _patch
+from tests.src.agent_loop.test_same_turn_tool_attachment import _collect, _patch
 
 URL = "https://chatgpt.com/backend-api/codex/responses"
 MODEL = "gpt-6-luna"

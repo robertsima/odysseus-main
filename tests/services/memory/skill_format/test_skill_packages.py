@@ -6,7 +6,7 @@ from fastapi import HTTPException
 from services.memory.skill_format import Skill
 from services.memory.skills import SkillsManager
 from routes.skills_routes import setup_skills_routes
-from tests.test_skills_routes_owner_update import _write_skill_md, _request, _route_handler
+from tests.routes.skills_routes.test_owner_update import _write_skill_md, _request, _route_handler
 
 
 def _symlink(link, target, **kwargs):

@@ -6,7 +6,7 @@ agent spent a day of turns looking for a code bug (2026-09-30).
 """
 from src.agent_worktree import service
 from src.agent_worktree.dependencies import dependency_changes, reinstall_note
-from tests.test_agent_worktree_service import (  # noqa: F401  (fixtures)
+from tests.src.agent_worktree.gitcmd.test_agent_worktree_service import (  # noqa: F401  (fixtures)
     _fake_remote_head, _no_token, _prepare_change, cfg, git_required, repo,
 )
 
