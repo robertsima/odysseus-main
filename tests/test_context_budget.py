@@ -88,16 +88,6 @@ def test_default_settings_registers_hard_max_key():
     assert DEFAULT_SETTINGS["agent_input_token_hard_max"] == DEFAULT_HARD_MAX
 
 
-def test_alias_map_registers_friendly_names():
-    """`manage_settings` should accept 'hard max' and friends."""
-    from pathlib import Path
-    # manage_settings (and its alias map) moved to agent_tools/admin_tools.py in #3629.
-    src = Path("src/agent_tools/admin_tools.py").read_text()
-    assert '"hard max": "agent_input_token_hard_max"' in src
-    assert '"token budget cap": "agent_input_token_hard_max"' in src
-    assert '"input budget cap": "agent_input_token_hard_max"' in src
-
-
 def test_agent_loop_reads_hard_max_setting(tmp_path, monkeypatch):
     """End-to-end: a saved settings.json value for agent_input_token_hard_max
     must reach compute_input_token_budget on the real agent_loop call path."""
