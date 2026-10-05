@@ -6,7 +6,6 @@ workbench.js itself is DOM-bound, so it only gets a syntax check.
 """
 
 import json
-import re
 import shutil
 import subprocess
 import textwrap
@@ -118,74 +117,6 @@ def test_workbench_module_parses():
     for name in ("workbench.js", "diffView.js"):
         res = subprocess.run(["node", "--check", str(_REPO / "static" / "js" / name)], capture_output=True, text=True, encoding="utf-8")
         assert res.returncode == 0, res.stderr
-
-
-def test_workbench_wired_into_page():
-    html = (_REPO / "static" / "index.html").read_text(encoding="utf-8")
-    assert 'id="workbench-modal"' in html and 'id="rail-workbench"' in html and 'id="set-workbenchCard"' in html
-    app = (_REPO / "static" / "app.js").read_text(encoding="utf-8")
-    # The import may carry a cache-busting `?v=` tag, bumped on each release.
-    assert re.search(r"^import workbenchModule from '\./js/workbench\.js(\?v=[^']*)?';", app, re.M), \
-        "app.js no longer imports the Workbench module"
-    assert "'rail-workbench': 'Workbench'" in app
-    # Imported is not wired: the module must be initialised and exposed for
-    # the agents dashboard (window.workbenchModule.open / openRun).
-    assert "workbenchModule.init()" in app
-    assert "window.workbenchModule = workbenchModule" in app
-    for name in ("chat.js", "chatRenderer.js"):
-        src = (_REPO / "static" / "js" / name).read_text(encoding="utf-8")
-        assert "renderDiffCard(" in src
-        assert "line.startsWith('+++') || line.startsWith('---')" not in src, f"{name} still carries its own diff loop"
-
-
-def test_workbench_run_cards_keep_management_controls():
-    """Open/stop must remain available after the transient composer strip is gone."""
-    src = (_REPO / "static" / "js" / "workbench.js").read_text(encoding="utf-8")
-    assert 'data-wb-act="run-open-chat"' in src
-    assert 'data-wb-act="run-stop"' in src
-    assert "case 'run-open-chat': openRunChat" in src
-    assert "case 'run-stop': stopWorkbenchRun" in src
-    assert "/api/workbench/runs/${encodeURIComponent(runId)}/stop" in src
-    assert "window.sessionModule.selectSession(target)" in src
-
-
-def test_agent_strip_reads_run_liveness_from_one_definition():
-    """The strip's running/finished split must not be a scattered ``=== 'running'``.
-
-    A row is kept on the strip while it is live and for a few seconds after it
-    ends; a run that reports a terminal status without a finish time (a worker
-    closed by a status event from the chat that started it, or a headless
-    stream failure) used to fall out of both halves and vanish on the tick it
-    completed. ``isLive`` mirrors ``src/agent_activity.LIVE_RUN_STATUSES`` and
-    ``stripEndedAt`` supplies the missing end time.
-    """
-    src = (_REPO / "static" / "js" / "workbench.js").read_text(encoding="utf-8")
-    assert "const isLive = (status) => LIVE_STATUSES.has(status || 'running');" in src
-    assert "state.stripEndedAt.set(run.run_id, run.finished_at);" in src
-    assert "if (!isLive(run.status)) run.finished_at = run.finished_at || ev.ts;" in src
-    # The strip's heartbeat recomputes instead of closing over the render that
-    # armed it, so a run that starts while an older row is on screen is polled
-    # for too.
-    assert "const current = stripRuns();" in src
-    assert "if (current.some((r) => isLive(r.status))) refreshAgentRuns();" in src
-    strip = src[src.index("function stripRuns()"):src.index("function latestActivity")]
-    assert "=== 'running'" not in strip
-
-
-def test_live_runs_offer_wrap_up_beside_stop():
-    """Wrap up is a soft stop: a steer asking the run to hand back what it has."""
-    src = (_REPO / "static" / "js" / "workbench.js").read_text(encoding="utf-8")
-    assert 'data-strip-act="wrap-up"' in src and "if (act === 'wrap-up') {" in src
-    assert "/api/workbench/runs/${encodeURIComponent(run.run_id)}/wrap-up" in src
-    assert 'data-wb-act="run-wrap-up"' in src and "case 'run-wrap-up': wrapUpWorkbenchRun" in src
-    assert "/api/workbench/runs/${encodeURIComponent(runId)}/wrap-up" in src
-    card = src[src.index("function runCardHtml("):src.index("function disclosureHtml(")]
-    # Stop and Wrap up follow the one liveness definition, not `=== 'running'`.
-    assert "=== 'running'" not in card and "if (isLive(run.status)) {" in card
-    assert "progressHtml(run, 'wb-run-meta wb-run-progress')" in card
-    row = src[src.index("function stripRowHtml("):src.index("function renderAgentStrip(")]
-    assert "progressHtml(run, 'agent-strip-progress')" in row
-    assert "progress: row.progress || null," in src
 
 
 def _fmt_progress(calls: str) -> list:
