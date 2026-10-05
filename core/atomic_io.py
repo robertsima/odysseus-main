@@ -50,14 +50,19 @@ def atomic_write_json(path: str, data: Any, *, indent: Optional[int] = None, mod
             pass
 
 
-def atomic_write_text(path: str, text: str) -> None:
+def atomic_write_text(path: str, text: str, *, newline: Optional[str] = None) -> None:
+    """Atomically write `text` to `path`.
+
+    `newline` is passed to open(): the default translates "\n" to the
+    platform line ending, "" writes the text byte for byte.
+    """
     if not isinstance(text, str):
         raise TypeError("atomic_write_text expects a string")
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     tmp = f"{path}.tmp.{uuid.uuid4().hex}"
 
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
+        with open(tmp, "w", encoding="utf-8", newline=newline) as f:
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
