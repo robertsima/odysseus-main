@@ -7,11 +7,12 @@ from starlette.responses import PlainTextResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-import app as app_module
-
 
 @pytest.fixture
-def client(monkeypatch):
+def client(api, monkeypatch):
+    # The middleware is the app's own; `api` imports the app against a scratch
+    # data folder. A tiny app carries it so the test controls the routes.
+    app_module = api.module
     monkeypatch.setattr(app_module, "REQUEST_HARD_TIMEOUT", 0.05)
 
     async def slow(request):
