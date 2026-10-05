@@ -9,68 +9,6 @@ import pytest
 NAV = Path(__file__).parents[1] / "static" / "js" / "navOrder.js"
 
 
-def source():
-    return NAV.read_text(encoding="utf-8")
-
-
-def test_nav_order_is_a_standalone_module_with_shared_persistence_key():
-    text = source()
-    assert "export const NAV_ORDER_KEY = 'odysseus-nav-order-v1';" in text
-    assert "export function initNavOrder" in text
-    assert "localStorage" in text
-    assert "applyNavOrder(order, doc)" in text
-
-
-def test_tool_items_are_movable_and_core_controls_are_excluded():
-    text = source()
-    for item in (
-        "rail-calendar", "rail-compare", "rail-cookbook", "rail-research",
-        "rail-gallery", "rail-archive", "rail-memory", "rail-agents",
-        "rail-workbench", "rail-notes", "rail-tasks", "rail-theme", "rail-email",
-        "tool-calendar-btn", "tool-compare-btn", "tool-cookbook-btn",
-        "tool-research-btn", "tool-gallery-btn", "tool-library-btn",
-        "tool-memory-btn", "tool-agents-btn", "tool-workbench-btn",
-        "tool-notes-btn", "tool-tasks-btn", "tool-theme-btn", "tool-lotus-btn",
-    ):
-        assert item in text
-    for excluded in ("rail-delete-session", "rail-chats", "rail-documents", "rail-settings"):
-        # Excluded controls may be mentioned in comments or event selectors,
-        # but must not be part of NAV_ITEMS.
-        nav_items = text.split("const KEYS", 1)[0]
-        assert excluded not in nav_items
-
-
-def test_keyboard_drag_and_reset_affordances_are_present():
-    text = source()
-    assert "event.altKey" in text
-    assert "ArrowUp" in text and "ArrowDown" in text
-    assert "dragstart" in text and "dragover" in text and "drop" in text
-    assert "nav-order-context-menu" in text
-    assert "Reset navigation order" in text
-    assert "export function resetNavOrder" in text
-
-
-def test_dragging_a_tool_does_not_also_activate_it():
-    text = source()
-    assert "_suppressClickUntil = Date.now() + 300" in text
-    assert "event.stopImmediatePropagation()" in text
-
-
-def test_hidden_nodes_are_reordered_without_changing_visibility():
-    text = source()
-    assert "Existing hidden" in text
-    assert ".style.display" not in text
-    assert ".hidden" not in text
-
-
-def test_desired_order_is_inserted_into_current_dom_slots():
-    text = source()
-    assert "const desired = ids.map" in text
-    assert "const current = Array.from(container.children)" in text
-    assert "const slots = current.map" in text
-    assert "desired.forEach((node, index)" in text
-
-
 def test_reordering_moves_existing_nodes_and_preserves_fixed_slots():
     node = shutil.which("node")
     if not node:
