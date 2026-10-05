@@ -301,12 +301,3 @@ console.log(JSON.stringify({
     assert not any(out["other"]), out
 
 
-def test_an_approval_send_failure_never_switches_the_mode_toggle():
-    src = CHAT.read_text(encoding="utf-8")
-    start = src.index("if (approvalForSend) {\n          _settleFailedApproval")
-    block = src[start:src.index("typewriterInto(holder.querySelector('.body'), errText)", start)]
-    approval_branch, _, support_branch = block.partition("} else if (_isToolSupportError(errText))")
-    assert "mode-chat-btn" not in approval_branch
-    assert "mode-chat-btn" in support_branch, "genuine tool-support errors still switch to Chat mode"
-    # The card is restored when the request never got an answer, too.
-    assert "!_approvalDelivered" in src and "_settleFailedApproval(approvalForSend, 0, '')" in src

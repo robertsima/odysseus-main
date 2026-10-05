@@ -10,7 +10,8 @@ the turn ends, `clear_steer` cancels it, and the only trace is a
 `steer_dropped` SSE event that no client listened for. The pending chip sat on
 "Steering" until the next redraw removed it.
 
-Two halves, both covered here:
+Two halves; the loop half is in tests/src/agent_loop/test_steer_during_final_round.py
+and the client half in tests/static/js/chat/steer_dropped.test.mjs:
 
 * the loop extends a turn that would end with a steer still queued, so the
   message is actually read (the fork behaviour from `982e60eb`, lost in the
@@ -20,13 +21,10 @@ Two halves, both covered here:
 """
 
 import os
-import re
 
 import pytest
 
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
-
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 @pytest.fixture(autouse=True)
@@ -84,41 +82,7 @@ class TestDroppedSteerIsRecoverable:
 # ── the loop extends rather than dropping in the first place ───────────────
 
 class TestTurnExtendsForAPendingSteer:
-    """The round loop is a single 3000-line generator that needs a live model
-    endpoint to run, so these assert on the source of the decision site. The
-    behaviour they protect is a `continue` that must sit between the last
-    guard and the turn-ending `break`."""
-
-    @staticmethod
-    def _loop_source():
-        with open(os.path.join(REPO_ROOT, "src", "agent_loop.py"), encoding="utf-8") as fh:
-            return fh.read()
-
-    def test_the_turn_ending_break_is_guarded_by_a_pending_steer_check(self):
-        src = self._loop_source()
-        idx = src.index("break  # no tools — done")
-        window = src[idx - 900:idx]
-        assert "pending_steer" in window, (
-            "the turn-ending break must first check for a steer that landed "
-            "during this round, or the message is cancelled unread"
-        )
-        assert "continue" in window
-
-    def test_the_extension_is_bounded(self):
-        src = self._loop_source()
-        assert "_MAX_STEER_EXTENSIONS" in src
-        assert re.search(r"_steer_extensions\s*<\s*_MAX_STEER_EXTENSIONS", src), (
-            "an unbounded extension lets a client steering in a loop pin a run open"
-        )
-        assert re.search(r"_steer_extensions\s*=\s*0", src), "counter must reset per turn"
-
-    def test_the_loop_reads_the_run_scoped_queue(self):
-        """`pending_steer` without a run_id aggregates across the session, so a
-        sibling run's queue would extend the wrong turn forever."""
-        src = self._loop_source()
-        idx = src.index("break  # no tools — done")
-        window = src[idx - 900:idx]
-        assert "run_id=steer_run_id" in window
+    """The loop side is tests/src/agent_loop/test_steer_during_final_round.py."""
 
     def test_pending_steer_is_run_scoped_and_empties_on_drain(self):
         """What the extension relies on: each extra round drains the whole
@@ -131,34 +95,3 @@ class TestTurnExtendsForAPendingSteer:
 
         agent_control.drain_steer_records("s", run_id="r1")
         assert agent_control.pending_steer("s", run_id="r1") == []
-
-
-# ── the client must actually listen ────────────────────────────────────────
-
-class TestClientHandlesTheDrop:
-    @staticmethod
-    def _chat_js():
-        with open(os.path.join(REPO_ROOT, "static", "js", "chat.js"), encoding="utf-8") as fh:
-            return fh.read()
-
-    def test_steer_dropped_is_handled(self):
-        """It was emitted by the server and listened for by nobody, which is
-        why the message disappeared without a word."""
-        src = self._chat_js()
-        assert "_handleSteerDropped" in src
-        assert src.count("json.type === 'steer_dropped'") >= 2, (
-            "both the live reader and the resume/replay reader must settle it"
-        )
-
-    def test_the_dropped_text_goes_back_to_the_user(self):
-        src = self._chat_js()
-        start = src.index("function _handleSteerDropped")
-        body = src[start:start + 4000]
-        assert "uiModule.el('message')" in body, "the text must return to the composer"
-        assert "showError" in body, "and the user must be told it was not read"
-
-    def test_a_peer_agent_message_is_not_pushed_into_the_composer(self):
-        src = self._chat_js()
-        start = src.index("function _handleSteerDropped")
-        body = src[start:start + 4000]
-        assert "'peer'" in body
