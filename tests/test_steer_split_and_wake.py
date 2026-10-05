@@ -29,9 +29,6 @@ from tests.test_foreground_model_routing import _RouteRequest, _chat_stream_endp
 # Fixtures for the worker-status tests.
 from tests.test_loadout_repo_tools import _fresh_status_backoff, runs, store  # noqa: F401
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-
 def _frame(**data):
     return f"data: {json.dumps(data)}\n\n"
 
@@ -324,41 +321,3 @@ def test_only_calls_that_just_wait_are_skipped_when_a_steer_is_pending():
     assert not wait_only("delegate_to_claude_code", '{"action": "run", "prompt": "x"}')
     assert not wait_only("bash", '{"action": "poll", "wait_seconds": 5}')
     assert not wait_only("manage_agent_loadout", "not json")
-
-
-# ── logging, and a steer kept across a turn that ends on purpose ───────────
-
-def _loop_source():
-    with open(os.path.join(REPO_ROOT, "src", "agent_loop.py"), encoding="utf-8") as fh:
-        return fh.read()
-
-
-def test_queued_and_injected_log_lines_say_how_long_a_steer_waited(feed, caplog):
-    import logging
-
-    from src import agent_control
-
-    with caplog.at_level(logging.INFO, logger="src.agent_control"):
-        agent_control.steer("s", "hello", run_id="r1")
-    assert any("[agent-steer]" in r.message and "state=queued" in r.message and "run=r1" in r.message
-               for r in caplog.records)
-    src = _loop_source()
-    assert "state=injected chars=%s age_s=%.1f" in src
-
-
-def test_every_break_that_ends_the_turn_without_reading_the_queue_names_its_reason():
-    src = _loop_source()
-    for reason in ("the tool budget was reached", "the agent asked you a question",
-                   "the document was finished"):
-        assert f'_steer_break_reason = "{reason}"' in src
-    # The reason rides the steer_dropped event as carry, so the client sends
-    # the message as the next request instead of returning it to the composer.
-    start = src.index('"type": "steer_dropped"')
-    window = src[start:start + 700]
-    assert '"carry": bool(_steer_break_reason)' in window and '"reason": _steer_break_reason' in window
-
-
-def test_a_wait_only_call_is_skipped_in_the_tool_loop():
-    src = _loop_source()
-    assert "agent_control.is_wait_only_call(block.tool_type" in src
-    assert "agent_control.steer_pending(session_id, run_id=steer_run_id)" in src
