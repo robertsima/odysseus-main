@@ -15,8 +15,9 @@ The pasted log of one 21-round turn showed:
 * prompt cache hits bouncing 4608 -> 14848 -> 0 -> 14848 -> 4608 -> 18944 on
   consecutive rounds of one conversation: no shard affinity.
 """
-import inspect
 import uuid
+
+import pytest
 
 from src.tool_execution import _command_preview, _failure_detail
 
@@ -94,11 +95,20 @@ def test_failure_detail_redacts_secrets_and_collapses_whitespace():
     assert "\n" not in detail
 
 
-def test_tool_executed_log_line_carries_the_failure_reason():
+@pytest.mark.asyncio
+async def test_tool_executed_log_line_carries_the_failure_reason(caplog):
+    import types
+
     import src.tool_execution as te
-    src = inspect.getsource(te)
-    assert '"Tool executed: %s -> exit_code=%s%s"' in src
-    assert 'f" error={_detail}" if _detail else ""' in src
+
+    block = types.SimpleNamespace(tool_type="no_such_tool", content="{}")
+    with caplog.at_level("INFO", logger=te.logger.name):
+        await te.execute_tool_block(block, session_id="s1", security_context=te.NO_TOOL_SECURITY_CONTEXT)
+
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Tool executed:")]
+    assert len(lines) == 1
+    assert "exit_code=1" in lines[0]
+    assert "error=Unknown tool: no_such_tool" in lines[0]
 
 
 # ── native-call conversion logging ──
@@ -159,7 +169,51 @@ def test_affinity_headers_do_not_overwrite_caller_headers(monkeypatch):
     assert "conversation_id" in h
 
 
-def test_streaming_codex_requests_send_the_affinity_headers():
+@pytest.mark.asyncio
+async def test_streaming_codex_requests_send_the_affinity_headers(monkeypatch):
+    """The Responses stream is what actually sends the headers on the wire."""
+    import json
+
     from src import llm_core
-    src = inspect.getsource(llm_core._stream_llm_inner)
-    assert "h = _chatgpt_affinity_headers(h, payload.get(\"prompt_cache_key\") or session_id)" in src
+
+    sent = []
+
+    class _Resp:
+        status_code = 200
+
+        async def aread(self):
+            return b""
+
+        async def aiter_lines(self):
+            for event in (
+                {"type": "response.output_text.delta", "delta": "hello"},
+                {"type": "response.completed", "response": {}},
+            ):
+                yield f"data: {json.dumps(event)}"
+
+    class _Stream:
+        async def __aenter__(self):
+            return _Resp()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _Client:
+        def stream(self, method, url, **kwargs):
+            sent.append(dict(kwargs["headers"]))
+            return _Stream()
+
+    monkeypatch.setattr(llm_core, "_get_http_client", lambda: _Client())
+    monkeypatch.setattr(llm_core, "_is_host_dead", lambda url: False)
+    monkeypatch.setattr(llm_core, "_clear_host_dead", lambda url: None)
+    monkeypatch.setattr(llm_core, "note_model_activity", lambda *a, **k: None)
+    monkeypatch.setattr(llm_core, "_responses_prompt_cache_key_enabled", lambda: True)
+
+    chunks = [c async for c in llm_core.stream_llm(
+        "https://chatgpt.com/backend-api/codex", "gpt-5.6-sol",
+        [{"role": "user", "content": "hi"}], session_id="session-abc")]
+
+    assert "hello" in "".join(chunks)
+    assert sent, "the request never reached the client"
+    assert sent[0]["session_id"] == sent[0]["conversation_id"]
+    assert str(uuid.UUID(sent[0]["session_id"])) == sent[0]["session_id"]

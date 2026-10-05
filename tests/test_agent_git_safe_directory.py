@@ -36,10 +36,22 @@ def test_a_garbage_count_does_not_take_the_shell_tool_down():
     assert env["GIT_CONFIG_COUNT"] == "2"
 
 
-def test_the_shell_tool_environment_carries_it(monkeypatch):
-    """_direct_fallback builds the env inline; pin that it goes through the
-    helper by checking the source, since running the fallback needs a tool."""
-    import inspect
+@pytest.mark.asyncio
+async def test_the_shell_tool_environment_carries_it(monkeypatch):
+    """What a tool handler gets as its subprocess env must hold the exception."""
+    from src.agent_tools import TOOL_HANDLERS
 
-    source = inspect.getsource(tool_execution._direct_fallback)
-    assert "_git_safe_directory_env(_subproc_env)" in source
+    seen = {}
+
+    async def handler(content, ctx):
+        seen.update(ctx["subproc_env"])
+        return {"exit_code": 0}
+
+    monkeypatch.setitem(TOOL_HANDLERS, "probe_tool", handler)
+    monkeypatch.delenv("GIT_CONFIG_COUNT", raising=False)
+
+    await tool_execution._direct_fallback("probe_tool", "{}")
+
+    root = tool_execution._AGENT_WORKDIR.rstrip("/\\")
+    assert seen["GIT_CONFIG_COUNT"] == "2"
+    assert {seen["GIT_CONFIG_VALUE_0"], seen["GIT_CONFIG_VALUE_1"]} == {root, f"{root}/*"}
