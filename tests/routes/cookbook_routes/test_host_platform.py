@@ -33,6 +33,11 @@ def _state(api):
 
 def test_a_windows_backend_reports_windows_as_the_host_platform(api, monkeypatch):
     _host_is_windows(monkeypatch, True)
+    # GET answers from a 1.5 s cache keyed on the state file's mtime; another
+    # test's GET in the same process may still be cached. Saving a state
+    # changes the mtime, so the GET below is computed fresh.
+    saved = api.as_admin().post("/api/cookbook/state", json={"env": {}, "tasks": []})
+    assert saved.status_code == 200, saved.text
     assert _state(api)["env"]["hostPlatform"] == "windows"
 
 
