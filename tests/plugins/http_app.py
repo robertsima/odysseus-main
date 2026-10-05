@@ -319,6 +319,14 @@ class HttpApp:
 def api(monkeypatch, _odysseus_test_data_dir):
     """The real app over HTTP with users ``admin`` (admin), ``alice`` and ``bob``."""
     data_dir, template = _odysseus_test_data_dir
+    # The folder lives for the whole process, so empty it: memory.json and the
+    # like would otherwise carry one test's rows into the next (a memory added
+    # as a duplicate answered 200 before the owner check, nightly seed 657424944).
+    for leftover in Path(data_dir).iterdir():
+        if leftover.is_dir():
+            shutil.rmtree(leftover, ignore_errors=True)
+        else:
+            leftover.unlink(missing_ok=True)
     _install_guard()
     _set_app_env(monkeypatch, data_dir)
     _repoint_data_paths(monkeypatch, data_dir)
