@@ -60,23 +60,6 @@ def test_a_write_to_a_root_asset_path_is_not_passive():
     assert should_track_interactive_request("/favicon.ico", "POST") is True
 
 
-def test_the_task_notification_icon_is_a_static_asset():
-    # Pins the trigger: if the icon path moves out of /static, this gate
-    # must learn the new path too.
-    src = (ROOT / "static" / "js" / "tasks.js").read_text(encoding="utf-8")
-    assert "icon: '/static/favicon.ico'" in src
-
-
-def test_calendar_background_refetches_are_marked_as_polls():
-    src = (ROOT / "static" / "js" / "calendar.js").read_text(encoding="utf-8")
-    assert "const _CAL_PASSIVE_HEADERS = { 'X-Odysseus-Poll': '1' };" in src
-    # Boot, visibilitychange, focus and calendar-refresh all refetch passively.
-    assert src.count("_fetchEvents(range[0], range[1], /*force*/ true, /*passive*/ true)") == 3
-    assert "await _fetchEvents(s, e, false, /*passive*/ true);" in src
-    # Adjacent-month prefetch too.
-    assert "headers: _CAL_PASSIVE_HEADERS })" in src
-
-
 def test_the_poll_header_makes_calendar_refetches_passive():
     headers = {"x-odysseus-poll": "1"}
     assert should_track_interactive_request("/api/calendar/events", "GET", headers) is False

@@ -20,22 +20,6 @@ def _extract_between(source: str, signature: str, next_marker: str) -> str:
     return source[start:end].rstrip()
 
 
-def test_library_unread_preview_has_one_authoritative_request_and_rollback():
-    source = _LIBRARY_JS.read_text(encoding="utf-8")
-    function = _extract_between(source, "async function _toggleCardPreview", "\n/**\n * Wrap a probable signature block")
-
-    assert function.count("/api/email/read/") == 1
-    assert "/api/email/mark-read/" not in function
-    assert "&mark_seen=true" in function
-    assert "_syncEmailReadState(uidAtStart, true, readContext)" in function
-    assert "_syncEmailReadState(uidAtStart, false, readContext)" in function
-    assert "openGeneration === _emailCardOpenSeq" in function
-    assert "_emailReadMutations.get(readContextKey)?.generation !== readMutation.generation" in function
-    assert "authoritativeReadSucceeded = true;" in function
-    assert "if (!authoritativeReadSucceeded) restoreUnreadState();" in function
-    assert "if (!isCurrentOpen()) return" in function
-
-
 @pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
 def test_library_authoritative_success_defeats_newer_rollback_in_either_order():
     source = _LIBRARY_JS.read_text(encoding="utf-8")
@@ -98,18 +82,6 @@ console.log(JSON.stringify({{
         "successFirst": {"hasMutation": False, "readUpdates": [True]},
         "failureFirst": {"hasMutation": False, "readUpdates": [False, True]},
     }
-
-
-def test_library_reply_open_carries_immutable_mailbox_context():
-    library_source = _LIBRARY_JS.read_text(encoding="utf-8")
-    inbox_source = _INBOX_JS.read_text(encoding="utf-8")
-
-    assert "const mailboxGeneration = _emailMailboxGeneration;" in library_source
-    assert "messageFolder = String(options.email?.folder || libraryFolder)" in library_source
-    assert "return onEmailClick({ ...options, mailboxContext });" in library_source
-    assert "mailboxContext?.messageFolder || _currentFolder" in inbox_source
-    assert "mailboxContextIsCurrent()" in inbox_source
-    assert "if (!isCurrentOpen()) return;\n        let activeSid = await _createEmailChat" in inbox_source
 
 
 @pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")

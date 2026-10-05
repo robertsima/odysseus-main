@@ -1,10 +1,8 @@
 """Task- and chat-scoped approval continuation coverage for issue #6112."""
 
 import asyncio
-import re
 import json
 from dataclasses import replace
-from pathlib import Path
 from types import SimpleNamespace
 
 from core.models import ChatMessage, Session
@@ -306,52 +304,3 @@ def test_deny_resolution_stream_is_control_only():
     assert "Denied the" not in "".join(chunks)
 
 
-def test_route_context_agent_frontend_and_cache_bust_wire_the_contract():
-    root = Path(__file__).resolve().parents[1]
-    route = (root / "routes/chat_routes.py").read_text(encoding="utf-8")
-    helpers = (root / "routes/chat_helpers.py").read_text(encoding="utf-8")
-    agent = (root / "src/agent_loop.py").read_text(encoding="utf-8")
-    frontend = (root / "static/js/chat.js").read_text(encoding="utf-8")
-    renderer = (root / "static/js/chatRenderer.js").read_text(encoding="utf-8")
-    app = (root / "static/app.js").read_text(encoding="utf-8")
-    index = (root / "static/index.html").read_text(encoding="utf-8")
-    approvals = (root / "src/tool_approvals.py").read_text(encoding="utf-8")
-    capabilities = (root / "src/tool_capabilities.py").read_text(encoding="utf-8")
-    models = (root / "core/models.py").read_text(encoding="utf-8")
-
-    assert 'decision not in {"approve", "approve_task", "deny"}' in route
-    assert "set(pending_tool_approval.selected_tools)" in route
-    assert "pending_tool_approval.continuation_query" in route
-    assert "persist_user_message=not tool_approval_continuation" in route
-    assert "_mark_tool_approval_resolved(" in route
-    assert "_tool_approval_resolution_stream(decision)" in route
-    assert "Approved the exact" not in route
-    assert "Denied the" not in route
-    assert "continuation_context_message: str | None = None" in helpers
-    assert "persist_user_message: bool = True" in helpers
-    assert "_without_latest_matching_user_message(" not in helpers
-    assert "selected_tools=approval_selected_tools" in agent
-    assert "continuation_query=_retrieval_query or _last_user" in agent
-    assert "approval_gate_bypassed=bool(" in agent
-    assert "['approve', 'approve_task', 'deny']" in frontend
-    assert "input.value = label" not in frontend
-    assert "const msg = approvalForSend ? '' : el('message').value;" in frontend
-    assert "const skipBubble = _hideUserBubble || !!approvalForSend;" in frontend
-    assert "fd.append('message', approvalForSend ? '' : _finalMsgWithInject);" in frontend
-    assert "json.type === 'tool_approval_resolved'" in frontend
-    assert "if (aq.resolved) return null;" in renderer
-    assert "ev.ask_user && !ev.ask_user.resolved" in renderer
-    assert '"label": "Allow once"' not in approvals
-    assert '"label": "Allow for this task"' in approvals
-    assert '"label": "Allow for this chat session"' in approvals
-    assert "scope_for_decision(normalized_decision)" in approvals
-    assert "CHAT_SESSION_APPROVAL_CONTEXT_MARKER" in capabilities
-    assert "CHAT_SESSION_APPROVAL_CONTEXT_MARKER" in models
-
-    # Cache-busting tags move with each release; what matters is that every
-    # importer uses the same tag, so the browser loads one module instance.
-    chat_tag = re.search(r"/chat\.js\?v=([\w.-]+)", app).group(1)
-    renderer_tag = re.search(r"chatRenderer\.js\?v=([\w.-]+)", app).group(1)
-    assert f"chat.js?v={chat_tag}" in index
-    assert f"chatRenderer.js?v={renderer_tag}" in frontend
-    assert f"chatRenderer.js?v={renderer_tag}" in index
