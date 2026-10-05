@@ -2,8 +2,9 @@ import subprocess
 from pathlib import Path
 
 from core.platform_compat import find_bash
+from tests import REPO_ROOT
 
-SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "check-docker-amd-gpu.sh"
+SCRIPT = REPO_ROOT / "scripts" / "check-docker-amd-gpu.sh"
 # A bare "bash" on Windows can resolve to the WSL launcher in System32, which
 # cannot read a Windows path. find_bash picks the bash the product uses, and
 # that bash reads forward-slash paths on every platform.

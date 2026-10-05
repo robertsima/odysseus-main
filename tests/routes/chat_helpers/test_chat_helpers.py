@@ -22,6 +22,7 @@ from routes.chat_helpers import (
     PresetInfo,
     save_assistant_response,
 )
+from tests import REPO_ROOT
 
 
 class _AuthManager:
@@ -206,7 +207,7 @@ class _ManifestUploadHandler:
 
 
 def _manifest_test_dir(name):
-    root = Path(__file__).resolve().parents[1] / "tmp_pytest_probe" / f"{name}-{uuid.uuid4().hex}"
+    root = REPO_ROOT / "tmp_pytest_probe" / f"{name}-{uuid.uuid4().hex}"
     root.mkdir(parents=True, exist_ok=False)
     return root
 

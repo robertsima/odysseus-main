@@ -12,8 +12,9 @@ import textwrap
 from pathlib import Path
 
 import pytest
+from tests import REPO_ROOT
 
-_REPO = Path(__file__).resolve().parent.parent
+_REPO = REPO_ROOT
 pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="node binary not on PATH")
 
 _PRELUDE = """

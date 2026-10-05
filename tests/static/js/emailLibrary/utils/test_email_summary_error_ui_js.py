@@ -5,9 +5,10 @@ from pathlib import Path
 import pytest
 
 from tests.helpers.node import module_url, run_module
+from tests import REPO_ROOT
 
 
-_REPO = Path(__file__).resolve().parent.parent
+_REPO = REPO_ROOT
 _UTILS = module_url(_REPO / "static" / "js" / "emailLibrary" / "utils.js")
 _HAS_NODE = shutil.which("node") is not None
 

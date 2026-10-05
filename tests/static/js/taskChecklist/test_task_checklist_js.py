@@ -12,8 +12,9 @@ from pathlib import Path
 import pytest
 
 from src import task_checklist
+from tests import REPO_ROOT
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = REPO_ROOT
 MODULE = ROOT / "static" / "js" / "taskChecklist.js"
 
 PLAN = (

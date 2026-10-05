@@ -17,8 +17,9 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests import REPO_ROOT
 
-_REPO = Path(__file__).resolve().parent.parent
+_REPO = REPO_ROOT
 _HELPER = _REPO / "static" / "js" / "composerArrowUpRecall.js"
 _HELPER_URL = _HELPER.as_uri()
 _HAS_NODE = shutil.which("node") is not None

@@ -21,8 +21,9 @@ import types
 from pathlib import Path
 
 import pytest
+from tests import REPO_ROOT
 
-_SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "mlx_image_server.py"
+_SCRIPT = REPO_ROOT / "scripts" / "mlx_image_server.py"
 
 _BASE_URL = "http://127.0.0.1"
 

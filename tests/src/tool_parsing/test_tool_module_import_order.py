@@ -19,10 +19,11 @@ import sys
 from pathlib import Path
 
 import pytest
+from tests import REPO_ROOT
 
 pytestmark = pytest.mark.area_unit
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = REPO_ROOT
 
 # Every module that participates in the tool-pipeline import cluster, plus the
 # entry points that reach it from outside.

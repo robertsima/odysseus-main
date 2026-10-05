@@ -9,8 +9,9 @@ startup. This guards that the pin stays in place.
 """
 import re
 from pathlib import Path
+from tests import REPO_ROOT
 
-COMPOSE = Path(__file__).resolve().parent.parent / "docker-compose.yml"
+COMPOSE = REPO_ROOT / "docker-compose.yml"
 
 
 def test_searxng_image_is_pinned_not_latest():

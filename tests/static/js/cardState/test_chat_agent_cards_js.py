@@ -16,8 +16,9 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests import REPO_ROOT
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = REPO_ROOT
 JS = ROOT / "static" / "js"
 CARD_STATE = (JS / "cardState.js").read_text(encoding="utf-8")
 AGENT_THREAD = (JS / "agentThread.js").read_text(encoding="utf-8")

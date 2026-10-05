@@ -9,8 +9,9 @@ import re
 from pathlib import Path
 
 import yaml
+from tests import REPO_ROOT
 
-_WORKFLOW = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "ci.yml"
+_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
 
 def _workflow() -> dict:

@@ -1,7 +1,8 @@
 from pathlib import Path
+from tests import REPO_ROOT
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = REPO_ROOT
 
 
 def test_windows_update_script_uses_safe_docker_update_flow():

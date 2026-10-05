@@ -17,8 +17,9 @@ import subprocess
 import pytest
 
 from routes.cookbook_helpers import OLLAMA_MISSING_HINT, _bash_squote
+from tests import REPO_ROOT
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = str(REPO_ROOT)
 
 
 def test_hint_has_no_shell_expansion_tokens():

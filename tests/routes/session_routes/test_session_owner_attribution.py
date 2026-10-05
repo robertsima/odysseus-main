@@ -18,7 +18,6 @@ import pytest
 
 from tests.helpers.import_state import clear_module, preserve_import_state
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Stub heavy ORM modules so routes.session_routes can be imported under
 # conftest's MagicMock sqlalchemy shim. preserve_import_state restores both the

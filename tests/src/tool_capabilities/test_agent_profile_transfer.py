@@ -17,8 +17,9 @@ from fastapi.testclient import TestClient
 from src import agent_loadouts, agent_profile_transfer, agent_profiles
 from src.agent_tools import loadout_tools
 from src.agent_tools.loadout_tools import manage_agent_loadout
+from tests import REPO_ROOT
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = REPO_ROOT
 
 
 def _profile(name, **fields):

@@ -1,9 +1,10 @@
 """Regression coverage for the built-in MCP servers' SDK compatibility line."""
 
 from pathlib import Path
+from tests import REPO_ROOT
 
 
-REQUIREMENTS = Path(__file__).resolve().parents[1] / "requirements.txt"
+REQUIREMENTS = REPO_ROOT / "requirements.txt"
 
 
 def test_mcp_requirement_excludes_breaking_v2_sdk():

@@ -17,8 +17,9 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests import REPO_ROOT
 
-_REPO = Path(__file__).resolve().parent.parent
+_REPO = REPO_ROOT
 _ADMIN_JS = _REPO / "static" / "js" / "admin.js"
 _INDEX_HTML = _REPO / "static" / "index.html"
 _HAS_NODE = shutil.which("node") is not None

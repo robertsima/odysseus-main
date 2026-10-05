@@ -13,8 +13,9 @@ import importlib.util
 from pathlib import Path
 
 import pytest
+from tests import REPO_ROOT
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = REPO_ROOT
 
 # const name -> (env var, default bytes)
 _LIMITS = {

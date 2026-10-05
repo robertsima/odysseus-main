@@ -4,9 +4,10 @@ import shutil
 import subprocess
 
 import pytest
+from tests import REPO_ROOT
 
 
-_REPO = Path(__file__).resolve().parents[1]
+_REPO = REPO_ROOT
 _EMAIL_LIBRARY = _REPO / "static" / "js" / "emailLibrary.js"
 
 

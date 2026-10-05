@@ -7,10 +7,11 @@ import shutil
 import subprocess
 
 import pytest
+from tests import REPO_ROOT
 
 
 _SOURCE = (
-    Path(__file__).resolve().parents[1] / "static" / "js" / "chatRenderer.js"
+    REPO_ROOT / "static" / "js" / "chatRenderer.js"
 ).read_text(encoding="utf-8")
 _HAS_NODE = shutil.which("node") is not None
 

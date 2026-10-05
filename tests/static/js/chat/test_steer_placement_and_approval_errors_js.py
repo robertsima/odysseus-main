@@ -16,8 +16,9 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests import REPO_ROOT
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = REPO_ROOT
 CHAT = ROOT / "static" / "js" / "chat.js"
 pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="node binary not on PATH")
 

@@ -6,9 +6,10 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests import REPO_ROOT
 
 
-_REPO = Path(__file__).resolve().parents[1]
+_REPO = REPO_ROOT
 _MODULE = (_REPO / "static" / "js" / "chatStreamErrors.js").as_uri()
 
 

@@ -15,14 +15,13 @@ import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from tests import REPO_ROOT
 
 _TMP = Path(tempfile.mkdtemp(prefix="odysseus-imap-leak-fixes-"))
 os.environ.setdefault("DATA_DIR", str(_TMP))
 os.environ.setdefault("DATABASE_URL", f"sqlite:///{_TMP / 'app.db'}")
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+PROJECT_ROOT = REPO_ROOT
 
 
 def _make_failing_conn(captured, *, raises_on="select"):

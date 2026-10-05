@@ -23,6 +23,7 @@ async-shape contract for ``do_*``; it is not the ground truth.
 import inspect
 
 import src.tool_implementations as ti
+from tests import REPO_ROOT
 
 # Historical do_* tool functions.
 _EXPECTED = [
@@ -132,7 +133,7 @@ def test_every_facade_import_in_repo_resolves():
     import os
     from pathlib import Path
 
-    repo = Path(__file__).resolve().parents[1]
+    repo = REPO_ROOT
     # Walk every first-party Python dir so route-level (and any future)
     # facade consumers are covered, not just src/ and tests/. Prune
     # non-source trees (venvs, caches, data, build artifacts) in-place.

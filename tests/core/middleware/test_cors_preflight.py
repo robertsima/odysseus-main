@@ -10,7 +10,6 @@ it uses. Guard it so the bypass can't silently regress.
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.middleware import is_cors_preflight
 

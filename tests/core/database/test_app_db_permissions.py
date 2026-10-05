@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests import REPO_ROOT
 
 
 @pytest.mark.skipif(
@@ -25,7 +26,7 @@ def test_app_db_created_with_0600(tmp_path):
     """
     db_file = tmp_path / "app.db"
     env = {**os.environ, "DATABASE_URL": f"sqlite:///{db_file}"}
-    repo_root = Path(__file__).resolve().parents[1]
+    repo_root = REPO_ROOT
     # Importing core.database runs init_db() against the temp file-backed DB.
     # cwd=repo_root so `import core` resolves (the `-c` sys.path[0] is the CWD).
     subprocess.run(
@@ -106,7 +107,7 @@ def test_app_db_sidecars_relocked(tmp_path):
         s.chmod(0o644)
 
     env = {**os.environ, "DATABASE_URL": f"sqlite:///{db_file}"}
-    repo_root = Path(__file__).resolve().parents[1]
+    repo_root = REPO_ROOT
     subprocess.run(
         [sys.executable, "-c", "import core.database"],
         env=env,
@@ -179,7 +180,7 @@ def test_app_db_file_uri_created_with_0600(tmp_path):
         **os.environ,
         "DATABASE_URL": f"sqlite+pysqlite:///file:{db_file}?mode=rwc&uri=true",
     }
-    repo_root = Path(__file__).resolve().parents[1]
+    repo_root = REPO_ROOT
 
     subprocess.run(
         [sys.executable, "-c", "import core.database"],
@@ -206,7 +207,7 @@ def test_app_db_localhost_file_uri_created_with_0600(tmp_path):
             "?mode=rwc&uri=true"
         ),
     }
-    repo_root = Path(__file__).resolve().parents[1]
+    repo_root = REPO_ROOT
 
     subprocess.run(
         [sys.executable, "-c", "import core.database"],
@@ -231,7 +232,7 @@ def test_app_db_non_uri_mode_query_created_with_0600(tmp_path):
         **os.environ,
         "DATABASE_URL": f"sqlite+pysqlite:///{db_file}?mode=memory",
     }
-    repo_root = Path(__file__).resolve().parents[1]
+    repo_root = REPO_ROOT
 
     subprocess.run(
         [sys.executable, "-c", "import core.database"],
@@ -255,7 +256,7 @@ def test_app_db_plain_file_uri_created_with_0600(tmp_path):
         **os.environ,
         "DATABASE_URL": f"sqlite:///file:{db_file}?mode=rwc&uri=true",
     }
-    repo_root = Path(__file__).resolve().parents[1]
+    repo_root = REPO_ROOT
 
     subprocess.run(
         [sys.executable, "-c", "import core.database"],

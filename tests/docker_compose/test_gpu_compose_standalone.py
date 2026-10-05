@@ -14,8 +14,9 @@ from pathlib import Path
 
 import pytest
 import yaml
+from tests import REPO_ROOT
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = REPO_ROOT
 
 BASE = ROOT / "docker-compose.yml"
 NVIDIA_OVERLAY = ROOT / "docker" / "gpu.nvidia.yml"

@@ -8,15 +8,14 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from tests import REPO_ROOT
 
 
 _TMP_DATA = Path(tempfile.mkdtemp(prefix="odysseus-email-summary-"))
 os.environ.setdefault("DATA_DIR", str(_TMP_DATA))
 os.environ.setdefault("DATABASE_URL", f"sqlite:///{_TMP_DATA / 'app.db'}")
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+PROJECT_ROOT = REPO_ROOT
 
 
 def _route_endpoint(router, path: str, method: str):

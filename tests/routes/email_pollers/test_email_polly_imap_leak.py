@@ -39,6 +39,7 @@ import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
+from tests import REPO_ROOT
 
 
 # Point every data-dir-using dependency (core.database, secret_storage,
@@ -52,9 +53,7 @@ _TMP_DATA = Path(tempfile.mkdtemp(prefix="odysseus-email-polly-leak-"))
 os.environ.setdefault("DATA_DIR", str(_TMP_DATA))
 os.environ.setdefault("DATABASE_URL", f"sqlite:///{_TMP_DATA / 'app.db'}")
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+PROJECT_ROOT = REPO_ROOT
 
 
 async def test_auto_summarize_pass_logs_out_imap_on_select_failure(monkeypatch):

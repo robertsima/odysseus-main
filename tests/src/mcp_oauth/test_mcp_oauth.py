@@ -1,6 +1,7 @@
 import asyncio
 import json
 from src import mcp_oauth
+from tests import REPO_ROOT
 
 
 def test_registry_resolve_returns_code_and_state():
@@ -220,7 +221,7 @@ _COMPOSE_FILES = (
 def _repo_root():
     from pathlib import Path
 
-    return Path(__file__).resolve().parent.parent
+    return REPO_ROOT
 
 
 def test_redirect_base_override_is_forwarded_into_the_container():

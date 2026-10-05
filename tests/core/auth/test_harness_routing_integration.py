@@ -19,6 +19,7 @@ from src.tool_discovery import TurnToolDiscovery
 from src.tool_execution import execute_tool_block as dispatch_tool
 from src.tool_selection import plan_tool_selection
 from src.tool_schemas import FUNCTION_TOOL_SCHEMAS
+from tests import REPO_ROOT
 
 
 def _name(schema):
@@ -263,7 +264,7 @@ def test_concurrent_turns_do_not_share_loaded_tools():
 
 
 def test_routing_eval_fixture_is_permission_aware_and_substantial():
-    path = Path(__file__).parent / "fixtures" / "harness_routing_cases.json"
+    path = REPO_ROOT / "tests" / "fixtures" / "harness_routing_cases.json"
     cases = json.loads(path.read_text(encoding="utf-8"))["cases"]
     assert 20 <= len(cases) <= 40
     assert len({case["id"] for case in cases}) == len(cases)

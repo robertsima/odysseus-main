@@ -1,8 +1,9 @@
 import re
 from pathlib import Path
+from tests import REPO_ROOT
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = REPO_ROOT
 
 
 def _source(path):

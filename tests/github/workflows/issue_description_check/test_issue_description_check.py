@@ -7,9 +7,10 @@ from pathlib import Path
 
 import pytest
 import yaml
+from tests import REPO_ROOT
 
 
-_REPO = Path(__file__).resolve().parent.parent
+_REPO = REPO_ROOT
 _CHECKER = _REPO / ".github" / "scripts" / "check-issue-description.js"
 _BUG_TEMPLATE = _REPO / ".github" / "ISSUE_TEMPLATE" / "bug_report.yml"
 _WORKFLOW = _REPO / ".github" / "workflows" / "issue-description-check.yml"

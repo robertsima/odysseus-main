@@ -5,6 +5,7 @@ import pathlib
 import pytest
 
 import core.constants as cc
+from tests import REPO_ROOT
 
 
 def _base(monkeypatch, **env):
@@ -36,7 +37,7 @@ def test_uses_127_not_localhost(monkeypatch):
 
 def test_no_hardcoded_loopback_left_in_call_sites():
     # Regression guard: the converted files must not reintroduce the literal.
-    root = pathlib.Path(__file__).resolve().parent.parent
+    root = REPO_ROOT
     for rel in (
         "src/tools/_common.py",
         "src/cookbook_serve_lifecycle.py",

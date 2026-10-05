@@ -6,9 +6,10 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests import REPO_ROOT
 
 
-_REPO = Path(__file__).resolve().parent.parent
+_REPO = REPO_ROOT
 _CHECKER = _REPO / ".github" / "scripts" / "check-pr-description.js"
 _WORKFLOW = _REPO / ".github" / "workflows" / "pr-description-check.yml"
 pytestmark = pytest.mark.skipif(not shutil.which("node"), reason="node not on PATH")

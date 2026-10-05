@@ -1,9 +1,10 @@
 import asyncio
 import importlib.util
 from pathlib import Path
+from tests import REPO_ROOT
 
 
-_SERVICE_PATH = Path(__file__).resolve().parents[1] / "services" / "shell" / "service.py"
+_SERVICE_PATH = REPO_ROOT / "services" / "shell" / "service.py"
 _SPEC = importlib.util.spec_from_file_location("_shell_service_under_test", _SERVICE_PATH)
 shell_service = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(shell_service)

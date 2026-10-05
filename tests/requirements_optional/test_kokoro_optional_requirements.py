@@ -2,9 +2,10 @@ from pathlib import Path
 
 import pytest
 from packaging.requirements import Requirement
+from tests import REPO_ROOT
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = REPO_ROOT
 
 
 def _optional_requirement(name):

@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from tests.helpers.import_state import preserve_import_state
+from tests import REPO_ROOT
 
 # Modules a test below drops from sys.modules to import a fresh copy. Left
 # dropped, later tests get a second copy of src.secret_storage with its own key
@@ -806,7 +807,7 @@ def _load_search_content_for_test(monkeypatch, name="services.search.content_und
 
     spec = importlib.util.spec_from_file_location(
         name,
-        Path(__file__).resolve().parent.parent / "services" / "search" / "content.py",
+        REPO_ROOT / "services" / "search" / "content.py",
     )
     content = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(content)

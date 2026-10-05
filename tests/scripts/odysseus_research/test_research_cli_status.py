@@ -14,8 +14,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from tests import REPO_ROOT
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = REPO_ROOT
 
 
 def _load_cli():

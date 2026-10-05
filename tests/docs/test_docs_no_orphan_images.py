@@ -11,8 +11,9 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
+from tests import REPO_ROOT
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = REPO_ROOT
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 VIDEO_EXTS = {".webm", ".mp4", ".mov", ".m4v"}
 PUBLIC_GUIDES = {

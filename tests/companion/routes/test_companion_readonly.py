@@ -16,7 +16,6 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi import HTTPException
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # core.database instantiates SQLAlchemy declarative classes at import time, which
 # blows up under conftest's sqlalchemy MagicMock stubs. companion.routes only

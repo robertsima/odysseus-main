@@ -22,8 +22,9 @@ from tests.run_order_report import (
     run,
     shuffle_items,
 )
+from tests import REPO_ROOT
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = REPO_ROOT
 RUNNER = REPO_ROOT / "tests" / "run_order_report.py"
 
 

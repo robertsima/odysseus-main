@@ -23,8 +23,9 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from tests.helpers.import_state import clear_module, preserve_import_state
+from tests import REPO_ROOT
 
-_REPO = Path(__file__).resolve().parent.parent
+_REPO = REPO_ROOT
 
 # Stub only the ORM class modules and import the real core.session_manager so
 # the cached routes.session_routes is identical regardless of collection order.

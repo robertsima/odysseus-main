@@ -8,8 +8,9 @@ safe default for non-strings.
 import importlib.machinery
 import importlib.util
 from pathlib import Path
+from tests import REPO_ROOT
 
-_PATH = Path(__file__).resolve().parents[1] / "services" / "search" / "query.py"
+_PATH = REPO_ROOT / "services" / "search" / "query.py"
 
 
 def _load():

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from tests.helpers.cli_loader import load_script
+from tests import REPO_ROOT
 
 
 def _load_backup_cli():

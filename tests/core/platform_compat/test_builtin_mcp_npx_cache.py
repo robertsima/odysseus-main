@@ -4,9 +4,10 @@ from pathlib import Path
 import subprocess
 import sys
 import types
+from tests import REPO_ROOT
 
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = REPO_ROOT
 
 
 def _load_builtin_mcp(monkeypatch):

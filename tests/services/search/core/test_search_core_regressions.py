@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from services.search import core
+from tests import REPO_ROOT
 
 
 def _row(url, title="", snippet=""):
@@ -123,7 +124,7 @@ def test_relevance_gate_keeps_a_token_overlap(monkeypatch):
 def test_default_duckduckgo_fallback_dependency_is_in_the_core_install():
     """DuckDuckGo is in the default fallback chain, so it cannot rely on the
     optional-extras image while still being advertised on a normal install."""
-    root = Path(__file__).resolve().parents[1]
+    root = REPO_ROOT
     core_requirements = {
         line.strip() for line in (root / "requirements.txt").read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.lstrip().startswith("#")

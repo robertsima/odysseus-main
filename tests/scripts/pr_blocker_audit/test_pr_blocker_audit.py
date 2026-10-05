@@ -5,9 +5,10 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from tests import REPO_ROOT
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = REPO_ROOT
 SCRIPT_PATH = ROOT / "scripts" / "pr_blocker_audit.py"
 
 

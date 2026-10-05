@@ -17,9 +17,10 @@ import subprocess
 import pytest
 
 from src import agent_runs
+from tests import REPO_ROOT
 
 
-_REPO = Path(__file__).resolve().parents[1]
+_REPO = REPO_ROOT
 _CHAT_PATH = _REPO / "static" / "js" / "chat.js"
 _CHAT = _CHAT_PATH.read_text(encoding="utf-8")
 _HAS_NODE = shutil.which("node") is not None

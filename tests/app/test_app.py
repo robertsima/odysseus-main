@@ -4,9 +4,9 @@ Basic tests for odysseus-ui application structure
 import pytest
 import sys
 import os
+from tests import REPO_ROOT
 
 # Add the project root to the path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 class TestAppStructure:
@@ -14,27 +14,27 @@ class TestAppStructure:
 
     def test_app_file_exists(self):
         """Test that app.py exists"""
-        app_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "app.py")
+        app_path = os.path.join(str(REPO_ROOT), "app.py")
         assert os.path.exists(app_path), "app.py should exist"
 
     def test_static_directory_exists(self):
         """Test that static directory exists"""
-        static_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
+        static_path = os.path.join(str(REPO_ROOT), "static")
         assert os.path.exists(static_path), "static directory should exist"
 
     def test_routes_directory_exists(self):
         """Test that routes directory exists"""
-        routes_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "routes")
+        routes_path = os.path.join(str(REPO_ROOT), "routes")
         assert os.path.exists(routes_path), "routes directory should exist"
 
     def test_src_directory_exists(self):
         """Test that src directory exists"""
-        src_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "src")
+        src_path = os.path.join(str(REPO_ROOT), "src")
         assert os.path.exists(src_path), "src directory should exist"
 
     def test_env_file_is_optional_and_ignored(self):
         """A fresh checkout should not require a private .env file."""
-        root = os.path.dirname(os.path.dirname(__file__))
+        root = str(REPO_ROOT)
         gitignore_path = os.path.join(root, ".gitignore")
         with open(gitignore_path, encoding="utf-8") as fh:
             ignored = {line.strip() for line in fh}
@@ -42,7 +42,7 @@ class TestAppStructure:
 
     def test_env_example_exists(self):
         """Test that .env.example exists"""
-        env_example_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env.example")
+        env_example_path = os.path.join(str(REPO_ROOT), ".env.example")
         assert os.path.exists(env_example_path), ".env.example file should exist"
 
 
@@ -77,19 +77,19 @@ class TestRouteFiles:
 
     def test_auth_routes_exist(self):
         """Test auth_routes.py exists"""
-        routes_path = os.path.dirname(os.path.dirname(__file__))
+        routes_path = str(REPO_ROOT)
         auth_routes = os.path.join(routes_path, "routes", "auth_routes.py")
         assert os.path.exists(auth_routes), "auth_routes.py should exist"
 
     def test_chat_routes_exist(self):
         """Test chat_routes.py exists"""
-        routes_path = os.path.dirname(os.path.dirname(__file__))
+        routes_path = str(REPO_ROOT)
         chat_routes = os.path.join(routes_path, "routes", "chat_routes.py")
         assert os.path.exists(chat_routes), "chat_routes.py should exist"
 
     def test_memory_routes_exist(self):
         """Test memory_routes.py exists"""
-        routes_path = os.path.dirname(os.path.dirname(__file__))
+        routes_path = str(REPO_ROOT)
         mem_routes = os.path.join(routes_path, "routes", "memory_routes.py")
         assert os.path.exists(mem_routes), "memory_routes.py should exist"
 

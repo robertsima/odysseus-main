@@ -4,9 +4,10 @@ from pathlib import Path
 
 import pytest
 import yaml
+from tests import REPO_ROOT
 
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = REPO_ROOT
 COMPOSE_PATHS = tuple(
     ROOT / name
     for name in (

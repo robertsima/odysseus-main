@@ -9,8 +9,9 @@ from pathlib import Path
 
 import pytest
 import yaml
+from tests import REPO_ROOT
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = REPO_ROOT
 COMPOSE_FILES = [
     ROOT / "docker-compose.yml",
     ROOT / "docker-compose.gpu-nvidia.yml",

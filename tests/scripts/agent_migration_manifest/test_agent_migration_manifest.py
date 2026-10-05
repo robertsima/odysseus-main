@@ -4,9 +4,10 @@ import sys
 from pathlib import Path
 
 import pytest
+from tests import REPO_ROOT
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = REPO_ROOT
 SCRIPT_PATH = ROOT / "scripts" / "agent_migration_manifest.py"
 
 _NEEDS_SYMLINKS = pytest.mark.skipif(

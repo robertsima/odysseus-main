@@ -14,9 +14,10 @@ from core.middleware import (
     path_is_route_or_child,
     with_asgi_root_path,
 )
+from tests import REPO_ROOT
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = REPO_ROOT
 
 
 @pytest.mark.parametrize(

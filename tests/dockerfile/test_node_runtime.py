@@ -2,9 +2,10 @@
 
 from pathlib import Path
 import re
+from tests import REPO_ROOT
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = REPO_ROOT
 
 
 def test_docker_node_release_matches_local_and_ci_pin():

@@ -21,8 +21,9 @@ from pathlib import Path
 import pytest
 
 from src.interactive_gate import should_track_interactive_request
+from tests import REPO_ROOT
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = REPO_ROOT
 
 
 @pytest.mark.parametrize("path", [

@@ -17,9 +17,10 @@ import types
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock
+from tests import REPO_ROOT
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = REPO_ROOT
 
 
 class _Col:

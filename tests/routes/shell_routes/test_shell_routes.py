@@ -28,6 +28,7 @@ from routes.shell_routes import (
     _venv_activate_prefix,
     DOCKER_IN_CONTAINER_HINT,
 )
+from tests import REPO_ROOT
 
 
 def test_shell_routes_import_without_posix_pty_modules(monkeypatch):
@@ -42,7 +43,7 @@ def test_shell_routes_import_without_posix_pty_modules(monkeypatch):
     monkeypatch.setattr(builtins, "__import__", fake_import)
     cached_modules = {name: sys.modules.pop(name, None) for name in ("fcntl", "pty")}
 
-    module_path = Path(__file__).resolve().parents[1] / "routes" / "shell_routes.py"
+    module_path = REPO_ROOT / "routes" / "shell_routes.py"
     spec = importlib.util.spec_from_file_location(
         "_shell_routes_without_pty", module_path
     )

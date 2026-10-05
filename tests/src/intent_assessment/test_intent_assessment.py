@@ -14,12 +14,13 @@ from src.intent_assessment import (
     recent_human_context,
 )
 from src.tool_selection import plan_tool_selection
+from tests import REPO_ROOT
 
 
 _ROUTING_CASES = {
     case["id"]: case
     for case in json.loads(
-        (Path(__file__).parent / "fixtures" / "harness_routing_cases.json").read_text(encoding="utf-8")
+        (REPO_ROOT / "tests" / "fixtures" / "harness_routing_cases.json").read_text(encoding="utf-8")
     )["cases"]
 }
 _CANONICAL_TOOLS = {

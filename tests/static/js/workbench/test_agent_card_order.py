@@ -11,8 +11,9 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests import REPO_ROOT
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = REPO_ROOT
 WORKBENCH = ROOT / "static" / "js" / "workbench.js"
 
 HARNESS = r"""

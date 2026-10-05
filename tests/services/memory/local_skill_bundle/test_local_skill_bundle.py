@@ -4,6 +4,7 @@ import pytest
 
 from services.memory.local_skill_bundle import read_local_skill_bundle
 from services.memory.skill_importer import SkillImportError
+from tests import REPO_ROOT
 
 
 def test_read_one_local_skill_and_relative_resources(tmp_path):
@@ -40,7 +41,7 @@ def test_symlink_resources_are_rejected(tmp_path):
 
 def test_toolchain_lockfile_and_image_contract():
     import json
-    root = Path(__file__).resolve().parents[1]
+    root = REPO_ROOT
     package = json.loads((root / 'package.json').read_text())
     lock = json.loads((root / 'package-lock.json').read_text())
     for name in ('@promptscript/cli', 'skills'):

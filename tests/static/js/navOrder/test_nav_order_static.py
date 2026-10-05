@@ -4,9 +4,10 @@ import shutil
 import subprocess
 
 import pytest
+from tests import REPO_ROOT
 
 
-NAV = Path(__file__).parents[1] / "static" / "js" / "navOrder.js"
+NAV = REPO_ROOT / "static" / "js" / "navOrder.js"
 
 
 def test_reordering_moves_existing_nodes_and_preserves_fixed_slots():

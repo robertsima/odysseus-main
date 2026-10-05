@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from services.memory.skill_format import Skill
 from services.memory.skills import SkillsManager
 from src import builtin_skills
+from tests import REPO_ROOT
 
 
 def _skill_md(name: str, body: str = "Body.", extra_fm: str = "") -> str:
@@ -234,7 +235,7 @@ def test_nested_metadata_block_is_read():
     top = Skill.from_markdown(text.replace("description: d\n", "description: d\nstatus: draft\n", 1))
     assert top.status == "draft"
     # The real harness skill keeps its metadata nested.
-    path = Path(__file__).resolve().parents[1] / "skills" / "general" / "harness-context-and-tool-routing" / "SKILL.md"
+    path = REPO_ROOT / "skills" / "general" / "harness-context-and-tool-routing" / "SKILL.md"
     harness = Skill.from_markdown(path.read_text(encoding="utf-8"))
     assert (harness.status, harness.category) == ("published", "general")
 
@@ -324,7 +325,7 @@ _PACKAGE_SKILLS = {
 def test_manifests_ship_their_skills_and_the_seeder_finds_them():
     from src import builtin_skills, integration_registry
 
-    root = Path(__file__).resolve().parents[1]
+    root = REPO_ROOT
     builtin_skills._integration_skill_dirs.clear()
     try:
         for integration in integration_registry.all():
@@ -343,7 +344,7 @@ def test_manifests_ship_their_skills_and_the_seeder_finds_them():
 
 
 def test_harness_skill_no_longer_names_todoist_or_lotus():
-    path = Path(__file__).resolve().parents[1] / "skills" / "general" / "harness-context-and-tool-routing" / "SKILL.md"
+    path = REPO_ROOT / "skills" / "general" / "harness-context-and-tool-routing" / "SKILL.md"
     text = path.read_text(encoding="utf-8")
     assert "Todoist" not in text and "Lotus" not in text
     from src import integration_registry

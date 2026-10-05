@@ -17,7 +17,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Capture what mint_token would persist, via a stubbed core.database.
 _CAPTURED = {}

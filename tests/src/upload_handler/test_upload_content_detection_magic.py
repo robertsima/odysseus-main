@@ -15,6 +15,7 @@ import os
 import pytest
 
 from src.upload_handler import UploadHandler
+from tests import REPO_ROOT
 
 # 1x1 PNG (header is enough for libmagic to report image/png).
 _PNG = (
@@ -23,7 +24,7 @@ _PNG = (
     b"\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
 )
 
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_REPO_ROOT = str(REPO_ROOT)
 
 
 def test_dockerfile_installs_libmagic_and_python_magic():

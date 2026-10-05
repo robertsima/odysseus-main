@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from src import constants, shell_sandbox as sb, toolchains as tc
+from tests import REPO_ROOT
 
 
 @pytest.fixture(autouse=True)
@@ -267,7 +268,7 @@ def test_real_sandbox_keeps_the_cache_and_finds_the_toolchain(tmp_path, monkeypa
 # ── the image ───────────────────────────────────────────────────────────────
 
 def test_the_image_carries_pinned_toolchains():
-    dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile").read_text(encoding="utf-8")
+    dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
     for stage in ("FROM node:24.", "FROM eclipse-temurin:21.", "FROM maven:3.9."):
         line = next(ln for ln in dockerfile.splitlines() if ln.startswith(stage))
         assert "latest" not in line and ":" in line.split()[1]

@@ -4,6 +4,7 @@ from pathlib import Path
 from services.memory.skills import SkillsManager
 from services.memory.skill_format import Skill
 from src import builtin_skills
+from tests import REPO_ROOT
 
 
 def _write_catalog(root: Path, *extra: dict) -> None:
@@ -112,7 +113,7 @@ _COMMUNITY_SKILLS = {k: v for k, v in _CURATED_SKILLS.items() if k != "learning-
 
 
 def test_catalog_tiers_match_the_owner_decision():
-    app_root = Path(__file__).resolve().parents[1]
+    app_root = REPO_ROOT
     catalog = {e["name"]: e for e in builtin_skills.load_catalog(str(app_root))}
     assert {n for n, e in catalog.items() if e["tier"] == "core"} == _CORE_SKILLS
     assert {n for n, e in catalog.items() if e["tier"] == "curated"} == set(_CURATED_SKILLS)
@@ -121,14 +122,14 @@ def test_catalog_tiers_match_the_owner_decision():
 
 
 def test_every_catalog_skill_has_a_source_directory():
-    app_root = Path(__file__).resolve().parents[1]
+    app_root = REPO_ROOT
     for entry in builtin_skills.load_catalog(str(app_root)):
         source = builtin_skills._bundled_source(str(app_root), entry["category"], entry["name"])
         assert (Path(source) / "SKILL.md").is_file(), f"{entry['name']} has no SKILL.md"
 
 
 def test_community_skills_parse_and_are_in_the_curated_catalog():
-    app_root = Path(__file__).resolve().parents[1]
+    app_root = REPO_ROOT
     catalog = {e["name"]: e for e in builtin_skills.load_catalog(str(app_root))}
     for name, category in _COMMUNITY_SKILLS.items():
         assert catalog[name]["tier"] == "curated" and catalog[name]["category"] == category
@@ -145,7 +146,7 @@ def test_community_skills_parse_and_are_in_the_curated_catalog():
 
 
 def test_community_skills_are_listed_in_acknowledgments():
-    app_root = Path(__file__).resolve().parents[1]
+    app_root = REPO_ROOT
     text = (app_root / "ACKNOWLEDGMENTS.md").read_text(encoding="utf-8")
     assert "## Agent skills" in text
     for name in _COMMUNITY_SKILLS:
@@ -266,7 +267,7 @@ def test_crlf_and_reserialised_installs_are_not_false_edits(monkeypatch, tmp_pat
 
 
 def test_every_shipped_skill_current_body_is_in_history():
-    app_root = Path(__file__).resolve().parents[1]
+    app_root = REPO_ROOT
     history = builtin_skills.load_bundled_history(str(app_root))
     shipped = [(e["name"], builtin_skills.shipped_source_dir(e["name"], str(app_root)))
                for e in builtin_skills.load_catalog(str(app_root))]

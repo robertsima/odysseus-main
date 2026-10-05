@@ -13,8 +13,9 @@ from mcp.client.stdio import stdio_client
 from src.builtin_mcp import _BUILTIN_SERVERS
 from src.lotus_checkins import LotusCheckinStore, owner_storage_key
 from src.mcp_manager import _BUILTIN_FUNCTION_CALLING_SERVERS, McpManager
+from tests import REPO_ROOT
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = REPO_ROOT
 COMPOSE_FILES = (
     ROOT / "docker-compose.yml",
     ROOT / "docker-compose.gpu-nvidia.yml",

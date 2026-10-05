@@ -20,8 +20,9 @@ import importlib.util
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from tests import REPO_ROOT
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = REPO_ROOT
 
 
 def _load_cli():

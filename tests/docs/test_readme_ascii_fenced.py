@@ -8,8 +8,9 @@ now pins the wordmark identity instead, while still catching the original failur
 mode if an un-fenced ASCII banner is ever reintroduced.
 """
 from pathlib import Path
+from tests import REPO_ROOT
 
-README = Path(__file__).resolve().parent.parent / "README.md"
+README = REPO_ROOT / "README.md"
 
 # Box-drawing rule from the legacy ASCII banner (the #1390 failure mode).
 _RULE = "─" * 10

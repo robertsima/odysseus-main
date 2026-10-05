@@ -14,8 +14,9 @@ from pathlib import Path
 import pytest
 
 from tests.helpers.node import module_url, run_module
+from tests import REPO_ROOT
 
-_REPO = Path(__file__).resolve().parent.parent
+_REPO = REPO_ROOT
 _MOD = _REPO / "static" / "js" / "editor" / "canvas-coords.js"
 _HAS_NODE = shutil.which("node") is not None
 
