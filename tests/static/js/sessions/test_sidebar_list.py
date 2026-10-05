@@ -50,15 +50,15 @@ def record_session_requests(page, static_app):
 def test_deleting_a_chat_from_the_list_removes_it_for_good_and_from_the_saved_order(new_page, static_app):
     sessions = [BASE, dict(BASE, id=SECOND, name="Second chat")]
     page = open_sidebar(new_page, static_app, sessions, seed_order=[SESSION_ID, SECOND])
-    requests = record_session_requests(page, static_app)
     page.route(f"**/api/session/{SECOND}", lambda route: route.fulfill(json={"ok": True}))
     item = page.locator(f'#sidebar .session-item[data-session-id="{SECOND}"]')
     item.hover()
     item.locator(".session-menu-btn").click()
     page.locator(".dropdown:visible .dropdown-item-compact", has_text="Delete").click()
-    page.get_by_role("button", name="Delete", exact=True).click()
+    # The row leaves the list before the request goes out, so wait for the request.
+    with page.expect_request(lambda r: r.method == "DELETE" and r.url.endswith(f"/api/session/{SECOND}")):
+        page.get_by_role("button", name="Delete", exact=True).click()
     expect(page.locator(f'#sidebar .session-item[data-session-id="{SECOND}"]')).to_have_count(0)
-    assert ("DELETE", f"/api/session/{SECOND}") in requests, requests
     assert page.evaluate("JSON.parse(localStorage.getItem('session-order'))") == [SESSION_ID]
 
 
@@ -74,8 +74,8 @@ def test_the_rails_delete_button_deletes_the_open_chat_instead_of_archiving_it(n
 
     page.route(f"**/api/session/{SESSION_ID}", delete)
     page.evaluate("document.getElementById('rail-delete-session').click()")
-    page.get_by_role("button", name="Delete", exact=True).click()
+    with page.expect_request(lambda r: r.method == "DELETE" and r.url.endswith(f"/api/session/{SESSION_ID}")):
+        page.get_by_role("button", name="Delete", exact=True).click()
     expect(page.locator("#sidebar .session-item")).to_have_count(1)
     assert listed(page) == [SECOND]
-    assert ("DELETE", f"/api/session/{SESSION_ID}") in requests, requests
     assert not [path for _, path in requests if path.endswith("/archive")], requests
