@@ -1,6 +1,9 @@
 
 from src import ai_interaction
 from src import document_processor as dp
+import pytest
+
+pytestmark = pytest.mark.security
 
 
 

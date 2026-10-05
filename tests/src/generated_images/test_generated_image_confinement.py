@@ -3,6 +3,8 @@ import os
 import pytest
 from fastapi import HTTPException
 
+pytestmark = pytest.mark.security
+
 
 def _generated_images_module():
     from src import generated_images

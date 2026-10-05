@@ -5,6 +5,8 @@ import pytest
 from src import research_handler
 from src.research_handler import ResearchHandler
 
+pytestmark = pytest.mark.security
+
 
 def _handler():
     handler = ResearchHandler.__new__(ResearchHandler)

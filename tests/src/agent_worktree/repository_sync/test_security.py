@@ -10,6 +10,8 @@ from dulwich import porcelain
 
 from src.agent_worktree import repository_sync as rs
 
+pytestmark = pytest.mark.security
+
 
 def _make_repo(path: Path, remote: str = "https://github.com/acme/example.git") -> Path:
     path.mkdir(parents=True)

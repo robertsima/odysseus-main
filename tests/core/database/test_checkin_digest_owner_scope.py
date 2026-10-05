@@ -13,6 +13,8 @@ import pytest
 from core.database import CalendarEvent, CalendarCal
 from src.task_scheduler import _checkin_calendar_events
 
+pytestmark = pytest.mark.security
+
 
 def _seed(app_db):
     db = app_db.SessionLocal()

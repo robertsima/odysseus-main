@@ -7,6 +7,8 @@ import pytest
 
 from routes import personal_routes
 
+pytestmark = pytest.mark.security
+
 _NEEDS_SYMLINKS = pytest.mark.skipif(
     sys.platform == "win32",
     reason="Creating a symlink on Windows needs a privilege test runners usually lack (WinError 1314).",

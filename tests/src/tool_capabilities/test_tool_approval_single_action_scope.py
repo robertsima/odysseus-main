@@ -8,6 +8,9 @@ it silently inherits a run-long gate bypass.
 from src.tool_approval_scopes import ToolApprovalScope
 from src.tool_approvals import ToolApprovalStore
 from src.tool_capabilities import ToolRunSecurityContext, capabilities_for_action
+import pytest
+
+pytestmark = pytest.mark.security
 
 
 def _pending(store: ToolApprovalStore, *, session_id=""):

@@ -28,6 +28,8 @@ from src.task_scheduler import (
 )
 from src.tool_index import ASSISTANT_ALWAYS_AVAILABLE
 
+pytestmark = pytest.mark.security
+
 TODOIST_PROMPT = (
     "Review only the current Todoist Inbox using the official Todoist integration. "
     "Reprioritize clear mismatches using the user's Eisenhower convention: P1 = urgent "

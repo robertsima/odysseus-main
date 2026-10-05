@@ -35,6 +35,8 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi import HTTPException
 
+pytestmark = pytest.mark.security
+
 
 def _route(router, name):
     for r in router.routes:

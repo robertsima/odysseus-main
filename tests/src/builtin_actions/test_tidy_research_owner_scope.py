@@ -17,6 +17,8 @@ import pytest
 
 from src.builtin_actions import TaskNoop, action_tidy_research
 
+pytestmark = pytest.mark.security
+
 
 @pytest.fixture
 def research_dir(tmp_path, monkeypatch):

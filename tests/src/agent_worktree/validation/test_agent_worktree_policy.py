@@ -21,7 +21,7 @@ from src.agent_worktree.validation import (
     validate_agent_branch,
 )
 
-pytestmark = pytest.mark.area_security
+pytestmark = pytest.mark.security
 
 
 _PUBLISH_ENV = (

@@ -7,6 +7,8 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi import HTTPException
 
+pytestmark = pytest.mark.security
+
 
 @pytest.fixture(autouse=True)
 def _string_password_hashes(monkeypatch):

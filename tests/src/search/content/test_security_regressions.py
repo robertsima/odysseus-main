@@ -22,6 +22,8 @@ import pytest
 from tests.helpers.import_state import preserve_import_state
 from tests import REPO_ROOT
 
+pytestmark = pytest.mark.security
+
 # Modules a test below drops from sys.modules to import a fresh copy. Left
 # dropped, later tests get a second copy of src.secret_storage with its own key
 # while modules imported earlier keep the first, so a value one encrypts the

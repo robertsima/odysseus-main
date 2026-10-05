@@ -70,40 +70,6 @@ if "src.database" not in sys.modules:
 # collection, which breaks session import in subsequent tests).
 import core.models  # noqa: E402
 
-def pytest_configure(config):
-    """Register the dynamic taxonomy ``sub_*`` markers before collection.
-
-    The stable ``area_*`` markers are declared in ``pyproject.toml``. The
-    per-file ``sub_*`` markers are derived from the test filenames here so that
-    unknown-mark warnings still surface genuine typos outside the taxonomy. This
-    only registers marker names; it imports no production module.
-    """
-    import pathlib
-    from tests._taxonomy import discover_markers
-
-    tests_dir = pathlib.Path(__file__).parent
-    paths = list(tests_dir.rglob("test_*.py")) + list(tests_dir.rglob("*_test.py"))
-    for marker_name in discover_markers(paths):
-        if marker_name.startswith("sub_"):
-            config.addinivalue_line("markers", f"{marker_name}: taxonomy sub-area marker")
-
-
-def pytest_collection_modifyitems(config, items):
-    """Tag each collected test with its taxonomy ``area_*`` and ``sub_*`` markers.
-
-    Collection-time only: this adds markers and nothing else. It does not skip,
-    reorder, or deselect tests, mutate fixtures or the environment, or import any
-    production module. See ``tests/_taxonomy.py`` for the classification rules.
-    """
-    import pytest
-    from tests._taxonomy import markers_for_path
-
-    for item in items:
-        path = getattr(item, "path", None) or item.fspath
-        for marker_name in markers_for_path(path):
-            item.add_marker(getattr(pytest.mark, marker_name))
-
-
 import pytest  # noqa: E402
 
 

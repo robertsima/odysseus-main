@@ -5,6 +5,8 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
+pytestmark = pytest.mark.security
+
 
 def _compare_request(user="alice", is_admin=False):
     return SimpleNamespace(

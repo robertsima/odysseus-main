@@ -15,6 +15,8 @@ import json
 
 import pytest
 
+pytestmark = pytest.mark.security
+
 
 def _core_auth():
     """Resolve core.auth at call time.

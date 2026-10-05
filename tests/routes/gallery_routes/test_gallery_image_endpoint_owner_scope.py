@@ -9,6 +9,9 @@ base URL can borrow another account's private image API key.
 from types import SimpleNamespace
 
 import routes.gallery_routes as gallery_routes
+import pytest
+
+pytestmark = pytest.mark.security
 
 
 class _Predicate:

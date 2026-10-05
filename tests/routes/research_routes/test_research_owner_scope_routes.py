@@ -10,6 +10,8 @@ from fastapi import HTTPException
 
 from routes.research_routes import setup_research_routes
 
+pytestmark = pytest.mark.security
+
 
 @pytest.fixture(autouse=True)
 def _redirect_research_dir(tmp_path, monkeypatch):

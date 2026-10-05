@@ -17,7 +17,7 @@ from src.tool_security import (
     plan_mode_disabled_tools,
 )
 
-pytestmark = pytest.mark.area_security
+pytestmark = pytest.mark.security
 
 NEW_TOOLS = ("manage_agent_worktree", "read_app_logs")
 

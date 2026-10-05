@@ -21,7 +21,6 @@ from pathlib import Path
 import pytest
 from tests import REPO_ROOT
 
-pytestmark = pytest.mark.area_unit
 
 REPO_ROOT = REPO_ROOT
 

@@ -6,6 +6,8 @@ from fastapi import HTTPException
 
 import routes.embedding_routes as embedding_routes
 
+pytestmark = pytest.mark.security
+
 
 def _install_fastembed_stub(monkeypatch):
     fastembed = types.ModuleType("fastembed")

@@ -13,7 +13,7 @@ import pytest
 from src.agent_tools import TOOL_HANDLERS
 from src.agent_tools import claude_code_guard as guard
 
-pytestmark = pytest.mark.area_security
+pytestmark = pytest.mark.security
 
 
 @pytest.fixture(autouse=True)

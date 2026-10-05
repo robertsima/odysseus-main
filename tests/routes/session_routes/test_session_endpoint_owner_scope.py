@@ -10,6 +10,8 @@ from routes.session_routes import (
     _reject_raw_endpoint_url_for_non_admin,
 )
 
+pytestmark = pytest.mark.security
+
 
 def _request(user, *, admin=False, api_token=False, scopes=None):
     auth_manager = SimpleNamespace(is_admin=lambda username: bool(admin))

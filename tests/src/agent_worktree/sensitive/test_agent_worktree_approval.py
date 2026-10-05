@@ -14,7 +14,7 @@ import pytest
 from src.agent_worktree import approval as approval_mod
 from src.agent_worktree.config import WorktreeConfig
 
-pytestmark = pytest.mark.area_security
+pytestmark = pytest.mark.security
 
 
 SHA_A = "a" * 40

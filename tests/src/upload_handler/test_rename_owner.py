@@ -3,6 +3,9 @@ import os
 from pathlib import Path
 
 from src.upload_handler import UploadHandler
+import pytest
+
+pytestmark = pytest.mark.security
 
 
 def _make_handler(tmp_path: Path) -> UploadHandler:

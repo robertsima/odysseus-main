@@ -13,6 +13,9 @@ import types
 import routes.chat_helpers as chat_helpers
 import src.endpoint_resolver as endpoint_resolver
 from core.database import ModelEndpoint, Session as DbSession
+import pytest
+
+pytestmark = pytest.mark.security
 
 _CODEX_BASE = "https://chatgpt.com/backend-api/codex"
 

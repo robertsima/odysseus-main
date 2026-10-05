@@ -31,7 +31,7 @@ from routes.claude_code_routes import (
     _require_claude_code_scope,
 )
 
-pytestmark = pytest.mark.area_security
+pytestmark = pytest.mark.security
 
 TOOL_NAME = "delegate_to_claude_code"
 

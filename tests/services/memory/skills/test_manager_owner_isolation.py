@@ -29,6 +29,8 @@ import pytest
 from services.memory.skills import SkillsManager
 from services.memory.skill_format import slugify
 
+pytestmark = pytest.mark.security
+
 
 def _write_skill_md(skills_root: Path, category: str, name: str,
                     owner: str, description: str) -> Path:

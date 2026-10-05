@@ -22,7 +22,7 @@ from src import constants
 from src.agent_tools import TOOL_HANDLERS
 from src.agent_worktree import push_guard
 
-pytestmark = pytest.mark.area_security
+pytestmark = pytest.mark.security
 
 
 @pytest.fixture(autouse=True)

@@ -5,6 +5,8 @@ import pytest
 from src import auth_helpers
 from src.auth_helpers import require_privilege
 
+pytestmark = pytest.mark.security
+
 
 class _Mgr:
     def __init__(self, privs):

@@ -14,6 +14,8 @@ from services.memory.skills import SkillsManager
 from src.tool_approvals import tool_approval_store
 from src.tool_capabilities import capabilities_for_action
 
+pytestmark = pytest.mark.security
+
 
 def _write_skill_md(skills_root: Path, category: str, name: str,
                     owner: str, description: str = "test") -> Path:

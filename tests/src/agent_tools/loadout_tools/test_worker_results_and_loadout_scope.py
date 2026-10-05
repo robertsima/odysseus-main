@@ -25,6 +25,8 @@ from src import worker_preflight as wp
 from src.agent_tools import loadout_tools
 from src.agent_tools.loadout_tools import manage_agent_loadout
 
+pytestmark = pytest.mark.security
+
 
 KNOWN = {"bash", "read_file", "write_file", "grep", "ls", "glob", "get_workspace", "web_search",
          "search_documents", "manage_memory", "search_chats", "manage_agent_loadout", "send_to_session"}

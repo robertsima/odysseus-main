@@ -68,7 +68,7 @@ def test_workstations_get_a_bounded_number_of_workers(monkeypatch, env, expected
     assert run.workers() == expected
 
 
-@pytest.mark.parametrize("lane,marker", [("browser", "browser"), ("security", "security or area_security"),
+@pytest.mark.parametrize("lane,marker", [("browser", "browser"), ("security", "security"),
                                          ("nightly", "nightly")])
 def test_marker_lanes_select_by_marker(calls, lane, marker):
     run.main([lane])

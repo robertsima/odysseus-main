@@ -10,6 +10,8 @@ from services.memory.skill_importer import (
     parse_skill_source,
 )
 
+pytestmark = pytest.mark.security
+
 ## 1. Tests for Hostname Dispatch & Substring Spoofing
 
 @pytest.mark.parametrize(

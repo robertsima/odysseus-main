@@ -31,6 +31,8 @@ from sqlalchemy.pool import QueuePool
 from src import chatgpt_subscription as cs
 from src import llm_core
 
+pytestmark = pytest.mark.security
+
 CODEX_URL = "https://chatgpt.com/backend-api/codex/responses"
 _nonce = itertools.count()
 

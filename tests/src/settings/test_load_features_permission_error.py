@@ -7,6 +7,9 @@ of falling back to DEFAULT_FEATURES, taking down GET /api/auth/features.
 import builtins
 
 import src.settings as settings
+import pytest
+
+pytestmark = pytest.mark.security
 
 
 def test_load_features_degrades_on_permission_error(monkeypatch):

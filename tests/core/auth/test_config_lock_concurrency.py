@@ -15,6 +15,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pytest
 
+pytestmark = pytest.mark.security
+
 
 class _OwnerColumn:
     def __eq__(self, other):

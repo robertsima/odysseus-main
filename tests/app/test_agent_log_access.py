@@ -17,7 +17,7 @@ _NEEDS_SYMLINKS = pytest.mark.skipif(
 )
 
 
-pytestmark = pytest.mark.area_security
+pytestmark = pytest.mark.security
 
 
 @pytest.fixture

@@ -9,6 +9,8 @@ from dulwich.config import StackedConfig
 
 from src.agent_worktree import repository_sync as rs
 
+pytestmark = pytest.mark.security
+
 
 def _make_repo(path: Path) -> Path:
     path.mkdir(parents=True)

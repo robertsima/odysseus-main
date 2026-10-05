@@ -10,6 +10,9 @@ import asyncio
 
 import src.teacher_escalation as teacher_escalation
 import routes.skills_routes as skills_routes
+import pytest
+
+pytestmark = pytest.mark.security
 
 
 def test_call_teacher_scopes_model_resolution_to_owner(monkeypatch):

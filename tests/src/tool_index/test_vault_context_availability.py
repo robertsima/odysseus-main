@@ -17,7 +17,7 @@ import os
 
 import pytest
 
-pytestmark = pytest.mark.area_security
+pytestmark = pytest.mark.security
 
 
 class _Rag:

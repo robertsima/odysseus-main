@@ -12,7 +12,7 @@ import pytest
 from src.agent_worktree import diagnostics
 from src.agent_worktree.config import load_config
 
-pytestmark = pytest.mark.area_security
+pytestmark = pytest.mark.security
 
 
 _ENV = (

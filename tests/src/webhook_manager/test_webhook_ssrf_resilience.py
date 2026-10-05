@@ -8,6 +8,8 @@ import pytest
 
 from tests.helpers.import_state import clear_module, preserve_import_state
 
+pytestmark = pytest.mark.security
+
 # conftest.py stubs src.database; drop the stub so webhook_manager imports the
 # real module. preserve_import_state restores sys.modules and parent-package
 # attributes for both src.database and core.database after the block, preventing

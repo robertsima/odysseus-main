@@ -17,6 +17,9 @@ no-op everywhere. See [[chroma-and-fastembed-are-layers]] /
 docs/vault-retrieval.md for the rest of the retrieval-scoping picture.
 """
 from src.rag_vector import VectorRAG
+import pytest
+
+pytestmark = pytest.mark.security
 
 
 class _FakeCollection:

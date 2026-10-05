@@ -21,7 +21,7 @@ from src.agent_tools import claude_code_guard as guard
 from src.agent_tools import claude_code_tools as cct
 from src.agent_tools.claude_code_tools import ClaudeCodeTaskRunner, ClaudeCodeTool
 
-pytestmark = pytest.mark.area_security
+pytestmark = pytest.mark.security
 
 OUTDATED_TEXT = ("API Error: 400 Claude Code 2.1.267 does not support this model; version 2.1.280 or newer "
                  "is required. Run 'claude update', or update the Claude desktop app, then try again.")

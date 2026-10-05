@@ -7,6 +7,8 @@ from fastapi.testclient import TestClient
 
 from core.database import GalleryImage
 
+pytestmark = pytest.mark.security
+
 
 def _gallery_module():
     import routes.gallery_routes as gallery_routes

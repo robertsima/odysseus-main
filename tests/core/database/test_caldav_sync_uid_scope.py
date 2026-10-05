@@ -14,6 +14,8 @@ import pytest
 from core.database import CalendarEvent, CalendarCal
 from src.caldav_sync import _find_existing_event
 
+pytestmark = pytest.mark.security
+
 
 def _setup(app_db):
     db = app_db.SessionLocal()

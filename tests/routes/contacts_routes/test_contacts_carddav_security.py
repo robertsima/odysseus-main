@@ -4,6 +4,8 @@ import pytest
 
 import routes.contacts_routes as contacts
 
+pytestmark = pytest.mark.security
+
 
 def test_validate_carddav_url_blocks_metadata_targets(monkeypatch):
     monkeypatch.setattr(

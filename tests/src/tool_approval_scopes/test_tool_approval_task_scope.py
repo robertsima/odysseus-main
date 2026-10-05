@@ -13,6 +13,9 @@ from src.tool_approval_scopes import (
 )
 from src.tool_approvals import ExactToolApproval, ToolApprovalStore
 from src.tool_capabilities import ToolRunSecurityContext, capabilities_for_action
+import pytest
+
+pytestmark = pytest.mark.security
 
 
 def _pending(

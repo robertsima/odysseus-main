@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 from tests import REPO_ROOT
 
+pytestmark = pytest.mark.security
+
 
 @pytest.mark.parametrize("url", [
     "http://127.0.0.1:8000/v1",

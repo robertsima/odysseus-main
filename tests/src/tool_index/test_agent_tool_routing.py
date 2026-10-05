@@ -12,7 +12,6 @@ import pytest
 
 from src.tool_index import ALWAYS_AVAILABLE, BUILTIN_TOOL_DESCRIPTIONS, ToolIndex
 
-pytestmark = pytest.mark.area_unit
 
 
 def keyword_tools(query: str) -> set:

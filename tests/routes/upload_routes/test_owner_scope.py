@@ -7,6 +7,8 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
+pytestmark = pytest.mark.security
+
 
 class _AuthManager:
     is_configured = True

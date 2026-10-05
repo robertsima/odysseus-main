@@ -19,6 +19,8 @@ from tests.helpers.calendar_routes import import_calendar_routes
 
 from fastapi import HTTPException
 
+pytestmark = pytest.mark.security
+
 
 # ---------------------------------------------------------------------------
 # calendar._get_or_404_calendar / _get_or_404_event

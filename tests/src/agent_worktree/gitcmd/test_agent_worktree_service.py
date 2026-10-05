@@ -18,7 +18,7 @@ from src.agent_worktree import service
 from src.agent_worktree.config import WorktreeConfig
 from src.agent_worktree.gitcmd import auth_env
 
-pytestmark = pytest.mark.area_security
+pytestmark = pytest.mark.security
 
 git_required = pytest.mark.skipif(
     shutil.which("git") is None,

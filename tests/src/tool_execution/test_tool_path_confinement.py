@@ -19,6 +19,8 @@ from unittest.mock import patch
 
 import pytest
 
+pytestmark = pytest.mark.security
+
 
 def _make_block(tool_type, content):
     return SimpleNamespace(tool_type=tool_type, content=content)

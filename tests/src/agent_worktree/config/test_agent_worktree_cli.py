@@ -10,7 +10,7 @@ import pytest
 
 from tests.helpers.cli_loader import load_script
 
-pytestmark = [pytest.mark.area_cli, pytest.mark.area_security]
+pytestmark = [pytest.mark.security]
 
 
 @pytest.fixture

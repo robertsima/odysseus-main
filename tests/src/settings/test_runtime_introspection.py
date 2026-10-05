@@ -32,7 +32,7 @@ import core.database as cdb
 from src import agent_activity as act
 from src import config_provenance, constants, runtime_introspection
 
-pytestmark = pytest.mark.area_security
+pytestmark = pytest.mark.security
 
 
 def _utc():

@@ -3,6 +3,9 @@ import json
 from src import tool_implementations
 from src.notes_markdown import NoteItem, NoteRecord
 from tests.helpers.fake_notes_store import FakeNotesStore
+import pytest
+
+pytestmark = pytest.mark.security
 
 
 def _install_fakes(monkeypatch, note):

@@ -1,6 +1,9 @@
 import os
 import tempfile
 from pathlib import Path
+import pytest
+
+pytestmark = pytest.mark.security
 
 _tmp_data = Path(tempfile.mkdtemp(prefix="odysseus-email-smtp-test-"))
 os.environ.setdefault("DATA_DIR", str(_tmp_data))

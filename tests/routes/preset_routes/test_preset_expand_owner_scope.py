@@ -10,6 +10,9 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from routes.preset_routes import setup_preset_routes
+import pytest
+
+pytestmark = pytest.mark.security
 
 
 class _FakeRequest:

@@ -5,6 +5,9 @@
 HTTP in tests/routes/gallery/gallery_routes/test_image_endpoints.py; this
 checks that the validator itself rejects the cloud metadata range.
 """
+import pytest
+
+pytestmark = pytest.mark.security
 
 
 def test_url_safety_blocks_metadata_endpoint():

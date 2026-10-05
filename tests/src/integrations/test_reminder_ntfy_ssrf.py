@@ -13,6 +13,9 @@ from unittest.mock import MagicMock, patch
 import httpx
 
 from routes.note_routes import dispatch_reminder
+import pytest
+
+pytestmark = pytest.mark.security
 
 
 def _ntfy_integration(base_url):

@@ -11,7 +11,7 @@ import pytest
 
 from src import tool_execution
 
-pytestmark = pytest.mark.area_security
+pytestmark = pytest.mark.security
 
 
 def test_safe_directory_covers_the_data_dir_and_everything_under_it():

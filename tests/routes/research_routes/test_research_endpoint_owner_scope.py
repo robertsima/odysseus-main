@@ -14,6 +14,9 @@ webhook `_first_enabled_endpoint` (#1045) and session `_owned_endpoint` fixes.
 from types import SimpleNamespace
 
 from routes.research_routes import _owned_enabled_endpoint, _resolve_endpoint_runtime
+import pytest
+
+pytestmark = pytest.mark.security
 
 
 class _Predicate:

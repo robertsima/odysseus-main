@@ -6,6 +6,8 @@ from fastapi import HTTPException
 from src.notes_markdown import NoteItem, NoteRecord
 from tests.helpers.fake_notes_store import FakeNotesStore
 
+pytestmark = pytest.mark.security
+
 
 class _AuthManager:
     is_configured = True

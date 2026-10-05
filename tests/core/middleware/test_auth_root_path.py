@@ -16,6 +16,8 @@ from core.middleware import (
 )
 from tests import REPO_ROOT
 
+pytestmark = pytest.mark.security
+
 
 ROOT = REPO_ROOT
 

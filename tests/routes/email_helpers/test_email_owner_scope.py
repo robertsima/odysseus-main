@@ -5,6 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
+pytestmark = pytest.mark.security
+
 
 def _route_endpoint(router, path: str, method: str):
     method = method.upper()

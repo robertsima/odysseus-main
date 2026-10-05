@@ -18,7 +18,7 @@ import pytest
 from src.agent_tools import claude_code_tools as cct
 from src.agent_tools.claude_code_tools import ClaudeCodeTool, ClaudeCodeTaskRunner
 
-pytestmark = pytest.mark.area_security
+pytestmark = pytest.mark.security
 
 _SH_STUB = pytest.mark.skipif(
     sys.platform == "win32",

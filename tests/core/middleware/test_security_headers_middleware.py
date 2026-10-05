@@ -16,6 +16,9 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from core.middleware import SecurityHeadersMiddleware
+import pytest
+
+pytestmark = pytest.mark.security
 
 
 def _build_app():

@@ -2,6 +2,8 @@ from types import SimpleNamespace
 
 import pytest
 
+pytestmark = pytest.mark.security
+
 
 def test_effective_storage_owner_matrix(monkeypatch):
     from src.owner_identity import DEFAULT_LOCAL_OWNER, effective_storage_owner

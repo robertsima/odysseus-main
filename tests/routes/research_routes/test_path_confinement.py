@@ -26,6 +26,8 @@ from routes.research.research_routes import (
     _require_research_path,
 )
 
+pytestmark = pytest.mark.security
+
 
 @pytest.fixture(autouse=True)
 def _redirect_research_dir(tmp_path, monkeypatch):

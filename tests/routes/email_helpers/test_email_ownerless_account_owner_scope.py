@@ -15,6 +15,8 @@ from unittest import mock
 import pytest
 from fastapi import HTTPException
 
+pytestmark = pytest.mark.security
+
 
 def _make_db(make_test_db):
     return make_test_db(memory=True).SessionLocal

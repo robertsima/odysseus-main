@@ -2,6 +2,9 @@ from unittest.mock import MagicMock
 
 import routes.memory_routes as memory_routes
 from src.memory import MemoryManager
+import pytest
+
+pytestmark = pytest.mark.security
 
 
 def test_memory_search_returns_only_callers_memories(monkeypatch, tmp_path):

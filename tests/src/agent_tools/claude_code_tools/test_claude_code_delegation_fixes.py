@@ -23,7 +23,7 @@ import pytest
 from src.agent_tools import claude_code_tools as cct
 from src.agent_tools.claude_code_tools import ClaudeCodeTaskRunner, ClaudeCodeTool
 
-pytestmark = pytest.mark.area_security
+pytestmark = pytest.mark.security
 
 
 @pytest.fixture

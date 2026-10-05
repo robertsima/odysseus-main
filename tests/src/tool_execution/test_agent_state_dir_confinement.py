@@ -48,6 +48,8 @@ from src.tool_execution import (
 )
 from src.agent_tools.filesystem_tools import GlobTool, GrepTool, LsTool
 
+pytestmark = pytest.mark.security
+
 APP_STATE_FILES = [
     "sessions.json",   # session token -> username, cleartext
     "auth.json",       # bcrypt hashes, admin flags, privileges

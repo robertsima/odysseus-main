@@ -127,7 +127,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.lane == "browser":
         return pytest(["-m", "browser", *extra])
     if args.lane == "security":
-        return pytest(["-m", "security or area_security", *extra], parallel=True)
+        return pytest(["-m", "security", *extra], parallel=True)
     return pytest(["-m", "nightly", *extra])
 
 

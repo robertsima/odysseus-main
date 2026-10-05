@@ -11,6 +11,8 @@ import pytest
 from core.database import GalleryImage
 from routes.gallery_helpers import _owner_filter
 
+pytestmark = pytest.mark.security
+
 
 def _seed(app_db, *owners):
     db = app_db.SessionLocal()

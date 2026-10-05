@@ -23,6 +23,8 @@ from services.memory.skill_importer import (
     parse_skill_source,
 )
 
+pytestmark = pytest.mark.security
+
 # Clearly-public, non-reserved IP literals for the initial (allowed) hop.
 PUBLIC_A = "https://1.1.1.1/skill"
 PUBLIC_B = "https://8.8.8.8/skill"

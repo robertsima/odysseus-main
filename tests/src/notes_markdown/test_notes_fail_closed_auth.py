@@ -33,6 +33,8 @@ import routes.note_routes as nr
 from src.notes_markdown import NoteItem, NoteRecord
 from tests.helpers.fake_notes_store import FakeNotesStore
 
+pytestmark = pytest.mark.security
+
 
 # A deliberately NON-loopback peer. require_user has loopback fall-throughs
 # (unconfigured first-run, LOCALHOST_BYPASS); pinning a public-looking client

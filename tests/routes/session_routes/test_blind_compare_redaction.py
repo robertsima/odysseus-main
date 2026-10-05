@@ -24,6 +24,9 @@ from unittest.mock import MagicMock
 
 from tests.helpers.import_state import clear_module, preserve_import_state
 from tests import REPO_ROOT
+import pytest
+
+pytestmark = pytest.mark.security
 
 _REPO = REPO_ROOT
 

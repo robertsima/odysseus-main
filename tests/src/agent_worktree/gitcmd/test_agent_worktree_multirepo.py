@@ -26,7 +26,7 @@ from src.agent_worktree.config import WorktreeConfig
 from src.agent_worktree.gitcmd import GitResult, run_git as real_run_git
 
 pytestmark = [
-    pytest.mark.area_security,
+    pytest.mark.security,
     pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed"),
 ]
 

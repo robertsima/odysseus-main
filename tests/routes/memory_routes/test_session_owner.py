@@ -18,6 +18,8 @@ from fastapi import HTTPException, UploadFile
 
 import routes.memory_routes as mr
 
+pytestmark = pytest.mark.security
+
 
 def _route(router, path, method):
     for r in router.routes:

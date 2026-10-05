@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
+pytestmark = pytest.mark.security
+
 
 class _Column:
     def __eq__(self, _other):

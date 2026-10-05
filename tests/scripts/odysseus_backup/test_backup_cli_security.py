@@ -8,6 +8,8 @@ import pytest
 from tests.helpers.cli_loader import load_script
 from tests import REPO_ROOT
 
+pytestmark = pytest.mark.security
+
 
 def _load_backup_cli():
     return load_script("odysseus-backup")

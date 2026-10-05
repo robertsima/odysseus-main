@@ -18,6 +18,8 @@ import core.database as cdb
 from core.database import ChatMessage as DbMessage
 from core.database import Session as DbSession
 
+pytestmark = pytest.mark.security
+
 _TMPDB = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 _ENGINE = create_engine(
     f"sqlite:///{_TMPDB.name}",

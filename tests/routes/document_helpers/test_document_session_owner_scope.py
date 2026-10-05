@@ -14,6 +14,8 @@ from fastapi import HTTPException
 
 from tests.helpers.import_state import clear_fake_database_modules
 
+pytestmark = pytest.mark.security
+
 clear_fake_database_modules()
 
 import routes.document_routes as droutes

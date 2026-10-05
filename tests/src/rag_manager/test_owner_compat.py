@@ -1,4 +1,7 @@
 from src.rag_manager import RAGManager
+import pytest
+
+pytestmark = pytest.mark.security
 
 
 class _FakeVectorRAG:

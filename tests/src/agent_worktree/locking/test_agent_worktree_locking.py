@@ -14,7 +14,7 @@ import pytest
 
 from src.agent_worktree.locking import LockBusy, file_lock
 
-pytestmark = pytest.mark.area_security
+pytestmark = pytest.mark.security
 
 
 def test_lock_is_created_and_released(tmp_path):

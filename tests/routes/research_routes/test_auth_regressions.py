@@ -16,6 +16,8 @@ from unittest.mock import MagicMock
 
 from fastapi import HTTPException
 
+pytestmark = pytest.mark.security
+
 # ---------------------------------------------------------------------------
 # Auth routes -- open signup setter
 # ---------------------------------------------------------------------------

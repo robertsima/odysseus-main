@@ -1,4 +1,7 @@
 from src.rag_vector import VectorRAG
+import pytest
+
+pytestmark = pytest.mark.security
 
 
 class _FakeCollection:

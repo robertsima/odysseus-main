@@ -20,6 +20,8 @@ import pytest
 
 from src import integrations
 
+pytestmark = pytest.mark.security
+
 
 def _integration(base_url):
     return {

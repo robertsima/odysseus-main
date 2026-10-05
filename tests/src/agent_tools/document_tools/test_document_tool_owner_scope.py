@@ -10,6 +10,8 @@ from src.agent_tools.document_tools import (
     set_active_document,
 )
 
+pytestmark = pytest.mark.security
+
 
 class _Column:
     def __init__(self, name):

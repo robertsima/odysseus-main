@@ -23,6 +23,8 @@ from unittest.mock import MagicMock, AsyncMock
 
 import pytest
 
+pytestmark = pytest.mark.security
+
 
 # ---------------------------------------------------------------------------
 # Lightweight model/query stubs — no SQLAlchemy required.

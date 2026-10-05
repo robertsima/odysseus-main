@@ -14,7 +14,7 @@ a second, explicit scope. The chat path gates the same content on
 import pytest
 from fastapi import HTTPException
 
-pytestmark = pytest.mark.area_security
+pytestmark = pytest.mark.security
 
 
 def _token_request(scopes, owner="alice"):

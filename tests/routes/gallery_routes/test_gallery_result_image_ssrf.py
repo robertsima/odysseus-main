@@ -16,6 +16,8 @@ from fastapi import HTTPException
 
 import routes.gallery_routes as gallery_routes
 
+pytestmark = pytest.mark.security
+
 
 class _FakeResp:
     def __init__(self, status_code: int, content: bytes = b""):

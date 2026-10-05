@@ -17,6 +17,8 @@ import pytest
 
 from tests.helpers.import_state import clear_fake_database_modules
 
+pytestmark = pytest.mark.security
+
 clear_fake_database_modules()
 
 import core.database as cdb

@@ -19,6 +19,9 @@ from src.prompt_security import (
     _sanitize_label,
     untrusted_context_message,
 )
+import pytest
+
+pytestmark = pytest.mark.security
 
 
 # ── _escape_guard_markers unit tests ────────────────────────────
