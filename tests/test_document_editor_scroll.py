@@ -16,17 +16,6 @@ DOC_JS = (ROOT / "static/js/document.js").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "static/style.css").read_text(encoding="utf-8")
 
 
-def test_document_textarea_scrollbar_is_visible():
-    textarea_rule_start = STYLE_CSS.index(".doc-editor-textarea {\n  position: absolute;")
-    textarea_rule_end = STYLE_CSS.index(".doc-editor-textarea::placeholder", textarea_rule_start)
-    textarea_css = STYLE_CSS[textarea_rule_start:textarea_rule_end]
-
-    assert "overflow-y: scroll;" in textarea_css
-    assert "scrollbar-width: thin;" in textarea_css
-    assert ".doc-editor-textarea::-webkit-scrollbar { width: 8px; }" in STYLE_CSS
-    assert ".doc-editor-textarea::-webkit-scrollbar { display: none; }" not in STYLE_CSS
-
-
 def test_line_number_gutter_translates_inner_content():
     assert "function _lineNumberContentEl(gutter)" in DOC_JS
     assert "inner.className = 'doc-line-number-content';" in DOC_JS

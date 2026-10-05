@@ -1,33 +1,7 @@
-"""Regressions for Settings > Capabilities and schema-driven controls."""
+"""The settings schema declares which controls Settings > Advanced draws.
 
-from pathlib import Path
-
-
-ROOT = Path(__file__).resolve().parent.parent
-PANEL = (ROOT / "static/js/capabilitiesPanel.js").read_text(encoding="utf-8")
-
-
-def test_capabilities_are_collapsed_by_default_and_preserve_user_toggle():
-    assert "capabilitiesOpen: false" in PANEL
-    assert "state.capabilitiesOpen ? ' open' : ''" in PANEL
-    assert "attentionCaps ? ' open' : ''" not in PANEL
-    assert "state.capabilitiesOpen = e.target.open" in PANEL
-
-
-def test_advanced_button_changes_visible_controls_and_confirms_the_change():
-    assert "state.showAdvanced = !state.showAdvanced" in PANEL
-    assert "Advanced settings are now visible" in PANEL
-    assert "some((setting) => setting.advanced)" in PANEL
-
-
-def test_finite_and_installed_values_use_selects_not_free_text():
-    assert "function sourcedOptions" in PANEL
-    assert "s.options_source === 'endpoints'" in PANEL
-    assert "s.options_source === 'models'" in PANEL
-    assert "s.options_source === 'tts_providers'" in PANEL
-    assert "s.options_source === 'stt_providers'" in PANEL
-    assert "<select id=\"${id}\" class=\"set-input\"" in PANEL
-    assert "<datalist id=\"${id}-suggestions\">" in PANEL
+The panel itself is tested in tests/static/js/capabilitiesPanel/.
+"""
 
 
 def test_schema_declares_dynamic_and_suggested_controls():
