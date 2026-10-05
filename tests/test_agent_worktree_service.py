@@ -70,13 +70,18 @@ def cfg(tmp_path, repo):
     )
 
 
+def _edit(worktree, relative, text, mode="w"):
+    """Write (or append) a file inside the agent's worktree."""
+    target = os.path.join(worktree, *relative.split("/"))
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    with open(target, mode, encoding="utf-8") as fh:
+        fh.write(text)
+
+
 async def _prepare_change(cfg, filename="src/feature.py", body="print('hi')\n"):
     info = await service.ensure_worktree("task", cfg=cfg)
     path = info["path"]
-    target = os.path.join(path, filename)
-    os.makedirs(os.path.dirname(target), exist_ok=True)
-    with open(target, "w", encoding="utf-8") as fh:
-        fh.write(body)
+    _edit(path, filename, body)
     await service.commit("task", "add feature", cfg=cfg)
     return path
 
@@ -119,11 +124,8 @@ async def test_diff_lists_uncommitted_edits_apart_from_the_committed_change(cfg)
     # "changed_files: []" and nothing else.
     info = await service.ensure_worktree("task", cfg=cfg)
     path = info["path"]
-    with open(os.path.join(path, "README.md"), "a", encoding="utf-8") as fh:
-        fh.write("more\n")
-    os.makedirs(os.path.join(path, "tests"))
-    with open(os.path.join(path, "tests", "test_new.py"), "w", encoding="utf-8") as fh:
-        fh.write("def test_x():\n    pass\n")
+    _edit(path, "README.md", "more\n", "a")
+    _edit(path, "tests/test_new.py", "def test_x():\n    pass\n")
     summary = await service.diff_summary("task", cfg=cfg)
     assert summary["dirty"] is True
     assert summary["changed_files"] == []
@@ -152,8 +154,7 @@ async def test_request_publish_is_blocked_when_the_feature_is_off(cfg):
 @git_required
 async def test_request_publish_refuses_an_uncommitted_worktree(cfg, monkeypatch):
     path = await _prepare_change(cfg)
-    with open(os.path.join(path, "src", "feature.py"), "a", encoding="utf-8") as fh:
-        fh.write("# drift\n")
+    _edit(path, "src/feature.py", "# drift\n", "a")
     monkeypatch.setattr(service, "_remote_head", _fake_remote_head(None))
     with pytest.raises(service.WorktreeError, match="uncommitted"):
         await service.request_publish("task", title="x", cfg=cfg)
@@ -287,8 +288,7 @@ async def test_publish_refuses_when_the_commit_moved_after_approval(cfg, monkeyp
     code, _ = approval_mod.grant(view["id"], cfg=cfg)
 
     # The agent keeps working after the human looked at the change.
-    with open(os.path.join(path, "src", "extra.py"), "w", encoding="utf-8") as fh:
-        fh.write("# more\n")
+    _edit(path, "src/extra.py", "# more\n")
     await service.commit("task", "sneak in more", cfg=cfg)
 
     with pytest.raises(approval_mod.ApprovalError, match="bound to a different"):
@@ -351,8 +351,7 @@ async def test_publish_refuses_a_detached_head(cfg, monkeypatch):
     code, _ = approval_mod.grant(view["id"], cfg=cfg)
 
     approved = view["head_sha"]
-    with open(os.path.join(path, "src", "extra.py"), "w", encoding="utf-8") as fh:
-        fh.write("# hidden\n")
+    _edit(path, "src/extra.py", "# hidden\n")
     await service.commit("task", "hidden change", cfg=cfg)
     _git(path, "checkout", "--quiet", "--detach", approved)
 
