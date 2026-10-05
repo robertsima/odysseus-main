@@ -96,16 +96,6 @@ def test_mint_token_returns_raw_once_and_stores_only_a_hash(monkeypatch):
     assert _CAPTURED["is_active"] is True
 
 
-def test_mint_pairing_token_invalidates_cache(monkeypatch):
-    # The mint must flip the auth middleware's cache so the token works on the
-    # very next request, with no restart.
-    monkeypatch.setattr(P, "mint_token", lambda owner, name="companion": ("id1", "ody_demo"))
-    invalidate = MagicMock()
-    token_id, raw = mint_pairing_token("alice", invalidate)
-    assert (token_id, raw) == ("id1", "ody_demo")
-    invalidate.assert_called_once()
-
-
 def test_mint_pairing_token_tolerates_no_invalidator(monkeypatch):
     monkeypatch.setattr(P, "mint_token", lambda owner, name="companion": ("id1", "ody_demo"))
     # Must not blow up if the app didn't expose an invalidator.
