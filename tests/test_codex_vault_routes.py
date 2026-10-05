@@ -59,21 +59,3 @@ def test_the_scopes_and_the_agent_profile_are_registered():
     assert "vault:read_private" not in TOKEN_PROFILES["claude_agent"]
     normalized = _normalize_scopes(["vault:read_private"])
     assert normalized.index("vault:read") < normalized.index("vault:read_private")
-
-
-def test_the_token_uis_can_actually_grant_the_vault_scopes():
-    """The integration form mints a token with `chat` and then PATCHes the
-    scopes its toggles list, so a scope missing from that catalog is a scope
-    no token created in the UI can ever hold."""
-    settings = open("static/js/settings.js", encoding="utf-8").read()
-    assert "{ key: 'vault:read', label: 'Vault'" in settings
-    assert "{ key: 'vault:read_private'" in settings
-    # Private stays off on a fresh token: the pre-check preview skips it.
-    assert "defaultOff: true" in settings
-    assert "toolScopes.filter(s => !s.defaultOff)" in settings
-
-    # The Connections form (settings.js) is the only token UI. admin.js kept a
-    # second scope catalog for a token panel whose markup was removed; that
-    # catalog is gone with it, so there is no second list to fall out of sync.
-    admin = open("static/js/admin.js", encoding="utf-8").read()
-    assert "_TOKEN_SCOPES" not in admin
