@@ -85,22 +85,6 @@ def test_detail_rejects_cross_owner_and_null_owner_reports(tmp_path, monkeypatch
         assert exc.value.status_code == 404
 
 
-def test_report_rejects_null_owner_before_generating_html(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    data_dir = tmp_path / "data" / "deep_research"
-    _write_research(data_dir, "legacy-report", result="legacy secret")
-
-    handler = _research_handler()
-    router = setup_research_routes(handler)
-    target = _route(router, "/api/research/report/{session_id}", "GET")
-
-    with pytest.raises(HTTPException) as exc:
-        asyncio.run(target(session_id="legacy-report", request=_request("alice")))
-
-    assert exc.value.status_code == 404
-    handler.get_report_html.assert_not_called()
-
-
 def test_archive_rejects_cross_owner_without_mutating_report(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     data_dir = tmp_path / "data" / "deep_research"

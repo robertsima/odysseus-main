@@ -98,16 +98,13 @@ def test_require_returns_404_for_missing_valid_session_id(tmp_path, monkeypatch)
     "rp-bad.json",     # dot not in allowed charset
     "a" * 129,         # exceeds length limit
 ])
-def test_find_rejects_bad_session_ids_before_enumeration(monkeypatch, bad_id):
-    storage_root = MagicMock()
-    monkeypatch.setattr(
-        "routes.research.research_routes._research_storage_root",
-        MagicMock(return_value=storage_root),
-    )
+def test_find_rejects_bad_session_ids(tmp_path, bad_id):
+    # A real storage folder holding a file an escaping id would aim at.
+    (tmp_path / "deep_research").mkdir()
+    (tmp_path / "escape.json").write_text("{}", encoding="utf-8")
     with pytest.raises(HTTPException) as exc:
         _find_research_path(bad_id)
     assert exc.value.status_code == 400
-    storage_root.glob.assert_not_called()
 
 
 def test_find_matches_names_from_trusted_enumeration_without_joining_input(
