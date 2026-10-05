@@ -1,10 +1,22 @@
 """Brain skill package resources stay owner-scoped, safe and versioned."""
+import sys
+
 import pytest
 from fastapi import HTTPException
 from services.memory.skill_format import Skill
 from services.memory.skills import SkillsManager
 from routes.skills_routes import setup_skills_routes
 from tests.test_skills_routes_owner_update import _write_skill_md, _request, _route_handler
+
+
+def _symlink(link, target, **kwargs):
+    """Create a symlink, or skip where Windows withholds the privilege (WinError 1314)."""
+    try:
+        link.symlink_to(target, **kwargs)
+    except OSError as exc:
+        if sys.platform == 'win32':
+            pytest.skip(f'cannot create symlinks on this Windows account: {exc}')
+        raise
 
 
 @pytest.mark.asyncio
@@ -46,7 +58,7 @@ async def test_package_rejects_foreign_owner_bundled_and_unsafe_paths(tmp_path):
             await writer(_request('alice', {'content': 'x', 'version': 'new'}), 'mine', path)
         assert error.value.status_code == 400
     folder = tmp_path / 'skills' / 'personal' / 'mine'
-    (folder / 'scripts').symlink_to(tmp_path, target_is_directory=True)
+    _symlink(folder / 'scripts', tmp_path, target_is_directory=True)
     with pytest.raises(HTTPException) as error:
         await writer(_request('alice', {'content': 'x', 'version': 'new'}), 'mine', 'scripts/escape.py')
     assert error.value.status_code == 400
@@ -114,7 +126,7 @@ async def test_related_links_validate_destinations_and_markdown_guard(tmp_path):
                                            'related_scripts': bad_scripts}), 'mine')
         assert error.value.status_code == 400
     skill_dir = tmp_path / 'skills' / 'personal' / 'mine'
-    (skill_dir / 'scripts' / 'linked.py').symlink_to(skill_dir / 'scripts' / 'check.py')
+    _symlink(skill_dir / 'scripts' / 'linked.py', skill_dir / 'scripts' / 'check.py')
     with pytest.raises(HTTPException) as error:
         await links(_request('alice', {'version': md['version'], 'related_skills': [],
                                        'related_scripts': ['scripts/linked.py']}), 'mine')

@@ -14,18 +14,18 @@ from routes.cookbook_routes import _windows_local_pid_record_line
 BASH = find_bash() or "bash"
 
 
-def _fake_cat(tmp_path: Path, body: str) -> Path:
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    cat = fake_bin / "cat"
-    cat.write_text("#!/bin/sh\n" + body + "\n", encoding="utf-8")
-    cat.chmod(0o755)
-    return fake_bin
+def _fake_cat(tmp_path: Path, body: str) -> str:
+    """Shell text that defines a fake ``cat`` for the prelude to call.
+
+    A function wins over PATH lookup in every bash. A fake ``cat`` script
+    first on PATH did not: bash on Windows can resolve its own /usr/bin/cat
+    ahead of it, and the test then read the real Windows pid.
+    """
+    return "cat() {\n" + body + "\n}\n"
 
 
-def _env_for(fake_bin: Path, **extra: str) -> dict[str, str]:
+def _env_for(**extra: str) -> dict[str, str]:
     env = dict(os.environ)
-    env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
     env.update(extra)
     return env
 
@@ -33,14 +33,14 @@ def _env_for(fake_bin: Path, **extra: str) -> dict[str, str]:
 def _run_pid_line(
     pid_path: Path,
     ready_path: Path,
-    fake_bin: Path,
+    fake_cat: str,
     **extra_env: str,
 ) -> subprocess.CompletedProcess:
     return subprocess.run(
-        [BASH, "-c", _windows_local_pid_record_line(pid_path, ready_path)],
+        [BASH, "-c", fake_cat + _windows_local_pid_record_line(pid_path, ready_path)],
         capture_output=True,
         text=True,
-        env=_env_for(fake_bin, **extra_env),
+        env=_env_for(**extra_env),
         timeout=10,
     )
 
@@ -53,7 +53,7 @@ def test_windows_local_pid_line_records_numeric_winpid_after_fallback(tmp_path):
     ready_path.touch()
 
     cat_arg = tmp_path / "cat-arg.txt"
-    fake_bin = _fake_cat(
+    fake_cat = _fake_cat(
         tmp_path,
         'printf "%s\\n" "$1" > "$FAKE_CAT_ARG"\n'
         'printf "%s\\n" "$FAKE_WINPID"',
@@ -62,7 +62,7 @@ def test_windows_local_pid_line_records_numeric_winpid_after_fallback(tmp_path):
     result = _run_pid_line(
         pid_path,
         ready_path,
-        fake_bin,
+        fake_cat,
         FAKE_CAT_ARG=str(cat_arg),
         FAKE_WINPID="42324",
     )
@@ -83,7 +83,7 @@ def test_windows_local_pid_line_waits_for_python_fallback_before_replacing(tmp_p
     pid_path = tmp_path / "serve.pid"
     ready_path = tmp_path / "serve.pid.ready"
 
-    fake_bin = _fake_cat(
+    fake_cat = _fake_cat(
         tmp_path,
         'printf "%s\\n" "$FAKE_WINPID"',
     )
@@ -92,12 +92,12 @@ def test_windows_local_pid_line_waits_for_python_fallback_before_replacing(tmp_p
         [
             BASH,
             "-c",
-            _windows_local_pid_record_line(pid_path, ready_path),
+            fake_cat + _windows_local_pid_record_line(pid_path, ready_path),
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        env=_env_for(fake_bin, FAKE_WINPID="42324"),
+        env=_env_for(FAKE_WINPID="42324"),
     )
 
     # The inner shell has started, but Python has not published its fallback yet.
@@ -123,12 +123,12 @@ def test_windows_local_pid_line_preserves_outer_pid_when_mapping_missing(tmp_pat
     pid_path.write_text("31100", encoding="utf-8")
     ready_path.touch()
 
-    fake_bin = _fake_cat(tmp_path, "exit 1")
+    fake_cat = _fake_cat(tmp_path, "return 1")
 
     result = _run_pid_line(
         pid_path,
         ready_path,
-        fake_bin,
+        fake_cat,
     )
 
     assert result.returncode == 0, result.stderr
@@ -143,7 +143,7 @@ def test_windows_local_pid_line_rejects_malformed_mapping(tmp_path):
     pid_path.write_text("31100", encoding="utf-8")
     ready_path.touch()
 
-    fake_bin = _fake_cat(
+    fake_cat = _fake_cat(
         tmp_path,
         'printf "not-a-win32-pid\\n"',
     )
@@ -151,7 +151,7 @@ def test_windows_local_pid_line_rejects_malformed_mapping(tmp_path):
     result = _run_pid_line(
         pid_path,
         ready_path,
-        fake_bin,
+        fake_cat,
     )
 
     assert result.returncode == 0, result.stderr

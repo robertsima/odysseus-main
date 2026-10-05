@@ -1088,7 +1088,9 @@ async def test_child_launches_are_staggered(runtime, monkeypatch):
     result = await start_and_wait(request(synthesis=None))
     assert result["status"] == "completed"
     gaps = [later - earlier for earlier, later in zip(launched_at, launched_at[1:])]
-    assert len(gaps) == 2 and min(gaps) >= 0.05
+    # The Windows clock ticks every 15.6 ms, so a 0.05 s sleep can measure as
+    # 0.046. The tolerance still fails if the stagger is dropped (gaps near 0).
+    assert len(gaps) == 2 and min(gaps) >= 0.05 - 0.016
 
 
 def test_launch_stagger_setting_is_bounded(monkeypatch):

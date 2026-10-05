@@ -358,13 +358,13 @@ def test_pip_install_fallback_chain_propagates_failure_in_venv():
 
 def test_pip_install_fallback_chain_tries_user_outside_venv():
     """When base install fails outside a venv, the chain should try --user."""
-    # Force "not in venv" by making venv_check return 1 directly.
+    # Simulate "not in a venv" deterministically: base install fails and the
+    # venv check exits 1. No python3 on PATH is needed (Windows runners have
+    # none).
     script = (
-        "bash -c '"
-        "python3 -c \"import sys; sys.exit(1)\" || "
-        "{ ! python3 -c \"import sys; sys.exit(1)\" "  # venv_check=1 → negated to 0 → user runs
+        "false || "
+        "{ ! false "  # venv_check=1 (not in venv) -> negated to 0 -> user runs
         "&& echo user_attempt; }"
-        "'"
     )
     result = subprocess.run(
         ["bash", "-c", script],

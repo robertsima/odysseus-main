@@ -1,5 +1,6 @@
 """The unified agent activity feed: bounded, persisted, replayable, live."""
 import asyncio
+import itertools
 import json
 import os
 
@@ -223,7 +224,7 @@ def test_the_registry_cap_never_evicts_a_run_that_is_still_working(data_dir, mon
     assert act.get_run(oldest_finished) is None, "finished runs are what makes room"
 
 
-def test_the_global_feed_has_history_not_just_live_events(data_dir):
+def test_the_global_feed_has_history_not_just_live_events(data_dir, monkeypatch):
     """"All sessions" in the Workbench showed nothing until something new happened.
 
     `publish` appends to the originating session only, so the `*` key was never
@@ -231,6 +232,10 @@ def test_the_global_feed_has_history_not_just_live_events(data_dir):
     deliberately replays nothing for the global feed, so history is the only
     thing that could have filled that scope.
     """
+    # The Windows clock ticks every 15.6 ms, so three quick publishes can share
+    # one timestamp and the merge order across chats would be arbitrary.
+    ticks = itertools.count(1_000)
+    monkeypatch.setattr(act.time, "time", lambda: float(next(ticks)))
     act.publish("chat-a", "message", "first", source="odysseus")
     act.publish("chat-b", "message", "second", source="session")
     act.publish("chat-a", "message", "third", source="claude_code")

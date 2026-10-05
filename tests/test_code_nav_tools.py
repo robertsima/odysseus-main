@@ -16,9 +16,11 @@ def _run(tool, content):
 
 
 @pytest.fixture
-def repo():
-    # Built under /tmp, which is on the default tool-path allowlist.
-    root = tempfile.mkdtemp(dir="/tmp", prefix="codenav_")
+def repo(tmp_path, monkeypatch):
+    # The tool-path allowlist holds the literal /tmp (absent on Windows) and
+    # $TMPDIR, so build the repo under a TMPDIR of our own.
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    root = tempfile.mkdtemp(dir=str(tmp_path), prefix="codenav_")
     try:
         with open(os.path.join(root, "a.py"), "w") as f:
             f.write("import os\n# needle here\nprint('x')\n")
