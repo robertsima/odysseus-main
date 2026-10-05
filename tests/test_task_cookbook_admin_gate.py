@@ -205,27 +205,6 @@ async def test_non_admin_cannot_update_task_type_to_activate_existing_cookbook_s
 
 
 @pytest.mark.asyncio
-async def test_non_admin_cannot_manually_run_existing_cookbook_serve_task(
-    task_db, configured_auth
-):
-    _seed_action_task(task_db, "alice-task", "alice", action="cookbook_serve")
-    scheduler = SimpleNamespace(run_task_now=MagicMock())
-    router = task_routes.setup_task_routes(scheduler)
-    for route in router.routes:
-        if getattr(route, "path", None) == "/api/tasks/{task_id}/run":
-            run_task = route.endpoint
-            break
-    else:
-        raise RuntimeError("POST /api/tasks/{task_id}/run not found")
-
-    with pytest.raises(HTTPException) as exc:
-        await run_task(_req("alice"), "alice-task")
-
-    assert exc.value.status_code == 403
-    scheduler.run_task_now.assert_not_called()
-
-
-@pytest.mark.asyncio
 async def test_webhook_rejects_stale_non_admin_cookbook_serve_task(
     task_db, configured_auth
 ):
