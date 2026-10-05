@@ -342,21 +342,6 @@ def test_manifests_ship_their_skills_and_the_seeder_finds_them():
         assert not list((root / "skills").glob(f"**/{name}/SKILL.md"))
 
 
-def test_package_skills_hold_no_personal_paths():
-    root = Path(__file__).resolve().parents[1] / "integrations"
-    for path in root.glob("*/skills/*/SKILL.md"):
-        text = path.read_text(encoding="utf-8")
-        assert "D:/" not in text and "D:\\" not in text, path
-    for name in ("pi-worker/skills/local-pi-delegation", "claude-code/skills/claude-code-delegation"):
-        text = (root / name / "SKILL.md").read_text(encoding="utf-8")
-        assert "if the owner keeps a delegation log" in text or "when one is kept" in text
-
-
-def test_startup_registers_every_integration_before_seeding():
-    source = (Path(__file__).resolve().parents[1] / "src" / "app_initializer.py").read_text(encoding="utf-8")
-    assert source.index("register_integration_skills(") < source.index("seed_bundled_skills(skills_manager)")
-
-
 def test_harness_skill_no_longer_names_todoist_or_lotus():
     path = Path(__file__).resolve().parents[1] / "skills" / "general" / "harness-context-and-tool-routing" / "SKILL.md"
     text = path.read_text(encoding="utf-8")

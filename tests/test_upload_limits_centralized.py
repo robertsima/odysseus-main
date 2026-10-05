@@ -81,34 +81,37 @@ def test_non_positive_env_rejected(monkeypatch, env):
         _fresh_upload_limits()
 
 
-def test_routes_import_from_upload_limits_not_local_defs():
-    """Routes must import the constant, not redefine it via raw getenv / literal."""
-    forbidden = {
-        "routes/gallery/gallery_routes.py": [
-            'int(os.getenv("ODYSSEUS_GALLERY_UPLOAD_MAX_BYTES"',
-            'int(os.getenv("ODYSSEUS_GALLERY_TRANSFORM_UPLOAD_MAX_BYTES"',
-        ],
-        "routes/memory/memory_routes.py": ['int(os.getenv("ODYSSEUS_MEMORY_IMPORT_MAX_BYTES"'],
-        "routes/personal_routes.py": ['os.getenv("ODYSSEUS_PERSONAL_UPLOAD_MAX_BYTES"'],
-        "routes/email_routes.py": ["EMAIL_COMPOSE_UPLOAD_MAX_BYTES = 25 * 1024 * 1024"],
-        "routes/stt_routes.py": ["STT_MAX_AUDIO_BYTES = 25 * 1024 * 1024"],
-        "routes/calendar_routes.py": ["_ICS_MAX_BYTES = 10 * 1024 * 1024"],
-    }
-    for path, needles in forbidden.items():
-        text = (REPO / path).read_text(encoding="utf-8")
-        for needle in needles:
-            assert needle not in text, f"{path} still defines limit locally: {needle}"
+# route module -> (attribute the route enforces, limit it must follow)
+_ROUTE_LIMITS = {
+    "routes.gallery.gallery_routes": "GALLERY_UPLOAD_MAX_BYTES",
+    "routes.memory.memory_routes": "MEMORY_IMPORT_MAX_BYTES",
+    "routes.personal_routes": "PERSONAL_UPLOAD_MAX_BYTES",
+    "routes.email_routes": "EMAIL_COMPOSE_UPLOAD_MAX_BYTES",
+    "routes.stt_routes": "STT_MAX_AUDIO_BYTES",
+    "routes.calendar_routes": "ICS_MAX_BYTES",
+}
 
-    # And each imports from upload_limits.
-    imports = {
-        "routes/gallery/gallery_routes.py": "GALLERY_UPLOAD_MAX_BYTES",
-        "routes/memory/memory_routes.py": "MEMORY_IMPORT_MAX_BYTES",
-        "routes/personal_routes.py": "PERSONAL_UPLOAD_MAX_BYTES",
-        "routes/email_routes.py": "EMAIL_COMPOSE_UPLOAD_MAX_BYTES",
-        "routes/stt_routes.py": "STT_MAX_AUDIO_BYTES",
-        "routes/calendar_routes.py": "ICS_MAX_BYTES",
-    }
-    for path, const in imports.items():
-        text = (REPO / path).read_text(encoding="utf-8")
-        assert "from src.upload_limits import" in text
-        assert const in text
+
+def test_routes_enforce_the_configured_limit_not_a_local_copy(tmp_path):
+    """A route with its own literal ignores the operator's env override."""
+    import json
+    import os
+    import subprocess
+    import sys
+
+    overrides = {env: str(1000 + i) for i, (env, _) in enumerate(_LIMITS.values())}
+    code = (
+        "import importlib, json;"
+        f"routes = {list(_ROUTE_LIMITS.items())!r};"
+        "print(json.dumps({m: getattr(importlib.import_module(m), a) for m, a in routes}))"
+    )
+    env = {**os.environ, **overrides, "PYTHONPATH": str(REPO),
+           "DATABASE_URL": "sqlite:///" + (tmp_path / "app.db").as_posix(),
+           "ODYSSEUS_DATA_DIR": str(tmp_path / "data"), "PYTHONUTF8": "1"}
+    result = subprocess.run([sys.executable, "-c", code], cwd=str(REPO), env=env,
+                            capture_output=True, text=True, timeout=180)
+
+    assert result.returncode == 0, result.stderr[-2000:]
+    seen = json.loads(result.stdout.strip().splitlines()[-1])
+    expected = {module: int(overrides[_LIMITS[attr][0]]) for module, attr in _ROUTE_LIMITS.items()}
+    assert seen == expected

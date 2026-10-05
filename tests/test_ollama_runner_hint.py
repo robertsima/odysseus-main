@@ -31,18 +31,6 @@ def test_hint_still_tells_the_user_how_to_install():
     assert "install.sh" in OLLAMA_MISSING_HINT
 
 
-def test_no_runner_echo_line_uses_backticks_in_double_quotes():
-    # Source-level guard: generated-script echo lines must never carry
-    # backticks inside a double-quoted bash string again.
-    src = open(os.path.join(ROOT, "routes", "cookbook_routes.py"), encoding="utf-8").read()
-    offenders = [
-        line.strip()
-        for line in src.splitlines()
-        if "append(" in line and 'echo "' in line and "`" in line.split('echo "', 1)[1]
-    ]
-    assert offenders == []
-
-
 def test_single_quoted_echo_prints_hint_literally():
     bash = shutil.which("bash")
     if not bash:

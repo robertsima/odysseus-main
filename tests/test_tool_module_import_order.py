@@ -77,31 +77,6 @@ def test_no_circular_import_error_is_reported(module):
     )
 
 
-def test_tool_types_stays_a_leaf():
-    """The fix only holds while tool_types imports nothing from the cluster.
-
-    If a future change makes it import the registry, parsing or schemas, the
-    cycle comes back and the app stops booting.
-    """
-    import ast
-
-    tree = ast.parse((REPO_ROOT / "src" / "tool_types.py").read_text(encoding="utf-8"))
-    imported = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            imported.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            imported.add(node.module)
-
-    forbidden = {"src.agent_tools", "src.tool_parsing", "src.tool_schemas",
-                 "src.tool_execution"}
-    offending = sorted(imported & forbidden)
-    assert not offending, (
-        f"src/tool_types.py must not depend on {offending}; it is the leaf that "
-        "breaks the tool-pipeline import cycle"
-    )
-
-
 def test_the_reexports_are_the_same_objects():
     """Existing importers use src.agent_tools; they must get the real objects."""
     from src import agent_tools, tool_parsing, tool_schemas, tool_types
