@@ -1,0 +1,39 @@
+"""Pin langIcon (static/js/langIcons.js) against an explicit null opts.
+Driven through `node --input-type=module`; skips without node.
+"""
+import json
+import shutil
+from pathlib import Path
+
+import pytest
+
+from tests.helpers.node import module_url, run_module
+from tests import REPO_ROOT
+
+_REPO = REPO_ROOT
+_HELPER = _REPO / "static" / "js" / "langIcons.js"
+_HAS_NODE = shutil.which("node") is not None
+
+
+def _icon(lang, size, opts):
+    js = f"""
+    import {{ langIcon }} from '{module_url(_HELPER)}';
+    console.log(langIcon({json.dumps(lang)}, {json.dumps(size)}, {json.dumps(opts)}));
+    """
+    proc = run_module(js)
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout.strip()
+
+
+@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
+def test_lang_icon_tolerates_null_opts():
+    # `opts = {}` default only applies when the arg is omitted; an explicit
+    # null (easy to pass) hit opts.className and threw a TypeError.
+    out = _icon("python", 14, None)
+    assert out.startswith("<svg")
+    assert "class=" not in out
+
+
+@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
+def test_lang_icon_applies_opts_when_given():
+    assert 'class="ic"' in _icon("python", 14, {"className": "ic"})

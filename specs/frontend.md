@@ -16,7 +16,7 @@ This spec covers the current browser app in:
 - vendor libraries under `static/lib/*`;
 - custom fonts and static assets under `static/fonts/*`;
 - `static/sw.js` and `static/manifest.json`;
-- frontend-oriented tests in `tests/*_js.py`, `tests/*.mjs`, `tests/bombadil-spec.ts`, static DOM/CSS/source-shape tests, and app/static tests such as `tests/test_app_static_mime.py`.
+- frontend-oriented tests: node tests under `tests/static/js/` (`*.test.mjs`, real modules with the happy-dom fakes in `tests/static/js/_support/`), browser tests marked `browser`, `tests/*_js.py` node wrappers, and app/static tests such as `tests/test_app_static_mime.py`.
 
 `/backgrounds` currently targets `static/backgrounds.html`; if that route remains, the file must exist or the route should be removed.
 

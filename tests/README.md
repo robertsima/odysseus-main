@@ -1,151 +1,86 @@
-# Test Suite Notes
+# Test suite helpers
 
-## Purpose
+The reference for the shared fixtures and helpers. The rules (where a test goes,
+what a test must be, CI jobs, markers) are in [`TESTING_STANDARD.md`](./TESTING_STANDARD.md);
+`AGENTS.md` at the repo root carries the short version.
 
-This file documents the shared test helpers and the review expectations that go
-with them. The suite is being refactored incrementally, so this is a working
-reference for that effort - not a claim that the suite is already fully
-organized. Read it before adding a new helper or before reviewing a PR that
-touches `tests/helpers/`.
+Run tests with `python -m tests.run <lane>` (`affected`, `full`, `browser`,
+`security`, `nightly`); see `TESTING_STANDARD.md`.
 
-For the broader rules - test taxonomy, determinism/isolation rules, the
-behavioral-vs-source-text policy, and helper/factory extraction rules - see
-[`TESTING_STANDARD.md`](./TESTING_STANDARD.md). This file is the concrete helper
-reference; that file is the standard the refactor works toward.
+`tests/run_order_report.py` runs pytest with the collected tests shuffled by a
+printed seed, to find tests that depend on what ran before them. The nightly
+workflow runs it; locally: `python -m tests.run_order_report --seed 123 -- tests/scripts/ -q`.
 
-## Running focused subsets (taxonomy markers)
+## Fixtures in `tests/plugins/`
 
-`tests/conftest.py` tags every test at collection time with two markers derived
-from its filename by `tests/_taxonomy.py`: an `area_*` marker (e.g.
-`area_security`) and a finer `sub_*` marker (e.g. `sub_owner_scope`). This adds
-markers only - it moves no files and changes no test behavior. Use them to run a
-focused slice:
+Loaded for every test through `pytest_plugins` in `tests/conftest.py`.
 
-```bash
-./venv/bin/python -m pytest -m area_security
-./venv/bin/python -m pytest -m "area_services and sub_cookbook"
+### `api`: the real app over HTTP (`http_app.py`)
+
+The real FastAPI app with its real auth middleware, three accounts and a fresh
+per-test state. Each call returns a `TestClient` carrying that user's session
+cookie.
+
+```python
+def test_bob_does_not_see_alice_sessions(api):
+    alice, bob = api.as_user("alice"), api.as_user("bob")
+    alice.post("/api/session", data={"name": "plans", "skip_validation": "true"})
+    assert bob.get("/api/sessions").json() == []
 ```
 
-Areas are `security`, `routes`, `services`, `cli`, `js`, `helpers`, `unit`, and
-`uncategorized`. Classification is conservative and token-based: a file that
-matches no area keyword falls back to `area_uncategorized` with its filename as
-the sub-area. The `area_*` names are registered in `pyproject.toml`; the dynamic
-`sub_*` names are registered before collection by `pytest_configure` in
-`tests/conftest.py`, so unknown-mark warnings still flag genuine typos.
+- `api.as_user("alice")`, `api.as_user("bob")`, `api.as_admin()`, `api.anonymous()`.
+- `api.app`, `api.module` (app.py), `api.auth`, `api.session_manager`.
+- Every path derived from the data directory points at a per-process temp
+  folder, and an audit hook fails a test that touches the repo's real `data/`.
 
-For common focused runs, use `tests/run_focus.py`. It validates area and
-sub-area names, accepts sub-areas with or without the `sub_` prefix, and passes
-extra pytest arguments after `--`:
+### Network guard (`network_guard.py`)
 
-```bash
-./venv/bin/python tests/run_focus.py --area security
-./venv/bin/python tests/run_focus.py --area services --sub-area cookbook
-./venv/bin/python tests/run_focus.py --sub-area sub_cookbook
-./venv/bin/python tests/run_focus.py --keyword taxonomy
-./venv/bin/python tests/run_focus.py --last-failed
-./venv/bin/python tests/run_focus.py --dry-run --area services --sub-area cookbook
-./venv/bin/python tests/run_focus.py --area services -- --maxfail=1 -q
-```
+DNS lookups of names and connections beyond loopback fail at once with an error
+naming the guard. Address literals still resolve. Mark a test that needs the
+network `@pytest.mark.allow_network` and say why.
 
-### Fast lane and duration visibility
+### Browser tests (`browser.py`)
 
-`--fast` runs the fast lane: the tests that are *not* marked `slow` (it adds the
-marker expression `not slow`). It composes with `--area`/`--sub-area` using
-`and`. Because no tests may be marked `slow` yet, `--fast` can initially match
-the full focused selection; it becomes a real speed-up as `slow` marks are added
-from duration evidence. Use it for quick local or reviewer feedback; it does not
-replace broader focused or full-suite validation before merge.
+Python Playwright driving the system Chrome (`channel="chrome"`); nothing is
+downloaded. `pip install -r requirements-test.txt` installs Playwright.
+`ODYSSEUS_TEST_CHROMIUM=<path>` picks another Chromium build.
 
-`--durations N` and `--durations-min FLOAT` add pytest's slowest-test reporting
-so you can see where time goes. They are reporting only and do not count as a
-focus selector, so `--durations` must be combined with a real selector
-(`--area`, `--sub-area`, `--keyword`, `--last-failed`, or `--fast`).
+- `browser`: one Chrome per test process.
+- `new_page(width, height=None, **context_options)`: a page in a fresh context,
+  closed after the test. Under 481 px the viewport is mobile. Uncaught page
+  errors collect in `page.errors`.
+- Without Playwright or Chrome the tests skip. With `ODYSSEUS_REQUIRE_BROWSER=1`
+  (set in CI) they fail instead. With `ODYSSEUS_BROWSER_ARTIFACTS=<dir>` a failed
+  test leaves a screenshot of each of its pages there.
 
-Use the project Python environment before running these commands. The examples
-use the repo's documented `./venv/bin/python` path so they do not accidentally
-fall back to system Python.
+Browser tests live at the mirror of what they exercise, under `tests/static/`
+(`tests/static/js/workbench/` for `static/js/workbench.js`,
+`tests/static/index/` for the page shell in `static/index.html`). Their fixtures
+are in `tests/static/conftest.py`:
 
-```bash
-./venv/bin/python tests/run_focus.py --fast
-./venv/bin/python tests/run_focus.py --area services --fast
-./venv/bin/python tests/run_focus.py --area services --durations 25
-./venv/bin/python tests/run_focus.py --area services --fast --durations 25 --durations-min 0.05
-```
+- `open_app(width, theme=None, style=None, workbench_prefs=None, chat=True)`:
+  the shipped `static/` served with a canned `/api/*`
+  (`tests/helpers/static_app.py`), open on a fixture chat with a running agent
+  fleet and Workbench run. `static_app.state` records what the page posted and
+  lets a test change the canned data (`run_status`, `repo_activity`,
+  `appearance`); it is reset before each test.
+- `live_app` and `live_page(width=1440, path="/")`: the real app (`python app.py`)
+  on a free port with scratch data, signed in as an admin, with a scripted
+  OpenAI-compatible model (`tests/helpers/live_app.py`). The model answers by
+  probe markers in the conversation and can hold a reply at a gate
+  (`live_app.model.arm("stream")`, `wait_reached`, `release`), so a test can
+  look at a reply mid-stream. Tests that use it carry
+  `pytest.mark.xdist_group("live_app")`; CI runs with `--dist loadgroup`, so
+  one app serves them all.
 
-The `slow` marker is opt-in. Mark a test `slow` only with duration evidence
-(from `--durations`), not by guessing - see the fast-lane policy in
-`TESTING_STANDARD.md`. `--fast` is for quick reviewer feedback and must not
-replace the full suite before merge. A `slow` mark only excludes a test from the
-fast lane; the test stays runnable directly, e.g.:
+`tests/helpers/static_app.py` also has the measuring helpers: `probe` (box,
+paint and whether a click at the centre reaches the element), `assert_usable`,
+`assert_no_sideways_scroll`, `contrast`, and `settle`, which waits for CSS
+transitions to end and a box to stop moving. Wait with `expect(...)`,
+`wait_for_function` or `settle`, never a fixed sleep.
 
-```bash
-./venv/bin/python -m pytest tests/test_auth_config_lock_concurrency.py
-./venv/bin/python -m pytest -m slow
-```
-
-## Order-sensitivity reporting (report-only)
-
-`tests/run_order_report.py` runs pytest with the collected test items shuffled
-by a seeded RNG, to surface order-sensitive tests (hidden coupling through
-shared import state, module caches, databases, etc.). It is report-only: it is
-not wired into CI, adds no gate, and changes no normal pytest collection or
-ordering - the shuffle exists only inside this runner. The seed is always
-printed, and pytest targets/options go after a literal `--`:
-
-```bash
-./venv/bin/python tests/run_order_report.py --seed 123 -- tests/cli/ -q
-./venv/bin/python tests/run_order_report.py -- tests/cli/ -q   # generates and prints a seed
-```
-
-The same seed reproduces the same order when the reported working directory,
-pytest target arguments, and test environment are also the same. The runner
-prints all command arguments with shell-safe POSIX quoting and uses the
-invoking Python interpreter.
-
-A generated-seed run starts with output like:
-
-```text
-[order-report] working directory: /path/to/odysseus
-[order-report] shuffling test order with seed 284734921
-[order-report] reproduce from this working directory with the same test environment:
-[order-report] reproduce with: /path/to/odysseus/venv/bin/python /path/to/odysseus/tests/run_order_report.py --seed 284734921 -- tests/cli/ -q
-```
-
-Run the printed command from the reported working directory to reproduce the
-same fixed-seed order:
-
-```text
-[order-report] working directory: /path/to/odysseus
-[order-report] shuffling test order with seed 284734921
-[order-report] reproduce from this working directory with the same test environment:
-[order-report] reproduce with: /path/to/odysseus/venv/bin/python /path/to/odysseus/tests/run_order_report.py --seed 284734921 -- tests/cli/ -q
-```
-
-Pytest output remains visible between the report header and footer. A failing
-run ends with pytest's normal failure report followed by:
-
-```text
-FAILED tests/example_test.py::test_example - AssertionError
-[order-report] seed 284734921: pytest exit code 1 (report-only; fix order-sensitive failures in separate scoped PRs)
-```
-
-Failures discovered this way are real isolation bugs: fix them in separate
-scoped PRs - do not silence them with `skip`/`xfail`, and do not "fix" them by
-depending on a particular order.
-
-The runner propagates pytest's exit code, so it composes with normal local
-workflows; "report-only" means it is not a CI gate, not that failures are
-swallowed.
-
-## Core principles
-
-- Keep PRs small and homogeneous: one kind of change per PR.
-- Prefer explicit local setup over hidden global fixtures.
-- Avoid expanding the root `conftest.py` unless absolutely necessary.
-- Do not mix file moves with logic changes in the same PR.
-- Do not weaken tests with `skip`/`xfail` just to make CI pass.
-- Validate the focused files you changed, plus any neighboring or
-  order-sensitive groups they interact with.
+Widths are 1440, 700 and 390 px. Another width (320 px for the narrowest phone
+row, 1024 px for the half-width dock) needs a test that is about that width.
 
 ## Helper conventions
 
@@ -201,15 +136,29 @@ Use only for the guarded fake/stub `src.endpoint_resolver` cleanup pattern.
   cached against them.
 - Accepts explicit extra dependent module names to evict alongside the defaults.
 
+### Test databases: `app_db` and `make_test_db`
+
+`tests/plugins/database.py` builds each schema once per test process and gives
+each test a fresh copy, deleted after the test. Never call `create_all` in a
+test module, and never at import time.
+
+- `app_db`: a file copy of `core.database`'s schema. `app_db.SessionLocal` is
+  a sessionmaker bound to `app_db.engine` (NullPool, autoflush off);
+  `app_db.path` and `app_db.url` name the file.
+- `make_test_db(metadata=None, *, memory=False, **engine_kwargs)`: the factory
+  behind `app_db`. Use it for a test-local declarative base, more than one
+  database, an in-memory copy (`memory=True`, one connection that every thread
+  shares), or engine options such as `poolclass=QueuePool, pool_size=1`.
+- Bind `SessionLocal` onto the module the code under test reads with
+  `monkeypatch.setattr`. Never set `DATABASE_URL` and reload `core.database`.
+- Each test process also has its own SQLite file as `core.database`'s default
+  database, shared by all its threads, unless `DATABASE_URL` is set.
+
 ### `tests.helpers.sqlite_db.make_temp_sqlite`
 
-Use for the repeated file-backed temp sqlite setup in tests.
-
-- Only constructs `(SessionLocal, engine, tmpfile)` from the repeated block.
-- Does not patch modules and does not clean up the temp file.
-- The caller must bind `SessionLocal` explicitly onto whatever module the code
-  under test reads, and must keep the returned objects alive.
-- Do not use it as a general DB fixture framework.
+For code that cannot take a fixture. Returns `(SessionLocal, engine, path)` for
+a fresh file copy of a schema (`core.database`'s by default); the file is
+deleted when the test process exits. Prefer the fixtures above.
 
 ### `tests.helpers.db_stubs.make_core_db_stub`
 
@@ -222,35 +171,8 @@ Use for small import-time `core.database` stubs with a placeholder
   `core` module stub.
 - Keep custom fake sessions and route-specific database behavior local.
 
-## What not to abstract yet
+### `tests.helpers.node`
 
-Some remaining patterns should stay as-is for now rather than being forced into
-helpers:
-
-- Large mixed files such as security/review regression files.
-- Broad setup-oriented `sys.modules` stub installers.
-- One-off custom module patching.
-- Custom DB session, route, and app setup.
-
-## Validation expectations
-
-Run validation locally before opening or approving a PR. Practical checks:
-
-- `git diff --check` - catch whitespace and conflict-marker errors.
-- `./venv/bin/python -m py_compile <changed files>` - confirm changed files compile.
-- Focused `./venv/bin/python -m pytest` on the changed test files.
-- `./venv/bin/python -m pytest` on neighboring or order-sensitive test groups
-  that share import state with the changed files.
-- `grep` for the old boilerplate when replacing it, to confirm no stragglers
-  remain.
-- A fresh audit worktree when changing the helpers themselves, so stale
-  `__pycache__` or import state cannot mask a regression.
-
-## Current roadmap
-
-1. Import-state cleanup - complete.
-2. Document helper conventions (this file).
-3. Pilot the repeated import-time `core.database` stub helper.
-4. Add further tiny helpers only when the repeated semantics are clear.
-5. Start low-risk file moves only after helper conventions are documented.
-6. Avoid moving high-risk security/route regression files first.
+Runs node for the `*_js.py` wrappers: `module_url(path)` gives the `file://`
+URL node's ESM loader needs on every platform, and `run_module(...)` runs a
+snippet and decodes its output as UTF-8.

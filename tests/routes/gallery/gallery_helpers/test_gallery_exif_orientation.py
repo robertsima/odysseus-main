@@ -1,0 +1,55 @@
+"""Gallery EXIF extraction must report display (EXIF-rotated) dimensions.
+
+A phone photo with EXIF Orientation 6 or 8 is stored e.g. 400x300 but
+displayed 300x400. _extract_exif read img.width/img.height from the raw
+buffer, so the gallery recorded the wrong aspect ratio for rotated photos
+while upload_handler (which applies ImageOps.exif_transpose) got it right.
+"""
+
+from io import BytesIO
+
+import pytest
+
+pytest.importorskip("PIL")
+from PIL import Image
+
+
+@pytest.fixture
+def extract_exif():
+    from routes.gallery.gallery_helpers import _extract_exif
+
+    return _extract_exif
+
+
+def _jpeg(width, height, orientation=None, make=None):
+    img = Image.new("RGB", (width, height), "blue")
+    exif = Image.Exif()
+    if orientation is not None:
+        exif[0x0112] = orientation  # Orientation
+    if make is not None:
+        exif[0x010F] = make  # Make
+    buf = BytesIO()
+    img.save(buf, format="JPEG", exif=exif)
+    return buf.getvalue()
+
+
+def test_orientation_6_reports_display_dimensions(extract_exif):
+    res = extract_exif(_jpeg(400, 300, orientation=6))
+    assert (res["width"], res["height"]) == (300, 400)
+
+
+def test_orientation_8_reports_display_dimensions(extract_exif):
+    res = extract_exif(_jpeg(400, 300, orientation=8))
+    assert (res["width"], res["height"]) == (300, 400)
+
+
+def test_no_orientation_keeps_raw_dimensions(extract_exif):
+    res = extract_exif(_jpeg(400, 300))
+    assert (res["width"], res["height"]) == (400, 300)
+
+
+def test_camera_fields_survive_the_transpose(extract_exif):
+    # exif_transpose strips the EXIF view, so tags must be read before it
+    res = extract_exif(_jpeg(400, 300, orientation=6, make="TestMake"))
+    assert res["camera_make"] == "TestMake"
+    assert (res["width"], res["height"]) == (300, 400)

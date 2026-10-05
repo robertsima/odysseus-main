@@ -1,0 +1,74 @@
+"""Regression: username rename must migrate mixed-case legacy owner keys.
+
+Before lowercasing was enforced everywhere, rows could be stored with
+owner='Admin' while auth usernames are normalized to 'admin'. A case-
+sensitive filter would skip those rows during rename (issue #1165).
+"""
+
+import sys
+import time
+from unittest.mock import MagicMock
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _string_password_hashes(monkeypatch):
+    """Skip bcrypt: hash to a readable string on the real core.auth."""
+    import core.auth as auth_mod
+
+    monkeypatch.setattr(auth_mod, "_hash_password", lambda password: f"hash:{password}")
+    monkeypatch.setattr(auth_mod, "_verify_password", lambda password, hashed: hashed == f"hash:{password}")
+
+
+def _fresh_auth_manager(tmp_path):
+    import core.auth as auth_mod
+
+    return auth_mod.AuthManager(str(tmp_path / "auth.json"))
+
+
+def test_rename_user_updates_mixed_case_session_username(tmp_path):
+    mgr = _fresh_auth_manager(tmp_path)
+    assert mgr.create_user("admin", "pw-123456", is_admin=True) is True
+    assert mgr.create_user("bob", "pw-123456") is True
+    with mgr._sessions_lock:
+        mgr._sessions["tok1"] = {"username": "Bob", "expiry": time.time() + 3600}
+    assert mgr.rename_user("bob", "robert", "admin") is True
+    with mgr._sessions_lock:
+        assert mgr._sessions["tok1"]["username"] == "robert"
+
+
+def _has_real_sqlalchemy():
+    mod = sys.modules.get("sqlalchemy")
+    if mod is None or isinstance(mod, MagicMock):
+        return False
+    return hasattr(mod, "create_engine")
+
+
+@pytest.mark.skipif(not _has_real_sqlalchemy(), reason="sqlalchemy not installed")
+def test_rename_owner_db_filter_is_case_insensitive(make_test_db):
+    from sqlalchemy import func
+
+    from core.database import Session as DbSession
+
+    db = make_test_db(memory=True).SessionLocal()
+    db.add(
+        DbSession(
+            id="s1",
+            name="chat",
+            endpoint_url="http://localhost:8000",
+            model="gpt-4",
+            owner="Bob",
+        )
+    )
+    db.commit()
+
+    old_username = "bob"
+    new_username = "robert"
+    db.query(DbSession).filter(func.lower(DbSession.owner) == old_username).update(
+        {"owner": new_username},
+        synchronize_session=False,
+    )
+    db.commit()
+
+    assert db.query(DbSession).first().owner == "robert"

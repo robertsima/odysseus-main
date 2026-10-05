@@ -153,4 +153,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # Run as a script, Python puts tests/ first on sys.path, and then the
+    # mirrored tests/scripts and tests/src packages shadow the production
+    # scripts and src namespace packages in the in-process pytest run.
+    if sys.path and Path(sys.path[0] or ".").resolve() == Path(__file__).resolve().parent:
+        sys.path[0] = str(Path(__file__).resolve().parents[1])
     raise SystemExit(main())

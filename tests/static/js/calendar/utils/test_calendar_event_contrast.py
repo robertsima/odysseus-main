@@ -1,0 +1,61 @@
+import json
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+from tests import REPO_ROOT
+
+
+ROOT = REPO_ROOT
+
+pytestmark = pytest.mark.skipif(not shutil.which("node"), reason="node binary not on PATH")
+
+
+def _node_eval(source: str):
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", source],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(result.stdout)
+
+
+def test_calendar_readable_text_color_prefers_dark_ink_for_pastels():
+    values = _node_eval(
+        """
+        import { _calReadableTextColor } from './static/js/calendar/utils.js';
+        console.log(JSON.stringify({
+          blue: _calReadableTextColor('#b0d7f7'),
+          yellow: _calReadableTextColor('#f2dfbd'),
+          shortHex: _calReadableTextColor('#abc')
+        }));
+        """
+    )
+
+    assert values == {
+        "blue": "#111820",
+        "yellow": "#111820",
+        "shortHex": "#111820",
+    }
+
+
+def test_calendar_readable_text_color_keeps_light_text_for_dark_colors():
+    values = _node_eval(
+        """
+        import { _calReadableTextColor } from './static/js/calendar/utils.js';
+        console.log(JSON.stringify({
+          navy: _calReadableTextColor('#1f3552'),
+          red: _calReadableTextColor('#78252d'),
+          variable: _calReadableTextColor('var(--accent)')
+        }));
+        """
+    )
+
+    assert values == {
+        "navy": "#ffffff",
+        "red": "#ffffff",
+        "variable": "var(--fg)",
+    }
