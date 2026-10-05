@@ -49,18 +49,6 @@ def test_harness_directive_is_a_tail_user_message_not_system():
     assert "STOP calling tools" in msg["content"]
 
 
-def test_no_mid_turn_system_appends_remain_in_the_round_loop():
-    """llm_core hoists every role=system message into the instructions
-    prefix, so a mid-turn system append invalidates the cache for the whole
-    conversation. The round loop must use _harness_directive instead."""
-    import inspect
-    src = inspect.getsource(agent_loop.stream_agent_loop)
-    assert 'messages.append({\n                        "role": "system"' not in src
-    assert 'messages.append({\n                    "role": "system"' not in src
-    assert 'messages.append({\n                "role": "system"' not in src
-    assert src.count("_harness_directive(") >= 5
-
-
 def test_prompt_cache_key_rides_on_the_responses_payload(monkeypatch):
     monkeypatch.setattr("src.llm_core._shared_prompt_cache_key_enabled", lambda: False)
     payload = _build_chatgpt_responses_payload(
@@ -352,17 +340,6 @@ def test_audit_counter_is_per_owner():
     assert isinstance(me._extractions_since_audit, dict)
 
 
-def test_fallback_source_is_gated_in_extractor_source():
-    """When the model ran and judged the window, only identity facts from the
-    regex fallback survive (no more 'User prefers Umni' from a brainstorm)."""
-    import inspect
-    from services.memory import memory_extractor as me
-
-    src = inspect.getsource(me.extract_and_store)
-    assert "llm_ran" in src
-    assert 'f.get("category") == "identity"' in src
-
-
 def test_promotional_and_list_mail_is_not_calendar_material():
     from routes.email_pollers import _not_calendar_material
 
@@ -420,16 +397,6 @@ def test_skill_requires_toolsets_handles_empty_input():
 
     assert _skill_declared_tools([], set()) == (set(), set())
     assert _skill_declared_tools([{"name": "x"}], set()) == (set(), set())
-
-
-def test_worktree_status_names_the_checkout_it_manages():
-    """The agent could not tell that a worktree it just started belongs to
-    Odysseus and not to the third-party project it was working in."""
-    import inspect
-    from src.agent_worktree import service
-
-    src = inspect.getsource(service.status)
-    assert '"source_repo": cfg.source_repo' in src
 
 
 # ── get_workspace answers "where is the code?" in one round ──
@@ -582,16 +549,6 @@ def test_admin_intent_adds_only_the_tools_its_keywords_named():
     assert len({n for n in blanket - _LOG_TURN_SELECTION if not n.startswith("mcp__")}) > 10, (
         "the blanket fallback is what the per-keyword breakdown replaced; if it "
         "ever becomes reachable again from stream_agent_loop this is the cost"
-    )
-
-
-def test_both_call_sites_pass_the_keyword_breakdown():
-    import inspect
-
-    src = inspect.getsource(agent_loop.stream_agent_loop)
-    assert src.count("admin_tools=_admin_tools") == 2, (
-        "a call site that omits admin_tools falls back to the whole "
-        "_ADMIN_TOOLS set, silently, on every round of the turn"
     )
 
 

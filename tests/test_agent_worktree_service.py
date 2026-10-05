@@ -402,3 +402,12 @@ async def test_the_credentialed_push_does_not_run_inside_the_agent_worktree(cfg,
 def test_auth_env_is_empty_without_a_token():
     assert auth_env(None, "https://github.com/acme/widgets.git") == {}
     assert auth_env("", "https://github.com/acme/widgets.git") == {}
+
+
+@git_required
+async def test_status_names_the_checkout_the_tool_manages(cfg):
+    """The agent could not tell that a worktree it just started belongs to
+    Odysseus and not to the third-party project it was working in."""
+    status = await service.status(cfg=cfg)
+
+    assert status["source_repo"] == cfg.source_repo
