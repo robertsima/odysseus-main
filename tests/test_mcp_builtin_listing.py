@@ -7,6 +7,8 @@ showed whether Todoist, GitHub or Lotus were running (2026-09-28).
 
 from unittest.mock import MagicMock
 
+from fastapi import APIRouter
+
 from routes.mcp import mcp_routes
 from src import builtin_mcp
 
@@ -15,6 +17,9 @@ def _builtin_endpoint(monkeypatch, statuses):
     monkeypatch.setattr(mcp_routes, "require_admin", lambda request: None)
     manager = MagicMock()
     manager.get_server_status = MagicMock(side_effect=lambda sid: statuses.get(sid, {"status": "disconnected"}))
+    # setup_mcp_routes adds its routes to the module-level router that app.py
+    # includes; an empty one keeps this test's fake manager out of it.
+    monkeypatch.setattr(mcp_routes, "router", APIRouter(prefix="/api/mcp", tags=["mcp"]))
     router = mcp_routes.setup_mcp_routes(manager)
     route = [r for r in router.routes if getattr(r, "name", None) == "list_builtin"][-1]
     return route.endpoint

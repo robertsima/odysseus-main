@@ -39,6 +39,18 @@ def _stub_multipart_if_missing(monkeypatch):
     monkeypatch.setitem(sys.modules, "python_multipart", stub)
 
 
+def _fresh_router(monkeypatch, sr):
+    """Give setup_session_routes an empty router for this test.
+
+    It adds its routes to the module-level router that app.py includes, so a
+    MagicMock session manager registered here would answer /api/session in
+    every app built later in the process.
+    """
+    from fastapi import APIRouter
+
+    monkeypatch.setattr(sr, "router", APIRouter(prefix="/api"))
+
+
 def test_list_sessions_excludes_other_users_sessions(monkeypatch):
     import routes.session_routes as sr
     from unittest.mock import MagicMock
@@ -65,6 +77,7 @@ def test_list_sessions_excludes_other_users_sessions(monkeypatch):
                               rag=False, archived=False)
     sm = MagicMock()
     sm.get_sessions_for_user.return_value = {alice_id: alice_session}
+    _fresh_router(monkeypatch, sr)
     router = sr.setup_session_routes(sm, {})
     # The router is module-level and every setup call appends its routes, so
     # an earlier test in the same process leaves an /api/sessions bound to its
@@ -122,6 +135,7 @@ def test_auto_sort_skip_llm_cleans_owner_stamped_sessions_when_auth_disabled(mon
     session = MagicMock(id=sid, name="New chat", model="gpt-4", endpoint_url="http://localhost", rag=False, archived=False)
     sm = MagicMock()
     sm.get_sessions_for_user.return_value = {sid: session}
+    _fresh_router(monkeypatch, sr)
     router = sr.setup_session_routes(sm, {})
     endpoint = next(r.endpoint for r in router.routes
                     if getattr(r, "path", "") == "/api/sessions/auto-sort"

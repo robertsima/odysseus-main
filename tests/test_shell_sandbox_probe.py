@@ -180,9 +180,13 @@ def test_route_is_admin_only(monkeypatch):
     assert resp.status_code == 403
 
 
-def test_route_is_registered_in_the_app():
-    source = (Path(__file__).resolve().parents[1] / "app.py").read_text(encoding="utf-8")
-    assert "setup_shell_sandbox_routes()" in source
+def test_route_is_served_by_the_app(api, monkeypatch):
+    _runner(monkeypatch, lambda argv: (0, ""))
+
+    response = api.as_admin().get("/api/settings/shell-sandbox")
+
+    assert response.status_code == 200, response.text
+    assert set(response.json()) == {"mode", "network", "available", "degraded", "reason"}
 
 
 # ── managed worktrees of the workspace's repository ─────────────────────

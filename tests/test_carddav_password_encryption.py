@@ -1,15 +1,11 @@
 import json
 import os
-import sys
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
 
 def _import_contacts(tmp_path, monkeypatch):
-    sys.modules.setdefault("core.database", MagicMock())
-
     monkeypatch.setattr(
         "routes.contacts_routes.SETTINGS_FILE",
         tmp_path / "settings.json",
@@ -23,12 +19,10 @@ def _import_contacts(tmp_path, monkeypatch):
         tmp_path / "contacts.json",
     )
 
-    sys.modules.pop("src.secret_storage", None)
     from src import secret_storage
     monkeypatch.setattr(secret_storage, "_KEY_PATH", tmp_path / ".app_key")
     monkeypatch.setattr(secret_storage, "_fernet", None)
 
-    sys.modules.pop("routes.contacts_routes", None)
     from routes import contacts_routes
     return contacts_routes
 

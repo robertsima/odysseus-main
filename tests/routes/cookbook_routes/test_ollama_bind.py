@@ -6,14 +6,18 @@ to, so Odysseus can reach it, and the runner says so.
 """
 import asyncio
 import re
+import shutil
 import subprocess
 from types import SimpleNamespace
 
 import pytest
 
 from routes import cookbook_routes, model_routes
+from routes.cookbook_helpers import OLLAMA_MISSING_HINT
 
 pytestmark = pytest.mark.security
+
+_REAL_POPEN = subprocess.Popen
 
 
 @pytest.fixture
@@ -66,3 +70,23 @@ def test_a_remote_ollama_listens_on_every_interface_and_says_so(runners):
 
     assert _bind_host(script) == "0.0.0.0"
     assert "WARNING: remote Ollama will bind" in script
+
+
+def test_the_missing_ollama_hint_is_printed_not_executed(runners, tmp_path, monkeypatch):
+    """Backticks inside a double-quoted echo are command substitution: a host
+    without Ollama used to download and run the installer instead of printing it."""
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("bash not available")
+    script = runners()
+    monkeypatch.setattr(subprocess, "Popen", _REAL_POPEN)  # the fixture faked it for the serve call
+    [line] = [l for l in script.splitlines() if "ollama.com/download" in l]
+    empty = tmp_path / "empty-path"
+    empty.mkdir()
+
+    # No external command is reachable, so any substitution shows up as stderr.
+    out = subprocess.run([bash, "-c", line.strip()], capture_output=True, text=True,
+                         timeout=30, env={"PATH": str(empty)})
+
+    assert out.stdout.strip() == OLLAMA_MISSING_HINT
+    assert out.stderr == ""

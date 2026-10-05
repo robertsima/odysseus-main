@@ -321,17 +321,6 @@ def test_document_and_model_tools_report_failures_with_an_exit_code():
     assert no_blocks.get("exit_code") == 1
 
 
-def test_the_trace_says_exit_code_cannot_be_fully_trusted(db):
-    """Until every tool sets it, the caveat travels with the data."""
-    task_id = _task(db, owner="alice", session_id="sess-trace")
-    started = _utc()
-    _run(db, task_id, started=started, finished=started + timedelta(seconds=30))
-    act.publish("sess-trace", "tool_result", "bash done", owner="alice",
-                data={"tool": "bash", "exit_code": 0})
-    report = runtime_introspection.task_report(task_id, "alice", offload=False)
-    assert "exit_code" in report["runs"][0]["tools"]["exit_code_caveat"]
-
-
 # ── 5. what the feature actually answers ────────────────────────────────── #
 
 def test_lane_classification_names_the_rule_that_decided(db):

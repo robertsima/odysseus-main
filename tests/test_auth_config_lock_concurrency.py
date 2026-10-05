@@ -15,8 +15,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pytest
 
-from tests.helpers.import_state import clear_module
-
 
 class _OwnerColumn:
     def __eq__(self, other):
@@ -68,7 +66,6 @@ def _cheap_password_hashes(monkeypatch):
 
 
 def _fresh_auth_manager(tmp_path):
-    clear_module("core.auth")
     from core.auth import AuthManager
 
     return AuthManager(str(tmp_path / "auth.json"))

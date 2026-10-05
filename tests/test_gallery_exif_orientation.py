@@ -6,11 +6,7 @@ buffer, so the gallery recorded the wrong aspect ratio for rotated photos
 while upload_handler (which applies ImageOps.exif_transpose) got it right.
 """
 
-import importlib
-import sys
-import types
 from io import BytesIO
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -19,22 +15,10 @@ from PIL import Image
 
 
 @pytest.fixture
-def extract_exif(monkeypatch):
-    """Import routes.gallery_helpers under a core.database stub.
+def extract_exif():
+    from routes.gallery.gallery_helpers import _extract_exif
 
-    _extract_exif never touches the DB, but the module imports GalleryImage
-    at import time and the conftest sqlalchemy stubs make the real
-    core.database unimportable in isolation.
-    """
-
-    class _DBStub(types.ModuleType):
-        def __getattr__(self, name):
-            return MagicMock()
-
-    monkeypatch.setitem(sys.modules, "core.database", _DBStub("core.database"))
-    monkeypatch.delitem(sys.modules, "routes.gallery.gallery_helpers", raising=False)
-    mod = importlib.import_module("routes.gallery.gallery_helpers")
-    return mod._extract_exif
+    return _extract_exif
 
 
 def _jpeg(width, height, orientation=None, make=None):

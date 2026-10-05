@@ -5,7 +5,7 @@ vault of short notes scores lower than the default assumes) got no effect and
 no warning. Bad values fall back to the default rather than silently disabling
 retrieval (0 injects everything) or blocking it (>1 injects nothing).
 """
-import importlib
+import importlib.util
 import os
 
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
@@ -41,9 +41,9 @@ def test_class_attribute_picks_up_the_env_on_import(monkeypatch):
     """The threshold is read at import and stays a plain class attribute, so
     `self.RAG_SIMILARITY_THRESHOLD` reads and tests that patch it keep working."""
     monkeypatch.setenv("RAG_SIMILARITY_THRESHOLD", "0.20")
-    reloaded = importlib.reload(chat_processor)
-    try:
-        assert reloaded.ChatProcessor.RAG_SIMILARITY_THRESHOLD == pytest.approx(0.20)
-    finally:
-        monkeypatch.delenv("RAG_SIMILARITY_THRESHOLD", raising=False)
-        importlib.reload(chat_processor)
+    # A separate copy of the module, so the ChatProcessor class other tests
+    # imported is not replaced the way importlib.reload would replace it.
+    spec = importlib.util.find_spec("src.chat_processor")
+    fresh = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fresh)
+    assert fresh.ChatProcessor.RAG_SIMILARITY_THRESHOLD == pytest.approx(0.20)

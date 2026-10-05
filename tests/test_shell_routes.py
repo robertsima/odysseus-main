@@ -171,21 +171,34 @@ class TestRunningInContainer:
         )
 
 
+def _fresh_platform_compat():
+    """Run core/platform_compat.py again as a separate module object.
+
+    IS_APPLE_SILICON is computed at import. Reloading the real module would
+    leave the faked platform's answer, and new copies of every helper, in
+    place for the rest of the run, so the copy stays out of sys.modules.
+    """
+    spec = importlib.util.find_spec("core.platform_compat")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 class TestAppleSiliconDetection:
     """APFEL should only surface as available on native Apple Silicon Macs."""
 
     @pytest.mark.skipif(
         sys.platform == "win32",
-        reason="IS_APPLE_SILICON also requires a POSIX os.name, which reloading the module cannot fake on Windows",
+        reason="IS_APPLE_SILICON also requires a POSIX os.name, which importing the module again cannot fake on Windows",
     )
     def test_reports_true_on_macos_arm64(self, monkeypatch):
         import core.platform_compat as platform_compat
 
         monkeypatch.setattr(platform_compat.platform, "system", lambda: "Darwin")
         monkeypatch.setattr(platform_compat.platform, "machine", lambda: "arm64")
-        importlib.reload(platform_compat)
+        fresh = _fresh_platform_compat()
 
-        assert platform_compat.IS_APPLE_SILICON is True
+        assert fresh.IS_APPLE_SILICON is True
 
     @pytest.mark.parametrize("machine", ["x86_64", "amd64"])
     def test_reports_false_off_apple_silicon(self, monkeypatch, machine):
@@ -193,18 +206,18 @@ class TestAppleSiliconDetection:
 
         monkeypatch.setattr(platform_compat.platform, "system", lambda: "Darwin")
         monkeypatch.setattr(platform_compat.platform, "machine", lambda: machine)
-        importlib.reload(platform_compat)
+        fresh = _fresh_platform_compat()
 
-        assert platform_compat.IS_APPLE_SILICON is False
+        assert fresh.IS_APPLE_SILICON is False
 
     def test_reports_false_on_non_macos(self, monkeypatch):
         import core.platform_compat as platform_compat
 
         monkeypatch.setattr(platform_compat.platform, "system", lambda: "Linux")
         monkeypatch.setattr(platform_compat.platform, "machine", lambda: "arm64")
-        importlib.reload(platform_compat)
+        fresh = _fresh_platform_compat()
 
-        assert platform_compat.IS_APPLE_SILICON is False
+        assert fresh.IS_APPLE_SILICON is False
 
 
 class TestDockerRowStatus:

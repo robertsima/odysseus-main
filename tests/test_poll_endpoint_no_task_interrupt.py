@@ -1,13 +1,14 @@
 """Regression tests for polling endpoints and foreground task interruption."""
 
 import asyncio
-import importlib
 
 
 def _reload_gate():
+    # The functions under test keep no state and read the environment when
+    # called, so the loaded module is enough. Reloading it used to replace the
+    # gate's condition, timestamps and context variable under the running app.
     import src.interactive_gate as ig
 
-    importlib.reload(ig)
     return ig
 
 

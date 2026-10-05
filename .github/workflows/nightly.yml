@@ -17,7 +17,7 @@ on:
         default: false
   push:
     # Pushing this branch runs the workflow before it reaches dev.
-    branches: ["restructure/nightly"]
+    branches: ["restructure/nightly", "restructure/base"]
 
 permissions:
   contents: read

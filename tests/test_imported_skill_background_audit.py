@@ -64,7 +64,9 @@ async def test_published_import_remains_eligible_for_nightly_audit(monkeypatch):
         captured.extend(names)
 
     monkeypatch.setattr(skills_routes, "_run_audit_all_job", run_job)
-    skills_routes._skill_audit_jobs.pop(("alice",), None)
+    # The faked job never finishes, so the "running" entry this audit records
+    # must not outlive the test: a later audit for alice would be skipped.
+    monkeypatch.setattr(skills_routes, "_skill_audit_jobs", {})
     result = await skills_routes.run_scheduled_skill_audit(
         Manager([row]), owner="alice",
     )

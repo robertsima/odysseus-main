@@ -465,6 +465,9 @@ def test_the_loop_compacts_once_the_transcript_presses_on_the_budget(caplog):
     import logging
 
     size = estimate_tokens(_loop_rounds(0))
+    # The sizing run above compacts too, and logs it whenever an earlier test in
+    # this process (one that imported the app) left INFO logging on.
+    caplog.clear()
     with caplog.at_level(logging.INFO, logger="src.agent_loop"):
         msgs = _loop_rounds(ledger_budget=size)  # ends at ~100% of budget
     assert any("Execution ledger" in str(m.get("content")) for m in msgs)

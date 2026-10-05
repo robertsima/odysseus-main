@@ -1,40 +1,30 @@
 """Tests for auth policy endpoint and password length validation."""
 
 import asyncio
-import importlib
-import sys
-import types
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 from fastapi import HTTPException
 
-from tests.helpers.import_state import clear_module
 
+@pytest.fixture(autouse=True)
+def _string_password_hashes(monkeypatch):
+    """Skip bcrypt: hash to a readable string on the real core.auth."""
+    import core.auth as auth_mod
 
-def _real_core_package():
-    root = Path(__file__).resolve().parent.parent
-    core_path = str(root / "core")
-    core = sys.modules.get("core")
-    if core is None:
-        core = types.ModuleType("core")
-        sys.modules["core"] = core
-    core.__path__ = [core_path]
-    clear_module("core.auth")
-    return core
+    monkeypatch.setattr(auth_mod, "_hash_password", lambda password: f"hash:{password}")
+    monkeypatch.setattr(auth_mod, "_verify_password", lambda password, hashed: hashed == f"hash:{password}")
 
 
 def _auth_module():
-    _real_core_package()
-    return importlib.import_module("core.auth")
+    import core.auth as auth_mod
+
+    return auth_mod
 
 
 def _make_manager(tmp_path):
     auth_mod = _auth_module()
-    auth_mod._hash_password = lambda password: f"hash:{password}"
-    auth_mod._verify_password = lambda password, hashed: hashed == f"hash:{password}"
     auth_path = tmp_path / "auth.json"
     mgr = auth_mod.AuthManager(str(auth_path))
     return mgr
@@ -79,8 +69,6 @@ def test_policy_returns_session_days(tmp_path):
 
 
 def _policy_endpoint(auth_manager):
-    sys.modules.pop("routes.auth_routes", None)
-    _real_core_package()
     from routes.auth_routes import setup_auth_routes
 
     router = setup_auth_routes(auth_manager)
@@ -112,8 +100,6 @@ def test_policy_endpoint_values_match_manager(tmp_path):
 
 
 def _setup_endpoint(auth_manager):
-    sys.modules.pop("routes.auth_routes", None)
-    _real_core_package()
     from routes.auth_routes import SetupRequest, setup_auth_routes
 
     router = setup_auth_routes(auth_manager)
@@ -124,8 +110,6 @@ def _setup_endpoint(auth_manager):
 
 
 def _signup_endpoint(auth_manager):
-    sys.modules.pop("routes.auth_routes", None)
-    _real_core_package()
     from routes.auth_routes import SignupRequest, setup_auth_routes
 
     router = setup_auth_routes(auth_manager)
@@ -136,8 +120,6 @@ def _signup_endpoint(auth_manager):
 
 
 def _change_password_endpoint(auth_manager):
-    sys.modules.pop("routes.auth_routes", None)
-    _real_core_package()
     from routes.auth_routes import ChangePasswordRequest, setup_auth_routes
 
     router = setup_auth_routes(auth_manager)
@@ -231,8 +213,6 @@ class _CapturingResponse:
 
 
 def _login_endpoint(auth_manager):
-    sys.modules.pop("routes.auth_routes", None)
-    _real_core_package()
     from routes.auth_routes import LoginRequest, setup_auth_routes
 
     router = setup_auth_routes(auth_manager)

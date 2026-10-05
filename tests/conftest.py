@@ -196,6 +196,46 @@ def _isolate_integration_skill_registrations():
 
 
 @pytest.fixture(autouse=True)
+def _fresh_settings_cache():
+    """Drop src.settings' cached settings.json before and after each test.
+
+    load_settings() keeps what it read for two seconds. A test that points
+    SETTINGS_FILE at its own file, or the api fixture's temp data folder, left
+    that file's values cached after monkeypatch put the path back, and a test
+    starting within those two seconds read them: on nightly seed 3355886443 a
+    fake claude_code_odysseus_token_file from test_runtime_introspection.py
+    stopped a Claude Code run in test_claude_code_transcript.py.
+    """
+    mod = sys.modules.get("src.settings")
+    if mod is not None:
+        mod._invalidate_caches()
+    try:
+        yield
+    finally:
+        late = sys.modules.get("src.settings")
+        if late is not None:
+            late._invalidate_caches()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_host_health():
+    """Start each test with no upstream host cooled down.
+
+    After two failed connects src.llm_core cools a host for DEAD_HOST_COOLDOWN
+    (20 s) in process-wide dicts, and the network guard makes every call to a
+    real provider fail. A test whose call to https://api.openai.com failed
+    therefore made the next 20 s of tests get "Upstream ... marked
+    unreachable (cooldown active)" from that host: on nightly seed 971003926
+    test_email_urgency_checkpoint.py lost its faked LLM synthesis that way.
+    """
+    mod = sys.modules.get("src.llm_core")
+    if mod is not None:
+        mod._dead_hosts.clear()
+        mod._host_fails.clear()
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _clear_embedding_and_cache_key_memory():
     """Process-level memos (query-embedding LRU, per-session prompt_cache_key)
     must not carry one test's fake embedder output or session keys into the next."""

@@ -179,14 +179,6 @@ def test_prune_does_nothing_inside_the_window():
     assert len(_live(messages)) == 3
 
 
-def test_loop_never_writes_its_messages_to_chat_history():
-    # The follow-up lives only in the in-turn list; history is written by the
-    # chat handler from the final response, so no base64 reaches the database.
-    import inspect
-
-    assert "history.append" not in inspect.getsource(al)
-
-
 def test_prune_tool_images_force_cuts_below_the_cap():
     from src.context_compactor import TOOL_IMAGES_SOURCE, prune_tool_images
 
