@@ -37,13 +37,14 @@ def test_nested_tree_and_round_duration_render(style, width):
                                  json.dumps(json.dumps({'value': style, 'updated_at': 1})) + ");")
                 page.goto(f'{server.url}/#{fixtures.SESSION_ID}', settle=0.7)
                 page.wait_for("document.querySelectorAll('#chat-history .msg').length >= 4")
-                page.wait_for("document.querySelector('.agent-round-duration')")
-                assert '1m 3s' in page.eval("document.querySelector('#chat-history .agent-round-duration').textContent")
-                assert page.eval("[...document.querySelectorAll('#chat-history .agent-round-duration')].map(n=>n.textContent.trim())") == ['Round · 1m 3s', 'Round · 5.0s']
-                assert page.eval("!document.querySelector('#chat-history .msg:last-child .agent-round-duration')")
+                page.wait_for("document.querySelector('.agent-turn-duration')")
+                assert page.eval("document.querySelector('#chat-history .agent-turn-duration').textContent.trim()") == 'Turn · 1m 8s'
+                assert page.eval("document.querySelectorAll('#chat-history .agent-turn-duration').length") == 1
+                assert page.eval("!!document.querySelector('#chat-history .msg-ai .agent-turn-duration')")
+                assert page.eval("!document.querySelector('#chat-history .msg:last-child .agent-turn-duration')")
                 out = Path('.visual-check')
                 out.mkdir(exist_ok=True)
-                page.eval("document.querySelector('#chat-history .agent-round-duration').scrollIntoView({block:'center',behavior:'instant'})")
+                page.eval("document.querySelector('#chat-history .agent-turn-duration').scrollIntoView({block:'center',behavior:'instant'})")
                 page.screenshot(out / f'chat-multi-round-{style}-{width}.png')
                 page.eval('window.agentsDashboard.open()')
                 page.wait_for("document.querySelector('.ag-card[data-sid=\"agent-grandchild\"]')")
@@ -120,11 +121,11 @@ def test_single_round_history_shows_duration_but_legacy_reply_does_not():
             try:
                 page.goto(f'{server.url}/#{fixtures.SESSION_ID}', settle=0.7)
                 page.wait_for("document.querySelectorAll('#chat-history .msg').length >= 4")
-                page.wait_for("document.querySelector('#chat-history .agent-round-duration')")
-                assert '2.3s' in page.eval("document.querySelector('#chat-history .agent-round-duration').textContent")
-                assert page.eval("document.querySelectorAll('#chat-history .agent-round-duration').length") == 1
-                assert page.eval("!document.querySelectorAll('#chat-history .msg')[3].querySelector('.agent-round-duration')")
-                page.eval("document.querySelector('#chat-history .agent-round-duration').scrollIntoView({block:'center',behavior:'instant'})")
+                page.wait_for("document.querySelector('#chat-history .agent-turn-duration')")
+                assert '2.3s' in page.eval("document.querySelector('#chat-history .agent-turn-duration').textContent")
+                assert page.eval("document.querySelectorAll('#chat-history .agent-turn-duration').length") == 1
+                assert page.eval("!document.querySelectorAll('#chat-history .msg')[3].querySelector('.agent-turn-duration')")
+                page.eval("document.querySelector('#chat-history .agent-turn-duration').scrollIntoView({block:'center',behavior:'instant'})")
                 page.eval("new Promise(resolve => setTimeout(resolve, 400))")
                 out = Path('.visual-check')
                 out.mkdir(exist_ok=True)
