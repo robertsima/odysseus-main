@@ -39,7 +39,7 @@ jobs:
             python3 scripts/affected_tests.py --base "$BASE_SHA" || echo "(could not compute)"
             echo '```'
             echo
-            echo 'Run them locally with `python -m tests.run affected`.'
+            echo "Run them locally with: python -m tests.run affected"
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
   red-evidence:

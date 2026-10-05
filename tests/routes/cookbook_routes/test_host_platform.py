@@ -8,17 +8,21 @@ must not make the Cookbook build Linux commands for it.
 """
 
 
-def _served_globals(api):
-    """The module globals of the GET /api/cookbook/state the app serves.
+def _host_is_windows(monkeypatch, value):
+    """Set IS_WINDOWS on every loaded copy of routes.cookbook_routes.
 
-    Patching `routes.cookbook_routes` by import is not enough: when an earlier
-    test in the process re-imported that module, the app still serves the
-    functions of the copy it loaded first.
+    Patching the module by import is not enough: when an earlier test in the
+    process re-imported it, the app still serves the functions of the copy it
+    loaded first, which read their own IS_WINDOWS.
     """
-    for route in api.app.routes:
-        if getattr(route, "path", "") == "/api/cookbook/state" and "GET" in getattr(route, "methods", ()):
-            return route.endpoint.__globals__
-    raise AssertionError("GET /api/cookbook/state is not served")
+    import gc
+    import types
+
+    copies = [obj for obj in gc.get_objects()
+              if isinstance(obj, types.ModuleType) and getattr(obj, "__name__", "") == "routes.cookbook_routes"]
+    assert copies, "routes.cookbook_routes is not loaded"
+    for module in copies:
+        monkeypatch.setattr(module, "IS_WINDOWS", value)
 
 
 def _state(api):
@@ -28,12 +32,12 @@ def _state(api):
 
 
 def test_a_windows_backend_reports_windows_as_the_host_platform(api, monkeypatch):
-    monkeypatch.setitem(_served_globals(api), "IS_WINDOWS", True)
+    _host_is_windows(monkeypatch, True)
     assert _state(api)["env"]["hostPlatform"] == "windows"
 
 
 def test_a_saved_host_platform_does_not_override_the_backend(api, monkeypatch):
-    monkeypatch.setitem(_served_globals(api), "IS_WINDOWS", False)
+    _host_is_windows(monkeypatch, False)
     saved = api.as_admin().post("/api/cookbook/state", json={"env": {"hostPlatform": "windows"}, "tasks": []})
     assert saved.status_code == 200, saved.text
 
