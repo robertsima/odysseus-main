@@ -3,7 +3,7 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 
-const source = readFileSync(new URL('../../static/js/pluginCatalog.js', import.meta.url), 'utf8');
+const source = readFileSync(new URL('../../../../static/js/pluginCatalog.js', import.meta.url), 'utf8');
 function fixture() {
   const nodes = new Map();
   const calls = [];

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { installPlan } from '../../scripts/add-project-skill.mjs';
+import { installPlan } from '../../../scripts/add-project-skill.mjs';
 
 test('project installer targets only PromptScript without global or all-agent flags', () => {
   const plan = installPlan(['vercel-labs/skills', 'find-skills', '--yes', '--dry-run']);

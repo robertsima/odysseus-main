@@ -15,7 +15,7 @@ import {
   createLiveThinkingThrottle,
   createThinkingAnalysisGate,
   stripLiveThinkingTags,
-} from '../static/js/liveThinkingThrottle.js';
+} from '../../../../static/js/liveThinkingThrottle.js';
 
 function fakeTimers() {
   let nextId = 1;

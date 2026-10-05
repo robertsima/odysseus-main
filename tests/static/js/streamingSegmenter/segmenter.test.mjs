@@ -9,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadMarkdown, normalizeRender } from './markdownHarness.mjs';
-import { splitFinalized } from '../../static/js/streamingSegmenter.js';
+import { splitFinalized } from '../../../../static/js/streamingSegmenter.js';
 
 const md = await loadMarkdown();
 const render = (t) => md.mdToHtml(t);
