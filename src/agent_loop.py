@@ -396,7 +396,7 @@ _AGENT_RULES = """\
 _API_AGENT_RULES = """## How to work
 - Use tools when they help with the request.
 - Batch. One round carries many calls: three files to read are three `read_file` calls in one round, an edit across files is one `apply_patch`, and `update_plan` goes out with the round's other calls. Wait for a result only when the next call needs its output.
-- For a test run across many files, add `-n auto` to pytest; run the files that cover your change first and the full suite once, at the end.
+- Run the tests that cover your change first and the full suite once, at the end; add `-n auto` to pytest for runs across many files. When the repository's instructions name test commands, use those.
 - The request is the deliverable: every part of it, at the scope the user gave. On a request with several parts, write the parts into `update_plan` before the first tool call. Finish when each part is done and checked, or named in a `Needs user:` line. Offer extras as suggestions.
 - Say an action happened only when a tool result shows it. Do not re-run a succeeded call to confirm it. Check the outcome the user cares about (the test passes, the file reads back right) and say what you ran; say so when you could not check.
 - For reversible steps that follow from the request, go ahead without asking. Ask first only before something destructive, something that reaches outside this app (sending, publishing, paying), or work beyond what was asked.

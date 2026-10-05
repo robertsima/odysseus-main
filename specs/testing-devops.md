@@ -1,13 +1,13 @@
 # Testing And Devops
 
-Last updated: dev@e71f8ce | 2026-08-25
+Last updated: restructure | 2026-10-04
 
 ## Scope
 
 This spec covers development and validation surfaces in:
 
-- `tests/`, `tests/conftest.py`, `tests/*.mjs`, and `tests/bombadil-spec.ts`;
-- `tests/run_focus.py`, `tests/run_order_report.py`, `tests/_taxonomy.py`, `tests/TESTING_STANDARD.md`, and `tests/LAYOUT_INVENTORY.md`;
+- `tests/`, `tests/conftest.py`, `tests/plugins/`, `tests/suite/`, `tests/mutants/`, and the node tests (`tests/**/*.test.mjs`);
+- `tests/run.py`, `tests/run_order_report.py`, `tests/_taxonomy.py`, `tests/TESTING_STANDARD.md`, `AGENTS.md`, `scripts/affected_tests.py`, `scripts/build_test_map.py`, and `scripts/mutation_benchmark.py`;
 - `pyproject.toml`;
 - `requirements.txt` and `requirements-optional.txt`;
 - `package.json` and `package-lock.json`;
@@ -27,31 +27,21 @@ Pytest is configured in `pyproject.toml` with:
 - `asyncio_mode = "auto"`;
 - marker and fast-lane/duration-reporting settings used by focused test runs.
 
-The expected local command uses the project venv:
+Run tests with the project venv through `python -m tests.run <lane>`: `affected` (the tests covering the changed files, from `scripts/affected_tests.py`), `full` (everything but browser and nightly tests, in parallel, plus node tests), `browser`, `security` and `nightly`. Arguments after `--` go to pytest. System/global `pytest` is not authoritative for this repo because installed versus stubbed dependencies can change collection behavior.
 
-```bash
-./venv/bin/pytest <test path>
-```
+`tests/conftest.py` puts the repo root on `sys.path`, loads the fixture plugins in `tests/plugins/` (network guard, per-process test database and `app_db`/`make_test_db`, the `api` HTTP fixture) and conditionally stubs missing heavy/runtime dependencies. `tests/suite/test_hygiene.py` rejects new module-scope `sys.modules` stubs, `importlib.reload`, raw `os.environ` writes, `sys.path` edits and source-text assertions; existing offenders are listed in a shrink-only allowlist.
 
-Activated-venv `python -m pytest <test path>` is equivalent. System/global `pytest` is not authoritative for this repo because installed versus stubbed dependencies can change collection behavior.
-
-`tests/conftest.py` inserts the repo root on `sys.path` and conditionally stubs missing heavy/runtime dependencies such as SQLAlchemy, FastAPI, Starlette, Pydantic, httpx, bcrypt, and pyotp. Tests that need real dependencies use explicit imports/skips. Tests that stub `sys.modules`, environment variables, globals, or parent packages must restore them with `monkeypatch` or an equivalent cleanup pattern.
-
-The suite currently contains roughly 728 `test_*.py` files. Treat that count as a moving source metric, not a target; focused regression tests are still preferred for narrow changes.
-
-Focused regression tests are preferred for narrow behavior changes. Broaden tests when touching shared contracts such as auth, owner filtering, OAuth/token custody, tool output, context building, provider calls, persistence, frontend rendering, or route/API shapes.
-
-`tests/run_focus.py` and `tests/_taxonomy.py` provide a local focused-run helper and category map. `.github/scripts/focused_test_guidance.py` maps changed files to suggested focused tests for PR review, while the configured full pytest CI job is authoritative. `tests/TESTING_STANDARD.md` documents expectations for targeted validation, and `tests/LAYOUT_INVENTORY.md` records the test-suite layout. CLI tests live under `tests/cli/`.
+`tests/TESTING_STANDARD.md` is the reference for where tests live (the mirror of the production path), what a test must be, and the CI jobs; `AGENTS.md` carries the short version for agents. The reasoning and measurements are in `website/testing-restructure-2026-10-03.md`. `tests/_taxonomy.py` still tags tests with `area_*` markers until the layout migration retires it.
 
 ## JS And UI Tests
 
-The repo has no frontend build pipeline, npm test script, or type-check script. `package.json` owns Node dependencies for Bombadil and the Anthropic SDK, and `package-lock.json` owns npm integrity/version state.
+The repo has no frontend build pipeline or type-check script. `package.json` owns Node dependencies (including the `happy-dom` dev dependency for node tests), and `package-lock.json` owns npm integrity/version state.
 
 Current frontend/JS validation includes:
 
-- pytest wrappers that run Node snippets and usually skip when `node` is missing;
-- direct `.mjs` regressions under `tests/`;
-- `tests/bombadil-spec.ts`, which requires npm-installed Bombadil dev dependencies and a running/browser-capable UI workflow when used.
+- node tests (`tests/**/*.test.mjs`, run by `node --test` in CI) that import real `static/js` modules with the shared DOM and fetch fakes in `tests/static/js/_support/`;
+- pytest wrappers that run Node snippets (`tests/helpers/node.py`) and skip when `node` is missing;
+- browser tests marked `browser`, run by their own CI job.
 
 Use `node --check static/js/<changed-file>.js` for syntax checks on changed JS files when applicable. This is not a full module-graph, browser-global, or DOM integration check.
 
@@ -145,7 +135,7 @@ When route/API behavior changes, check whether a matching CLI script depends on 
 
 ## GitHub Metadata
 
-`.github/` owns issue/PR templates, a copyable PR review template, description-check workflows, security/governance workflows, Docker publishing, and CI. Current CI runs on pushes to `main` and `dev` plus pull requests, compiles Python with `python -m compileall`, syntax-checks first-party JS with `node --check`, emits focused-test guidance for changed code, and runs the configured `python -m pytest -q` scope as an authoritative failing job; pytest still skips documentation-only changes.
+`.github/` owns issue/PR templates, a copyable PR review template, description-check workflows, security/governance workflows, Docker publishing, and CI. Current CI runs on pushes to `main` and `dev` plus pull requests, compiles Python with `python -m compileall`, syntax-checks first-party JS with `node --check` and runs the node tests, runs pytest in parallel without browser and nightly tests as an authoritative failing job, runs browser tests in a separate job, and on PRs reports the tests covering the change and whether new tests fail against the base commit (red evidence, report-only while calibrated). `.github/workflows/nightly.yml` adds random order, the coverage map for `scripts/affected_tests.py`, the orchestration scenarios, a Windows run and the weekly mutation benchmark.
 
 `CONTRIBUTING.md` owns the branch model: PRs target `dev`; `main` is the curated user-running branch fast-forwarded from stable `dev` commits. Contributors who accidentally target `main` should retarget the PR base without rebasing.
 
@@ -187,7 +177,8 @@ Before posting PRs or issues, compare drafts against current templates on latest
 Common local checks:
 
 ```bash
-./venv/bin/pytest tests/path.py::test_name
+./venv/bin/python -m tests.run affected
+./venv/bin/python -m tests.run full
 ./venv/bin/python -m py_compile app.py routes/*.py src/*.py
 node --check static/js/changed-file.js
 docker compose config
@@ -199,20 +190,19 @@ Run the app for user-facing or integration changes. Unit tests and syntax checks
 
 ## Shared Test Helpers
 
-`tests/helpers/` owns reusable test scaffolding. `cli_loader.load_script()` loads CLI files without running their `main()` entrypoint. `db_stubs` owns small DB stand-ins for tests that should not import a real app database. `import_state` owns conservative `sys.modules` and parent-module-attribute restoration for tests that install fake modules or import route files under alternate stubs. `tests/README.md` documents helper conventions and review expectations.
+`tests/plugins/` owns shared fixtures and guards (network guard, test database, `api` HTTP client). `tests/helpers/` owns reusable test scaffolding. `cli_loader.load_script()` loads CLI files without running their `main()` entrypoint. `db_stubs` owns small DB stand-ins for tests that should not import a real app database. `import_state` owns conservative `sys.modules` and parent-module-attribute restoration. `node` runs node snippets with file URLs and UTF-8 output. `tests/README.md` documents the helpers.
 
 ## Current Gaps
 
 - Fresh install smoke coverage across Linux native, Docker, macOS native/app, Windows native, WSL/Git Bash, missing Node/npm, missing Chroma service, and GPU overlays remains a roadmap item.
-- There is no frontend build/type-check/npm test pipeline.
-- CI now covers Python compile, first-party JS syntax, focused-test guidance,
-  and pytest smoke; it does not cover Docker compose validation, launcher smoke
-  tests, browser/module-graph execution, or platform installs.
+- There is no frontend build/type-check pipeline.
+- CI does not cover Docker compose validation, launcher smoke tests, or
+  platform installs.
 - Optional dependency behavior is broad; remaining gaps include local STT missing-`faster-whisper`, Kokoro's Python/GPU degraded matrix, and provider/OAuth combinations not covered by focused tests.
 - GitHub description-check scripts and `scripts/pr_blocker_audit.py` need continued local fixtures for section parsing, placeholder stripping, label swaps, workflow-safe behavior, and duplicate/hot-file heuristics.
 - Spec bootstrap rules lack meta tests for reading `_readme.md`, spec shape, `.env*` handling, draft/report placement, and shared helper conventions.
 - NVIDIA helper install/`.env` mutation paths and real Docker/GPU startup are not covered by local tests.
 - Bash/Zsh completion behavior is not covered.
-- There is no canonical full-suite known-failing/flaky ledger.
+- Known Windows product bugs are recorded as Windows-only `xfail` markers, not in a ledger.
 - There is no central CLI redaction/sensitive-output regression matrix across backup, logs, mail, MCP, tasks, and webhook scripts.
 - Dependency/image pinning policy is mixed: Python requirements are mostly unpinned, SearXNG is pinned, Chroma image currently uses `latest`, npm uses a lockfile, and browser MCP uses cache-gated `@playwright/mcp@latest`.

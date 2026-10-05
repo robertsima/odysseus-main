@@ -1,0 +1,22 @@
+{
+  "B01": {"expect": "caught", "what": "core/session_manager.py: get_sessions_for_user drops the owner filter"},
+  "B02": {"expect": "caught", "what": "routes/shell_routes.py: _require_admin drops the is_admin check"},
+  "B03": {"expect": "caught", "what": "src/tool_execution.py: workspace confinement uses startswith instead of commonpath"},
+  "B04": {"expect": "caught", "what": "src/outbound_fetch.py: private IP literals no longer blocked"},
+  "B05": {"expect": "caught", "what": "src/rag_vector.py: the public-only sensitivity clause is dropped"},
+  "B06": {"expect": "caught", "what": "src/agent_loop.py: tool results threaded with the wrong tool_call_id"},
+  "B07": {"expect": "caught", "what": "src/agent_loop.py: wrap-up round >= becomes >"},
+  "B08": {"expect": "caught", "what": "src/approval_modes.py: risky-command regex search becomes match"},
+  "B09": {"expect": "caught", "what": "src/agent_loadouts.py: cap_to_starter skips named loadouts from a worker"},
+  "B10": {"expect": "caught", "what": "static/js/streamingSegmenter.js: a shorter fence closes a longer one"},
+  "B11": {"expect": "caught", "what": "static/js/sessions.js: older-page limit off by one, duplicate bubble"},
+  "B12": {"expect": "caught", "what": "core/session_manager.py: truncation deletes from index+1"},
+  "B13": {"expect": "caught", "what": "static/js/markdown.js: sanitizer || becomes &&, event handlers survive"},
+  "N01": {"expect": "clean", "what": "rename _ledger_budget_for_round and its callers"},
+  "N02": {"expect": "clean", "what": "reformat two functions in chatRenderer.js"},
+  "N03": {"expect": "clean", "what": "rename the CSS class session-item everywhere"},
+  "N04": {"expect": "clean", "what": "reword New chat to Start chat in index.html"},
+  "N05": {"expect": "clean", "what": "move is_cors_preflight to a new module and import it back"},
+  "N06": {"expect": "clean", "what": "reword one rule in _API_AGENT_RULES"},
+  "N07": {"expect": "clean", "what": "prettier-style reformat of the sanitizer in markdown.js"}
+}

@@ -329,8 +329,10 @@ if AUTH_ENABLED:
     _token_cache_dirty = True
 
     def _token_cache_invalidate():
-        nonlocal_dict = app.state.__dict__
-        nonlocal_dict["_token_cache_dirty"] = True
+        # Through State's own setter: a key written into app.state.__dict__
+        # shadows the value _refresh_token_cache sets, so the flag never
+        # cleared and every bearer request reloaded the tokens.
+        app.state._token_cache_dirty = True
     app.state.invalidate_token_cache = _token_cache_invalidate
     app.state._token_cache = _token_cache
     app.state._token_cache_dirty = True

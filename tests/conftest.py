@@ -3,19 +3,26 @@ import sys
 import os
 import types
 import importlib.util
+import itertools
 from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Importing core.database below runs init_db() at import time, and its default
-# (sqlite:///./data/app.db) can't be opened in a clean worktree because SQLite
-# won't create the missing ./data parent dir - pytest then dies during
-# collection, before any test module loads. Default to an in-memory DB for the
-# test session so collection is deterministic and writes no repo-local
-# artifacts. An explicit DATABASE_URL (a real test/CI database) is preserved.
-# This only unblocks collection/import-time init; it does not provide a shared
-# file-backed DB across processes - tests needing that must set DATABASE_URL.
-os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
+# Shared fixtures and guards live in tests/plugins/, one module per concern.
+pytest_plugins = [
+    "tests.plugins.network_guard",
+    "tests.plugins.database",
+    "tests.plugins.http_app",
+    "tests.plugins.browser",
+]
+
+# Importing core.database below runs init_db() at import time against
+# DATABASE_URL. Unless DATABASE_URL is set, each test process gets its own
+# SQLite file in a temporary folder, shared by all of its threads and removed
+# at exit (tests/plugins/database.py). An explicit DATABASE_URL is preserved.
+from tests.plugins.database import use_process_database  # noqa: E402
+
+use_process_database()
 # Never append test output to the deployment's data/logs/app.log.
 os.environ["ODYSSEUS_FILE_LOG"] = "0"
 
@@ -63,50 +70,29 @@ if "src.database" not in sys.modules:
 # collection, which breaks session import in subsequent tests).
 import core.models  # noqa: E402
 
-def pytest_configure(config):
-    """Register the dynamic taxonomy ``sub_*`` markers before collection.
-
-    The stable ``area_*`` markers are declared in ``pyproject.toml``. The
-    per-file ``sub_*`` markers are derived from the test filenames here so that
-    unknown-mark warnings still surface genuine typos outside the taxonomy. This
-    only registers marker names; it imports no production module.
-    """
-    import pathlib
-    from tests._taxonomy import discover_markers
-
-    tests_dir = pathlib.Path(__file__).parent
-    paths = list(tests_dir.rglob("test_*.py")) + list(tests_dir.rglob("*_test.py"))
-    for marker_name in discover_markers(paths):
-        if marker_name.startswith("sub_"):
-            config.addinivalue_line("markers", f"{marker_name}: taxonomy sub-area marker")
-
-
-def pytest_collection_modifyitems(config, items):
-    """Tag each collected test with its taxonomy ``area_*`` and ``sub_*`` markers.
-
-    Collection-time only: this adds markers and nothing else. It does not skip,
-    reorder, or deselect tests, mutate fixtures or the environment, or import any
-    production module. See ``tests/_taxonomy.py`` for the classification rules.
-    """
-    import pytest
-    from tests._taxonomy import markers_for_path
-
-    for item in items:
-        path = getattr(item, "path", None) or item.fspath
-        for marker_name in markers_for_path(path):
-            item.add_marker(getattr(pytest.mark, marker_name))
-
-
 import pytest  # noqa: E402
 
 
+@pytest.fixture(scope="session")
+def _declared_tools_root(tmp_path_factory):
+    return str(tmp_path_factory.mktemp("declared_tools"))
+
+
+_declared_tools_numbers = itertools.count()
+
+
 @pytest.fixture(autouse=True)
-def _isolated_declared_tools(tmp_path):
+def _isolated_declared_tools(_declared_tools_root):
     """Give every test an empty declared-tools state (src/stable_tools.py).
 
     The ChatGPT route persists each chat's declared tool list under the data
     folder; tests reuse session ids, so without this one test's list would be
     loaded by the next and the tools it sends would depend on test order.
+
+    Each test gets its own folder name under one session folder. stable_tools
+    creates the folder on its first write, so most tests never touch the disk;
+    requesting ``tmp_path`` here made a numbered folder for every test, which
+    cost about 30 s per serial run.
 
     Patched by hand, not with ``monkeypatch``: an autouse fixture that requests
     it makes monkeypatch outlive the test module's own fixtures, and a module
@@ -117,7 +103,7 @@ def _isolated_declared_tools(tmp_path):
     if mod is None:
         import src.stable_tools as mod
     mod.reset_for_tests()
-    store = str(tmp_path / "declared_tools")
+    store = os.path.join(_declared_tools_root, str(next(_declared_tools_numbers)))
     original = mod._store_dir
     mod._store_dir = lambda: store
     try:
@@ -173,6 +159,46 @@ def _isolate_integration_skill_registrations():
             late._integration_skill_dirs.clear()
             if saved is not None and late is mod:
                 late._integration_skill_dirs.update(saved)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_settings_cache():
+    """Drop src.settings' cached settings.json before and after each test.
+
+    load_settings() keeps what it read for two seconds. A test that points
+    SETTINGS_FILE at its own file, or the api fixture's temp data folder, left
+    that file's values cached after monkeypatch put the path back, and a test
+    starting within those two seconds read them: on nightly seed 3355886443 a
+    fake claude_code_odysseus_token_file from test_runtime_introspection.py
+    stopped a Claude Code run in test_claude_code_transcript.py.
+    """
+    mod = sys.modules.get("src.settings")
+    if mod is not None:
+        mod._invalidate_caches()
+    try:
+        yield
+    finally:
+        late = sys.modules.get("src.settings")
+        if late is not None:
+            late._invalidate_caches()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_host_health():
+    """Start each test with no upstream host cooled down.
+
+    After two failed connects src.llm_core cools a host for DEAD_HOST_COOLDOWN
+    (20 s) in process-wide dicts, and the network guard makes every call to a
+    real provider fail. A test whose call to https://api.openai.com failed
+    therefore made the next 20 s of tests get "Upstream ... marked
+    unreachable (cooldown active)" from that host: on nightly seed 971003926
+    test_email_urgency_checkpoint.py lost its faked LLM synthesis that way.
+    """
+    mod = sys.modules.get("src.llm_core")
+    if mod is not None:
+        mod._dead_hosts.clear()
+        mod._host_fails.clear()
+    yield
 
 
 @pytest.fixture(autouse=True)

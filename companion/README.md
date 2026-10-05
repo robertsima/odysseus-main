@@ -25,4 +25,4 @@ works on the next request without a restart.
 
 The pairing/scoping rules live in small, tested units (`token_owner`,
 `owner_can_see`, `mint_pairing_token`, `pairing.*`) — see
-`tests/test_companion_readonly.py` and `tests/test_companion_pairing.py`.
+`tests/companion/routes/test_companion_readonly.py` and `tests/companion/routes/test_companion_pairing.py`.

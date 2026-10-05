@@ -15,8 +15,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  focused-test-guidance:
-    name: Focused test guidance (report-only)
+  affected-tests:
+    name: Tests covering the change (report-only)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     continue-on-error: true
@@ -25,49 +25,54 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Report changed test paths
+      # Lists the tests that cover the PR's changes (scripts/affected_tests.py,
+      # D15): the nightly coverage map, then the mirrored folders, then tests
+      # that mention a changed module. The blocking jobs below decide.
+      - name: Report the tests covering this change
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          {
+            echo "## Tests covering this change (report-only)"
+            echo
+            echo '```'
+            python3 scripts/affected_tests.py --base "$BASE_SHA" || echo "(could not compute)"
+            echo '```'
+            echo
+            echo "Run them locally with: python -m tests.run affected"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  red-evidence:
+    # A PR's new tests should fail without its production change (D17 in
+    # website/testing-restructure-2026-10-03.md). Report-only while it is
+    # calibrated; it becomes a required check afterwards.
+    name: Red evidence (report-only)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.11"
+          cache: pip
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version-file: ".nvmrc"
+      - run: pip install -r requirements.txt
+      - run: npm ci --ignore-scripts
+      - run: mkdir -p data
+      - name: Run new and changed tests against the base commit
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
         run: |
-          report_file="$RUNNER_TEMP/focused-test-guidance.md"
-          publish_report() {
-            cat "$report_file"
-            if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
-              cat "$report_file" >> "$GITHUB_STEP_SUMMARY" || true
-            fi
-            return 0
-          }
-
-          report_unavailable() {
-            {
-              printf '%s\n\n' '## Focused test guidance unavailable (report-only)'
-              printf '%s\n\n' "$1"
-              printf '%s\n' 'Existing blocking CI remains the source of truth.'
-            } > "$report_file"
-            publish_report
-            exit 0
-          }
-
-          if [ -z "$BASE_SHA" ] || [ -z "$HEAD_SHA" ]; then
-            report_unavailable "Pull request base/head metadata is missing."
-          fi
-
-          if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
-            report_unavailable "The pull request base commit is unavailable locally."
-          fi
-
-          if ! git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null; then
-            report_unavailable "The pull request head commit is unavailable locally."
-          fi
-
-          if ! python3 .github/scripts/focused_test_guidance.py \
-            --base-sha "$BASE_SHA" \
-            --head-sha "$HEAD_SHA" > "$report_file"; then
-            report_unavailable "The focused test guidance helper could not produce a report."
-          fi
-
-          publish_report
+          python .github/scripts/red_evidence.py --base "$BASE_SHA" --head "$HEAD_SHA" --labels "$LABELS" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
 
   python-syntax:
     name: Python syntax (compileall)
@@ -99,8 +104,12 @@ jobs:
           for f in static/app.js static/js/**/*.js; do
             node --check "$f"
           done
-      - name: Skill tooling and plugin UI contracts
-        run: node --test tests/frontend/*.test.mjs
+      # Every node test under tests/. The glob is quoted so node expands it,
+      # and npm ci installs the DOM library the frontend tests import.
+      - name: Node tests
+        run: |
+          npm ci --ignore-scripts
+          node --test --test-timeout=60000 "tests/**/*.test.mjs"
 
   python-tests:
     name: Python tests (pytest)
@@ -145,9 +154,39 @@ jobs:
         if: steps.docs-check.outputs.docs_only != 'true'
         with:
           node-version-file: ".nvmrc"
-      - run: pip install -r requirements.txt
+      - run: pip install -r requirements.txt -r requirements-test.txt
         if: steps.docs-check.outputs.docs_only != 'true'
       - run: mkdir -p data  # sqlite DB lives at ./data/app.db
         if: steps.docs-check.outputs.docs_only != 'true'
-      - run: python -m pytest -q
+      # Browser tests run in their own job below; nightly tests run nightly.
+      - run: python -m pytest -q -n auto -m "not browser and not nightly" -rfE
         if: steps.docs-check.outputs.docs_only != 'true'
+
+  browser-tests:
+    name: Browser tests (pytest -m browser)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt -r requirements-test.txt
+      - run: mkdir -p data
+      # ubuntu-latest ships google-chrome, which Playwright drives with
+      # channel="chrome". ODYSSEUS_REQUIRE_BROWSER turns a missing browser
+      # into a failure here instead of a run where every test skips.
+      # loadgroup keeps the tests that share one real app (xdist_group
+      # "live_app") on one worker, so only one app starts.
+      - run: python -m pytest -q -n 3 --dist loadgroup -m "browser and not nightly" -rfEsR --reruns 1 --reruns-delay 2 --durations=15
+        env:
+          ODYSSEUS_REQUIRE_BROWSER: "1"
+          ODYSSEUS_BROWSER_ARTIFACTS: ${{ runner.temp }}/browser-failures
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: failure()
+        with:
+          name: browser-failures
+          path: ${{ runner.temp }}/browser-failures
+          if-no-files-found: ignore
