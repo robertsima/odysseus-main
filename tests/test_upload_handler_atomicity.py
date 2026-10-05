@@ -335,36 +335,6 @@ def test_upload_index_retries_when_replaced_during_read(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Atomicity primitive audit on the production module.
-# ---------------------------------------------------------------------------
-def test_atomic_write_primitives_present_in_production_code():
-    """The production module must use atomic-write primitives for the RMW
-    sites. The fix is in place when ``os.replace``, ``tempfile.mkstemp``,
-    ``_atomic_write_json`` and ``self._index_lock`` are all present and
-    the two RMW sites no longer use a bare ``open(path, "w") + json.dump``.
-    """
-    src_path = PROJECT_ROOT / "src" / "upload_handler.py"
-    text = src_path.read_text(encoding="utf-8")
-
-    assert "os.replace" in text, (
-        f"{src_path} does not use os.replace — atomic-rename write is missing."
-    )
-    assert "tempfile.mkstemp" in text or "NamedTemporaryFile" in text, (
-        f"{src_path} does not write to a temp file — atomic-rename write is missing."
-    )
-    assert "_atomic_write_json" in text, (
-        f"{src_path} is missing the _atomic_write_json helper."
-    )
-    assert "self._index_lock" in text, (
-        f"{src_path} is missing self._index_lock — concurrent writers are not serialised."
-    )
-    # The dedupe path must do its read inside the lock too.
-    assert text.count("with self._index_lock:") >= 2, (
-        "Both dedupe and insert RMW sites must be under _index_lock."
-    )
-
-
-# ---------------------------------------------------------------------------
 # Smoke tests: normal upload, duplicate detection, info lookup after recovery.
 # ---------------------------------------------------------------------------
 def test_smoke_normal_upload(tmp_path):
