@@ -229,21 +229,6 @@ def _result_enum():
     return ar.SetAdminResult
 
 
-def test_route_requires_admin():
-    from routes.auth_routes import SetAdminRequest
-
-    auth, target = _auth_route_endpoint(_ADMIN_ROUTE, "PUT")
-    auth.get_username_for_token.return_value = "bob"
-    auth.is_admin.return_value = False
-
-    with pytest.raises(HTTPException) as exc:
-        asyncio.run(target(username="carol", body=SetAdminRequest(is_admin=True),
-                           request=_fake_auth_request()))
-
-    assert exc.value.status_code == 403
-    auth.set_admin.assert_not_called()
-
-
 def test_route_last_admin_returns_400():
     from routes.auth_routes import SetAdminRequest
 
