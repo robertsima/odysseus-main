@@ -51,7 +51,10 @@ def repository(tmp_path, monkeypatch):
     path = root / "project"
     path.mkdir()
     repo = porcelain.init(str(path))
-    (path / "README.md").write_text("one\n", encoding="utf-8")
+    # Bytes, not write_text: on Windows write_text stores CRLF, but the commit
+    # holds LF (core.autocrlf=true on the runner), and the diff hashes raw
+    # worktree bytes, so README.md would read as changed.
+    (path / "README.md").write_bytes(b"one\n")
     porcelain.add(repo, ["README.md"])
     porcelain.commit(
         repo,
