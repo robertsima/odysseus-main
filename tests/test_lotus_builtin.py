@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -74,13 +75,24 @@ def test_compose_persists_lotus_under_odysseus_data_mount():
 
 
 def test_lotus_code_defaults_match_the_compose_paths():
-    source = (ROOT / "mcp_servers" / "lotus_server.py").read_text(encoding="utf-8")
-    # In the image APP_ROOT is /app, so these resolve to LOTUS_DEFAULTS.
-    assert 'LOTUS_ROOT = Path(os.environ.get("LOTUS_ROOT", APP_ROOT / "data" / "lotus"))' in source
-    assert 'os.environ.setdefault("LOTUS_CONFIG", str(LOTUS_ROOT / "config.yaml"))' in source
-    assert 'os.environ.setdefault("LOTUS_DATA_DIR", str(LOTUS_ROOT / "data"))' in source
-    assert 'os.environ.setdefault("LOTUS_IMPORT_ROOT", str(LOTUS_ROOT / "imports"))' in source
-    assert 'os.environ.setdefault("LOTUS_TOOL_NAME_STYLE", "underscore")' in source
+    # In the image APP_ROOT is /app, so the defaults resolve to LOTUS_DEFAULTS.
+    # The ZimaOS template lists none of them and relies on exactly this.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("LOTUS_")}
+    env["PYTHONPATH"] = str(ROOT)
+    code = (
+        "import json, os; import mcp_servers.lotus_server as s;"
+        "print(json.dumps({'root': str(s.LOTUS_ROOT), 'app': str(s.APP_ROOT),"
+        " **{k: os.environ[k] for k in " + repr(sorted(LOTUS_DEFAULTS)) + "}}))"
+    )
+    out = subprocess.run([sys.executable, "-c", code], cwd=str(ROOT), env=env,
+                         capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr[-1500:]
+    seen = json.loads(out.stdout.strip().splitlines()[-1])
+    app_root = Path(seen["app"])
+    for key, expected in LOTUS_DEFAULTS.items():
+        if expected.startswith("/app/"):
+            expected = str(app_root / expected[len("/app/"):])
+        assert Path(seen[key]) == Path(expected), key
 
 
 def test_builtin_lotus_completes_mcp_handshake_with_safe_defaults(tmp_path):

@@ -16,12 +16,6 @@ class _Unserializable:
     """json.dump cannot serialize this — stands in for a mid-write failure."""
 
 
-def test_save_uses_atomic_write_json():
-    src = inspect.getsource(PresetManager.save)
-    assert "atomic_write_json" in src, "save() must persist via atomic_write_json"
-    assert "open(" not in src, "save() must not write presets.json with a plain open('w')"
-
-
 def test_failed_save_does_not_truncate_existing_file(tmp_path):
     mgr = PresetManager(str(tmp_path))
     assert mgr.save({"custom": {"name": "keep"}}) is True
