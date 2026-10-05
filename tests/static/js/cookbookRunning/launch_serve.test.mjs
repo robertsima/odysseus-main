@@ -59,3 +59,20 @@ test('a Windows venv path with a space and an apostrophe is activated as one quo
   // PowerShell single quotes, with the embedded quote doubled.
   assert.equal(request.env_prefix, "& 'C:\\Users\\Jo O''Neil\\venvs\\llm\\Scripts\\Activate.ps1'");
 });
+
+test('two profiles on one host launch on the selected profile, with its port and platform', async () => {
+  // A Linux host and a Windows VM behind it, reached on two SSH ports.
+  const host = { name: 'gpu', host: 'gpu.lan', port: '22', platform: 'linux' };
+  const vm = { name: 'gpu', host: 'gpu.lan', port: '2222', platform: 'windows' };
+  _envState.servers = [host, vm];
+  const { _serverKey } = await import('../../../../static/js/cookbook.js');
+  const before = served.length;
+  await _launchServeTask('m', 'org/m-GGUF', 'llama-server --model "m.gguf" --port 8080', {}, 'gpu.lan',
+    { serverKey: _serverKey(vm) });
+  await waitFor(() => served.length === before + 1, { what: 'the serve request' });
+
+  const request = served.at(-1);
+  assert.equal(request.remote_host, 'gpu.lan');
+  assert.equal(String(request.ssh_port), '2222');
+  assert.equal(request.platform, 'windows');
+});
