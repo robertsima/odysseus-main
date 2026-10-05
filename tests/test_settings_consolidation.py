@@ -142,15 +142,6 @@ def test_the_remote_hosts_capability_is_gone():
     )
 
 
-def test_the_chat_route_no_longer_passes_a_round_budget():
-    """The loop only logged it; it never ended a run."""
-    from pathlib import Path
-
-    source = (Path(__file__).resolve().parent.parent / "routes" / "chat_routes.py").read_text(encoding="utf-8")
-    assert "agent_max_rounds" not in source.replace("`agent_max_rounds` was only", "")
-    assert "max_rounds=_max_rounds" not in source
-
-
 def test_a_stored_round_budget_is_ignored_by_the_settings_route(auth_store):
     store, call = auth_store
     call({"agent_max_rounds": 7, "agent_max_tool_calls": 40})

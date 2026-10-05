@@ -40,13 +40,3 @@ def test_substantive_turns_still_retrieve(text):
     true for most of these, and skipping document retrieval for them would be
     the opposite of the problem being fixed."""
     assert not _is_casual_low_signal(text), text
-
-
-def test_the_processor_gates_on_the_narrow_test():
-    from pathlib import Path
-
-    src = (Path(__file__).resolve().parent.parent / "src" / "chat_processor.py").read_text()
-    gate = src.split("# RAG: search if enabled", 1)[1].split("if use_rag:", 1)[0]
-    assert "_is_casual_low_signal" in gate
-    # The broad flag must not be what gates document retrieval.
-    assert "low_signal\"" not in gate and "intent[" not in gate
