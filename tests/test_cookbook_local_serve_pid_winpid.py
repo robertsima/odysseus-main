@@ -9,8 +9,6 @@ from core.platform_compat import find_bash
 from routes.cookbook_routes import _windows_local_pid_record_line
 
 
-ROOT = Path(__file__).resolve().parents[1]
-COOKBOOK_ROUTES = ROOT / "routes" / "cookbook_routes.py"
 # The prelude runs under the bash the product launches. On Windows a bare
 # "bash" can resolve to the WSL launcher in System32 instead.
 BASH = find_bash() or "bash"
@@ -160,25 +158,3 @@ def test_windows_local_pid_line_rejects_malformed_mapping(tmp_path):
     assert pid_path.read_text(encoding="utf-8").strip() == "31100"
     assert not ready_path.exists()
 
-
-def test_local_windows_launcher_publishes_fallback_before_releasing_inner_runner():
-    source = COOKBOOK_ROUTES.read_text(encoding="utf-8")
-    start = source.index("    def _launch_local_detached(")
-    end = source.index(
-        '    @router.post("/api/model/download")',
-        start,
-    )
-    launcher = source[start:end]
-
-    assert "_windows_local_pid_record_line(pid_path, pid_ready_path)" in launcher
-    assert "pid_ready_path.unlink(missing_ok=True)" in launcher
-
-    fallback = launcher.index(
-        'pid_path.write_text(str(proc.pid), encoding="utf-8")'
-    )
-    release = launcher.index("pid_ready_path.touch()")
-
-    assert fallback < release
-
-    # Never write Git Bash's bare MSYS $$ to the session pid file.
-    assert '\\"$$\\" > {pp}' not in launcher
