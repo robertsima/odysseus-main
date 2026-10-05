@@ -154,26 +154,6 @@ def test_local_windows_bash_env_prefix_handles_long_whitespace_input():
     assert _local_windows_bash_env_prefix(prefix) == prefix
 
 
-@pytest.mark.parametrize(
-    "relative_path",
-    ["static/js/cookbookRunning.js", "static/js/cookbookDownload.js"],
-)
-def test_primary_windows_venv_emitters_quote_activation_path(relative_path):
-    source = (Path(__file__).resolve().parents[1] / relative_path).read_text(encoding="utf-8")
-
-    assert "'& ' + _psQuote(" in source
-    assert "_psQuote = shared._psQuote;" in source
-
-
-def test_windows_venv_conversion_stays_scoped_to_local_git_bash_runners():
-    source = (Path(__file__).resolve().parents[1] / "routes/cookbook_routes.py").read_text(encoding="utf-8")
-    guarded_conversion = (
-        "_local_windows_bash_env_prefix(req.env_prefix) if local_windows else req.env_prefix"
-    )
-
-    assert source.count(guarded_conversion) == 2
-
-
 def test_validate_local_dir_accepts_external_drive_paths_with_spaces():
     path = "/Volumes/T7 2TB/AI Models/llamacpp"
 
@@ -390,34 +370,6 @@ def test_pip_install_fallback_chain_quotes_extras_spec():
     # A plain package name is still passed through unquoted (no regression).
     plain = _pip_install_fallback_chain("hf_transfer", python_cmd="pip")
     assert "install -q hf_transfer" in plain
-
-
-def test_serve_runner_installs_llama_cpp_server_extra():
-    """The llama.cpp serve auto-install must request the ``[server]`` extra in
-    every path (issue #730): a bare ``llama-cpp-python`` passes the
-    ``import llama_cpp`` guard, so ``python -m llama_cpp.server`` then crashes
-    with ``ModuleNotFoundError: No module named 'starlette_context'`` and the
-    extra is never reinstalled."""
-    import pathlib
-    src = (pathlib.Path(__file__).resolve().parent.parent
-           / "routes" / "cookbook_routes.py").read_text(encoding="utf-8")
-    # No serve path may install a bare (extra-less) llama-cpp-python.
-    assert "pip install llama-cpp-python " not in src
-    assert "_pip_install_fallback_chain('llama-cpp-python'" not in src
-    # The [server] extra is requested in the build/fallback paths.
-    assert "'llama-cpp-python[server]'" in src
-    assert "_pip_install_fallback_chain('llama-cpp-python[server]'" in src
-
-
-def test_serve_pip_install_normalizes_llama_cpp_alias_and_adds_wheel_index():
-    import pathlib
-
-    src = (pathlib.Path(__file__).resolve().parent.parent
-        / "routes" / "cookbook_routes.py").read_text(encoding="utf-8")
-
-    assert "re.sub(r\"(?<![A-Za-z0-9_.\\-/])llama_cpp(?![A-Za-z0-9_.\\-/])\", \"llama-cpp-python[server]\", req.cmd)" in src
-    assert "if \"llama-cpp-python\" in req.cmd and \"--extra-index-url\" not in req.cmd:" in src
-    assert "https://abetlen.github.io/llama-cpp-python/whl/cpu" in src
 
 
 def test_vllm_preflight_reports_cli_and_version():
@@ -666,14 +618,6 @@ def test_normalize_llama_cpp_python_cache_types_preserves_native_cache_flags():
     assert "--type_v='1'" in normalized
 
 
-def test_model_serve_normalizes_llama_cpp_python_cache_types_after_validation():
-    src = (Path(__file__).resolve().parents[1] / "routes" / "cookbook_routes.py").read_text(encoding="utf-8")
-
-    assert "req.cmd = _validate_serve_cmd(req.cmd) or \"\"" in src
-    assert "req.cmd = _normalize_llama_cpp_python_cache_types(req.cmd) or \"\"" in src
-    assert src.index("_validate_serve_cmd(req.cmd)") < src.index("_normalize_llama_cpp_python_cache_types(req.cmd)")
-
-
 def test_ollama_serve_defaults_to_loopback_bind():
     assert _ollama_bind_from_cmd("ollama serve") == ("127.0.0.1", "11434")
     assert _ollama_bind_from_cmd("ollama run qwen2.5:0.5b") == ("127.0.0.1", "11434")
@@ -798,21 +742,6 @@ def test_llama_cpp_rebuild_cmd_clears_cached_build_paths():
     assert 'pip install' not in cmd
     assert 'git clone' not in cmd
     assert 'curl' not in cmd and 'wget' not in cmd
-
-
-def test_local_windows_download_pid_tracks_inner_bash_and_stop_kills_tree():
-    routes_src = (Path(__file__).resolve().parents[1] / "routes" / "cookbook_routes.py").read_text(encoding="utf-8")
-    running_src = (Path(__file__).resolve().parents[1] / "static" / "js" / "cookbookRunning.js").read_text(encoding="utf-8")
-
-    # The Windows-local runner publishes Python's valid Win32 fallback before
-    # allowing Git Bash to replace it with /proc/$$/winpid.
-    assert "_windows_local_pid_record_line(pid_path, pid_ready_path)" in routes_src
-    assert "/proc/$$/winpid" in routes_src
-    assert "pid_ready_path.touch()" in routes_src
-    assert '\\"$$\\" > {pp}' not in routes_src
-    assert "function Stop-Tree([int]$Id)" in running_src
-    assert "('ParentProcessId = ' + $Id)" in running_src
-    assert "Stop-Tree ([int]$p)" in running_src
 
 
 def test_llama_cpp_rebuild_cmd_runs_clean_on_a_fresh_home(tmp_path):

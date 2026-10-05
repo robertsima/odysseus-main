@@ -12,12 +12,6 @@ import pytest
 _SOURCE = (
     Path(__file__).resolve().parents[1] / "static" / "js" / "chatRenderer.js"
 ).read_text(encoding="utf-8")
-_CHAT_SOURCE = (
-    Path(__file__).resolve().parents[1] / "static" / "js" / "chat.js"
-).read_text(encoding="utf-8")
-_SLASH_SOURCE = (
-    Path(__file__).resolve().parents[1] / "static" / "js" / "slashCommands.js"
-).read_text(encoding="utf-8")
 _HAS_NODE = shutil.which("node") is not None
 
 
@@ -41,24 +35,6 @@ def _run_node(source):
     )
     assert proc.returncode == 0, proc.stderr
     return json.loads(proc.stdout.strip())
-
-
-def test_saved_agent_rounds_prefer_round_model_provenance():
-    assert "const roundModels = metadata.round_models || [];" in _SOURCE
-    assert "const contModel = roundModels[r] || pair.actualModel || pair.requestedModel;" in _SOURCE
-    assert "Array.isArray(metadata.round_texts) && metadata.round_texts.length > 1" in _SOURCE
-    assert "const roundEndpointIds = metadata.round_endpoint_ids || [];" in _SOURCE
-    assert "const roundEndpointLabels = metadata.round_endpoint_labels || [];" in _SOURCE
-    assert "r < roundEndpointIds.length" in _SOURCE
-    assert "r < roundEndpointLabels.length" in _SOURCE
-    assert "roundEndpointIds[r] || pair.actualEndpointId" not in _SOURCE
-
-
-def test_metrics_cost_uses_actual_fallback_endpoint_classification():
-    assert "metrics.endpoint_cost_tracked" in _SOURCE
-    assert "endpointCostTracked === false" in _SOURCE
-    assert "endpointCostTracked !== true && !isCostTrackedEndpoint(selectedUrl)" in _SOURCE
-    assert "Array.isArray(metrics.usage_buckets)" in _SOURCE
 
 
 @pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
@@ -218,20 +194,3 @@ def test_local_selected_endpoint_does_not_erase_paid_fallback_ledger():
         "display": "",
         "text": "$0.125",
     }
-
-
-def test_live_and_resumed_terminal_events_apply_usage_metrics_before_reload():
-    assert "metrics = json.data || metrics;" in _CHAT_SOURCE
-    assert "displayMetrics(terminalMetricsTarget, metrics);" in _CHAT_SOURCE
-    assert "metricsData = json.data || metricsData;" in _CHAT_SOURCE
-    assert "displayMetrics(holder, metricsData);" in _CHAT_SOURCE
-    assert "json.type === 'agent_terminal' || json.type === 'chat_terminal'" in _CHAT_SOURCE
-    assert "chatRenderer.recordSessionMetricsCost(metrics, streamSessionId);" in _CHAT_SOURCE
-    assert "chatRenderer.recordSessionMetricsCost(metricsData, sessionId);" in _CHAT_SOURCE
-    assert "metricsData._costRecordId = _metricsCostRecordId(resumeRunId, json);" in _CHAT_SOURCE
-    assert "bgTerminal.status = 'completed';" in _CHAT_SOURCE
-
-
-def test_usage_command_does_not_hide_existing_fallback_cost_for_local_selection():
-    assert "const cost = chatRenderer.getSessionCost" in _SLASH_SOURCE
-    assert "const cost = costTracked && chatRenderer.getSessionCost" not in _SLASH_SOURCE

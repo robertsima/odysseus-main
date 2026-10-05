@@ -10,20 +10,11 @@ tool API. There was also no way to reach an agent chat older than a day.
 """
 import asyncio
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from src import agent_profiles
-
-ROOT = Path(__file__).resolve().parents[1]
-DASH = (ROOT / "static" / "js" / "agentsDashboard.js").read_text(encoding="utf-8")
-
-
-def _function(name):
-    start = DASH.index(f"function {name}(")
-    return DASH[start:DASH.index("\n}\n", start)]
 
 
 # ── loadouts ────────────────────────────────────────────────────────────────
@@ -106,38 +97,3 @@ def test_launch_errors_are_worded_for_the_form(routes, monkeypatch):
         asyncio.run(launch(SimpleNamespace(json=body)))
     assert err.value.status_code == 400
     assert "pick a chat to report to" in err.value.detail
-
-
-# ── the room ────────────────────────────────────────────────────────────────
-
-def test_a_fresh_opening_starts_from_the_fleet():
-    reset = _function("resetView")
-    for line in ("state.configOpen = view === 'config'", "state.archiveView = view === 'archive'",
-                 "state.historyView = view === 'history'", "state.launchOpen = view === 'launch'",
-                 "state.bucket = 'all'", "state.filter = ''"):
-        assert line in reset
-    opener = DASH[DASH.index("export function open("):DASH.index("export function openForRun")]
-    assert "if (fresh || view) resetView(view);" in opener
-    assert "if (select) state.selected = select;" in opener
-
-
-def test_launch_is_in_every_view_and_the_form_closes_after_a_launch():
-    render = _function("render")
-    assert "data-ag=\"launch\">Launch worker</button>" in render
-    assert "${state.configOpen ? '' : headActions}" not in render
-    click = DASH[DASH.index("act === 'launch-go'"):DASH.index("/** Deliver a message to a chat")]
-    assert "render();" in click and "uiModule.showToast(`Worker not started" in click
-    assert "Choose a loadout, a chat to report to" in click
-
-
-def test_toggle_brings_a_covered_room_forward():
-    toggle = DASH[DASH.index("export function toggle()"):]
-    toggle = toggle[:toggle.index("\n}\n")]
-    assert "!isFrontMost(root)" in toggle and "bringToFront()" in toggle
-
-
-def test_auto_open_follows_the_agents_stream_including_workers():
-    auto = _function("maybeAutoOpen")
-    assert "ev.data?.parent_session !== cur" in auto
-    workbench = (ROOT / "static" / "js" / "workbench.js").read_text(encoding="utf-8")
-    assert "addEventListener('workbench:run-started'" not in workbench

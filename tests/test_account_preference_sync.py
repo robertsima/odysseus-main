@@ -4,8 +4,8 @@ Both were localStorage-only in practice: the navigation order never reached the
 server at all, and the theme consulted it only when localStorage was completely
 empty — so a browser that had ever picked a theme never saw a change made
 anywhere else. These tests drive the reconcile rules in `serverPrefs.js` and
-`navOrder.js` under Node with a stubbed `fetch`, and pin the boot behavior the
-theme module now depends on.
+`navOrder.js` under Node with a stubbed `fetch`. The theme boot is tested in
+tests/static/js/theme/ and the route in tests/routes/prefs_routes/.
 """
 
 import json
@@ -18,9 +18,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 JS = ROOT / "static" / "js"
-SERVER_PREFS = (JS / "serverPrefs.js").read_text(encoding="utf-8")
 NAV_ORDER = (JS / "navOrder.js").read_text(encoding="utf-8")
-THEME = (JS / "theme.js").read_text(encoding="utf-8")
 
 
 def run_node(script: str) -> subprocess.CompletedProcess:
@@ -191,14 +189,6 @@ await settled(); report({ source: r.source });
     assert out["puts"] == [["demo", {"value": "fresh", "updated_at": 999}]]
 
 
-def test_theme_boot_applies_the_same_ownership_guard():
-    guard = THEME.split("async function _syncThemeWithAccount()", 1)[1].split("\n}", 1)[0]
-    assert "await localCopyBelongsToAccount()" in guard
-    assert "const local = mine ? getSaved() : null;" in guard
-    custom = THEME.split("async function _syncCustomThemesWithAccount()", 1)[1].split("\n}", 1)[0]
-    assert "await localCopyBelongsToAccount()" in custom
-
-
 # ── navigation order ─────────────────────────────────────────────────────────
 
 NAV_DOM = """
@@ -284,57 +274,3 @@ await settled(); report({});
     # rail (PR #49 put search first) does not have to edit this test.
     first_default = re.search(r"NAV_ITEMS = Object\.freeze\(\[\s*Object\.freeze\(\{ key: '([\w-]+)'", NAV_ORDER).group(1)
     assert out["puts"][0][1]["value"][0] == first_default
-
-
-# ── theme boot ───────────────────────────────────────────────────────────────
-
-def test_theme_is_reconciled_on_every_boot_not_only_when_local_is_empty():
-    boot = THEME.split("async function _initWithSync()", 1)[1]
-    assert "if (!getSaved())" not in boot
-    assert "_syncThemeWithAccount()" in boot
-    assert "_syncCustomThemesWithAccount()" in boot
-
-
-def test_an_adopted_theme_is_applied_in_full_not_just_its_colors():
-    """The old hydration called applyColors() only, leaving a second browser
-    with the right palette and the default font, density, pattern and effects.
-    Writing the account theme into the first-paint cache lets the single
-    initThemeUI() pass apply all of it."""
-    adopt = THEME.split("function _adoptServerTheme(", 1)[1].split("\n}", 1)[0]
-    assert "Storage.setJSON(LS_KEY" in adopt
-    assert "applyColors" not in adopt
-    init = THEME.split("function initThemeUI()", 1)[1]
-    for applied in ("applyColors(currentColors)", "applyFontDensity(_initFont, _initDensity)",
-                    "applyBgPattern(_initPattern)", "applyFrostedGlass(_initFrosted)"):
-        assert applied in init
-
-
-def test_a_saved_theme_carries_a_write_time_so_browsers_can_be_ordered():
-    save = THEME.split("export function save(name, colors, opts)", 1)[1].split("\n}", 1)[0]
-    assert "obj.updated_at = Date.now()" in save
-    assert "writePref(THEME_PREF, obj, obj.updated_at)" in save
-
-
-def test_text_size_travels_with_the_theme():
-    assert "opts.uiScale = ts.value" in THEME
-    assert "(saved && saved.uiScale)" in THEME
-
-
-def test_the_local_copy_still_paints_first():
-    """Reconciling must not put a network round trip in front of a theme this
-    browser already has."""
-    boot = THEME.split("async function _initWithSync()", 1)[1]
-    assert boot.index("if (hadLocal) initThemeUI();") < boot.index("await _syncCustomThemesWithAccount()")
-
-
-def test_prefs_are_account_scoped_server_side():
-    """The route these modules write to keys by signed-in user; without that,
-    'follows the account' would be 'follows the deployment'."""
-    routes = (ROOT / "routes" / "prefs_routes.py").read_text(encoding="utf-8")
-    assert "user = get_current_user(request)" in routes
-    assert "_save_for_user(user, prefs)" in routes
-
-
-def test_the_sync_module_is_precached_with_the_rest_of_the_shell():
-    sw = (ROOT / "static" / "sw.js").read_text(encoding="utf-8")
-    assert "'/static/js/serverPrefs.js'," in sw

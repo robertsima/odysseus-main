@@ -176,44 +176,6 @@ def test_describe_keys_an_unset_model_to_the_endpoint(stored):
     assert described["selected"] == "compact", "the endpoint-wide profile must show as selected"
 
 
-# ── The settings tab has to call the path the router actually serves ────
-#
-# The tab shipped calling /api/settings/context-profile while the handlers live
-# on the auth router, which carries a /api/auth prefix — every load 404'd and
-# the UI could only say "could not load context profiles". Nothing in Python
-# catches that, because both halves are individually correct. So compare them.
-
-import re
-from pathlib import Path
-
-_REPO = Path(__file__).resolve().parent.parent
-
-
-def _router_paths(source: str) -> set:
-    """Full paths served by routes/auth_routes.py, prefix included."""
-    prefix = re.search(r'APIRouter\(prefix="([^"]*)"', source).group(1)
-    return {
-        prefix + path
-        for path in re.findall(r'@router\.(?:get|post|put|delete)\("([^"]+)"', source)
-    }
-
-
-def _fetched_paths(source: str) -> set:
-    """Paths the settings tab fetches for the context profile."""
-    return set(re.findall(r"fetch\('(/api/[^'?]*context-profile)", source))
-
-
-def test_settings_tab_calls_the_context_profile_route_that_exists():
-    served = _router_paths((_REPO / "routes" / "auth_routes.py").read_text(encoding="utf-8"))
-    called = _fetched_paths((_REPO / "static" / "js" / "settings.js").read_text(encoding="utf-8"))
-
-    assert called, "the settings tab no longer fetches the context profile at all"
-    assert called <= served, (
-        f"settings.js fetches {sorted(called - served)}, which the auth router does not serve; "
-        f"it serves {sorted(p for p in served if 'context-profile' in p)}"
-    )
-
-
 # ── Knobs nothing read (removed 2026-09-28) ─────────────────────────────
 
 

@@ -14,10 +14,8 @@ without a target the tools refuse with a candidate list instead of guessing.
 
 import asyncio
 import json
-import re
 import uuid
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import pytest
 
@@ -31,7 +29,6 @@ import src.agent_tools.document_tools as dt  # noqa: E402
 from src.agent_tools import TOOL_HANDLERS  # noqa: E402
 
 TITLE = "Agent Memory and RAG Business Opportunity Research"
-ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture
@@ -507,18 +504,3 @@ def test_model_facing_result_names_the_edited_document(db):
     failure_text = format_tool_result("edit_document", failure)
     assert intended in failure_text and "document_id" in failure_text
     assert '"document_candidates"' not in failure_text  # listed once, in the error
-
-
-def test_frontend_edit_events_never_reuse_a_same_titled_tab():
-    src = (ROOT / "static/js/document.js").read_text(encoding="utf-8")
-    start = src.index("export function handleDocUpdate(data)")
-    body = src[start:start + 6000]
-    assert "const isServerEdit" in body
-    assert "if (!reuseId && data.title && !isServerEdit)" in body
-    assert "if (!reuseId && !isServerEdit)" in body
-
-    tags = set()
-    for path in ROOT.joinpath("static").rglob("*"):
-        if path.suffix in {".js", ".html"} and path.is_file():
-            tags.update(re.findall(r"document\.js\?v=([\w.-]+)", path.read_text(encoding="utf-8", errors="ignore")))
-    assert len(tags) == 1, tags

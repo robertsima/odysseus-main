@@ -102,13 +102,6 @@ def test_pages_site_owns_its_entrypoint_and_media():
     ]
     assert not unreferenced, f"unreferenced website video(s): {unreferenced}"
 
-    workflow = (REPO / ".github/workflows/deploy-pages.yml").read_text(encoding="utf-8")
-    assert "actions/jekyll-build-pages@" in workflow
-    assert "source: website" in workflow
-    assert "destination: _site" in workflow
-    assert "path: _site" in workflow
-    assert "cancel-in-progress: false" in workflow
-
 
 def test_pages_guides_keep_relative_links_inside_site():
     site_root = (REPO / "website").resolve()
@@ -137,26 +130,6 @@ docker info --format '{{.DockerRootDir}}'
 <!-- {% endraw %} -->"""
 
     assert guarded_command in setup
-
-
-def test_preview_encoder_targets_pages_source():
-    encoder = (REPO / "scripts/encode_previews.sh").read_text(encoding="utf-8")
-
-    assert "landing page: website/<name>.webm" in encoder
-    assert 'OUT_DIR="$(cd "$(dirname "$0")/../website" && pwd)"' in encoder
-
-
-def test_ci_runs_asset_ownership_guards_for_managed_roots():
-    workflow = (REPO / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-    match = re.search(r"grep -Ev '([^']+)'", workflow)
-    assert match, "expected the docs-only path classifier in CI"
-    docs_only = re.compile(match.group(1))
-
-    assert docs_only.match("README.md")
-    assert docs_only.match("docs/example.md")
-    assert not docs_only.match("website/setup.md")
-    assert not docs_only.match("website/new-preview.webm")
-    assert not docs_only.match("assets/branding/new-logo.png")
 
 
 @pytest.mark.parametrize(

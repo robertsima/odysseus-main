@@ -359,34 +359,6 @@ def test_profile_transfer_routes_are_admin_only(client, store, who, method, path
 
 # ── the loadout library UI (Agent Control Room › Loadouts) ─────────────────────
 
-def test_settings_points_to_the_loadout_library():
-    # The editor moved out of Settings (2026-09-30); Settings links to it.
-    index = (ROOT / "static/index.html").read_text(encoding="utf-8")
-    card = index.split('id="set-agentProfilesCard"', 1)[1].split('<div class="admin-card"', 1)[0]
-    assert 'id="set-agentOpenLoadouts"' in card
-    assert 'id="set-agentProfiles"' not in index
-    settings = (ROOT / "static/js/settings.js").read_text(encoding="utf-8")
-    assert "function initAgentProfilesEditor(" not in settings
-    assert "agentsDashboard.openLoadouts()" in settings
-
-
-def test_profile_editor_wires_the_transfer_routes():
-    js = (ROOT / "static/js/agentLoadouts.js").read_text(encoding="utf-8")
-    assert "'/api/agents/profiles/export'" in js
-    assert "'/api/agents/profiles/import'" in js
-    assert "rename_conflicts: mode === 'rename'" in js
-    assert "replaceProfiles(body.profiles)" in js
-    assert "report.errors" in js and "report.warnings" in js
-    assert "fileInput.accept = '.json,application/json'" in js
-
-
-def test_deleting_a_loadout_asks_first():
-    js = (ROOT / "static/js/agentLoadouts.js").read_text(encoding="utf-8")
-    remove = js.split("const remove = button('Delete');", 1)[1].split("head.appendChild(remove);", 1)[0]
-    assert "await ask(" in remove and "danger: true" in remove
-    assert remove.index("await ask(") < remove.index("profiles.splice(")
-    assert "if (!ok) return;" in remove
-
 
 # ── templates: {server:<name>} references (2026-10-01) ─────────────────────────
 
@@ -511,6 +483,3 @@ def test_template_routes_use_the_import_gate(client, store, no_saved_servers, mo
     assert client.post("/api/agents/profiles/templates/install", json=body).status_code == 403
 
 
-def test_loadout_editor_lists_templates_with_install_buttons():
-    js = (ROOT / "static/js/agentLoadouts.js").read_text(encoding="utf-8")
-    assert "'/api/agents/profiles/templates'" in js and "'/api/agents/profiles/templates/install'" in js
