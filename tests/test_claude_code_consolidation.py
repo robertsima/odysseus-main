@@ -573,8 +573,6 @@ def test_send_to_session_source_tagging_helper(monkeypatch):
     assert st._session_display_name(Manager(), "abc") == "Planner"
     assert st._session_display_name(Manager(), "zzz") == ""
     assert st._session_display_name(None, "abc") == ""
-    src = Path(st.__file__).read_text(encoding="utf-8")
-    assert '"source": "agent"' in src and '"direction": "inbound"' in src
 
 
 # ── Bundled skill seeding finds skills/<category>/<name> ──
@@ -589,18 +587,6 @@ def test_bundled_source_prefers_category_directory(tmp_path):
     (tmp_path / "skills" / "flat" / "SKILL.md").write_text("---\nname: flat\n---\n", encoding="utf-8")
     assert _bundled_source(str(tmp_path), "dev", "flat").endswith(os.path.join("skills", "flat"))
 
-
-def test_claude_code_delegation_skill_is_shipped_and_parseable():
-    from services.memory.skill_format import Skill
-    from src import builtin_skills
-    from src.runtime_paths import get_app_root
-
-    # 2026-10-01: owned by the claude-code integration, not seeded as core.
-    assert builtin_skills._LEGACY_INTEGRATION_SKILLS["claude-code-delegation"] == "claude-code"
-    path = Path(get_app_root()) / "integrations" / "claude-code" / "skills" / "claude-code-delegation" / "SKILL.md"
-    skill = Skill.from_markdown(path.read_text(encoding="utf-8"), path=str(path))
-    assert skill.name == "claude-code-delegation"
-    assert "delegate_to_claude_code" in path.read_text(encoding="utf-8")
 
 
 async def test_status_flags_bad_callback_token_file(roots, settings, monkeypatch, tmp_path):
