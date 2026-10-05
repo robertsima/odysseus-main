@@ -2,44 +2,39 @@
 
 import asyncio
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
-from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
+from core.database import McpServer
 
 
-def test_reconnect_passes_full_server_config():
-    """do_manage_mcp reconnect must pass name/transport/command/args/env/url."""
-    from src.agent_tools.admin_tools import do_manage_mcp
+def test_reconnect_passes_full_server_config(monkeypatch, app_db):
+    """do_manage_mcp reconnect must pass name/transport/command/args/env/url
+    of the stored row to the manager."""
+    import core.database as cdb
+    import src.agent_tools.admin_tools as admin_tools
 
-    fake_mcp = MagicMock()
-    fake_mcp.disconnect_server = AsyncMock()
-    fake_mcp.connect_server = AsyncMock(return_value=True)
+    monkeypatch.setattr(cdb, "SessionLocal", app_db.SessionLocal)
+    db = app_db.SessionLocal()
+    db.add(McpServer(
+        id="srv-123", name="test-server", transport="stdio", command="/usr/bin/test",
+        args=json.dumps(["--flag"]), env=json.dumps({"KEY": "val"}), url=None,
+        is_enabled=True,
+    ))
+    db.commit()
+    db.close()
+
     # Reconnect goes through restart_server() so the teardown and the rebuild
-    # happen under one per-server lock (a bare disconnect+connect pair can
-    # interleave with a reconnect triggered from the Settings UI).
+    # happen under one per-server lock; the manager would spawn the process.
+    fake_mcp = MagicMock()
     fake_mcp.restart_server = AsyncMock(return_value=True)
     fake_mcp.get_server_status = MagicMock(return_value={"tool_count": 3})
+    monkeypatch.setattr(admin_tools, "get_mcp_manager", lambda: fake_mcp)
 
-    fake_srv = SimpleNamespace(
-        id="srv-123",
-        name="test-server",
-        transport="stdio",
-        command="/usr/bin/test",
-        args=json.dumps(["--flag"]),
-        env=json.dumps({"KEY": "val"}),
-        url=None,
-    )
-
-    fake_db = MagicMock()
-    fake_db.query.return_value.filter.return_value.first.return_value = fake_srv
-
-    with patch("src.agent_tools.admin_tools.get_mcp_manager", return_value=fake_mcp), \
-         patch("core.database.SessionLocal", return_value=fake_db):
-        result = asyncio.run(do_manage_mcp(
-            json.dumps({"action": "reconnect", "server_id": "srv-123"})
-        ))
+    result = asyncio.run(admin_tools.do_manage_mcp(
+        json.dumps({"action": "reconnect", "server_id": "srv-123"})
+    ))
 
     assert result["exit_code"] == 0
-    fake_mcp.connect_server.assert_not_called()
     fake_mcp.restart_server.assert_called_once_with(
         server_id="srv-123",
         name="test-server",
