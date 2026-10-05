@@ -7,7 +7,29 @@ This plan came out of a design review of the Odysseus test suite on 2026-10-03. 
 - a timed run with coverage on Linux;
 - a mutation probe that planted 13 realistic bugs and 7 harmless refactors.
 
-The numbers are in [Evidence](#evidence). The owner settled the decisions (D1 to D29) one round at a time. The phases at the end are the work order. Nothing in this document is implemented yet.
+The numbers are in [Evidence](#evidence). The owner settled the decisions (D1 to D29) one round at a time. The phases at the end are the work order.
+
+## Status, 2026-10-05
+
+All six phases are implemented and on dev. Each change is described in its merge commit message.
+
+- **Speed.** On GitHub's runners, Python tests take about 2.5 min instead of 17, and browser tests about 3.5 min in a parallel job.
+- **Layout.** Tests live at the mirror of the production file.
+- **New tests.** `AGENTS.md` carries the rules for writing them.
+- **Lanes.** `python -m tests.run` replaces `run_focus.py`.
+- **Phase 4.** The source-text pins fell from 199 files to 20, each kept with a reason. 9 batches rewrote the rest as behavior, node and Playwright tests, each seen red against a planted change.
+- **Security.** The planted security mutants now fail tests, routes have HTTP owner-scope and auth tests, and 1,907 tests carry the `security` marker.
+- **Nightly.** Random order, Windows, the orchestration scenarios, the coverage map and the browser tier all pass.
+- **Left on a timer:**
+  - make the red-evidence check required once it has reported on about two weeks of PRs (D17);
+  - the mutation benchmark's first weekly run.
+- **Known gaps:** a few tests stay xfailed for product bugs the work found, listed in the merge commits:
+  - a gallery id-existence leak;
+  - a Windows `%TEMP%` tool root;
+  - Windows git autocrlf diff counts;
+  - the Windows callback rule;
+  - the theme effect on a fresh profile;
+  - nested markdown fences.
 
 ## Short answers
 

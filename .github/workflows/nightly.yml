@@ -15,9 +15,6 @@ on:
         description: "Also run the mutation benchmark"
         type: boolean
         default: false
-  push:
-    # Pushing this branch runs the workflow before it reaches dev.
-    branches: ["restructure/nightly", "restructure/base"]
 
 permissions:
   contents: read

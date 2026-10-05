@@ -2,9 +2,7 @@ name: CI
 
 on:
   push:
-    # restructure/** carries the test-suite restructure
-    # (website/testing-restructure-2026-10-03.md) until it lands on dev.
-    branches: [main, dev, "restructure/**"]
+    branches: [main, dev]
   pull_request:
 
 # Least privilege: none of the jobs write to the repo.
