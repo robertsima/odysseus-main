@@ -436,10 +436,10 @@ FUNCTION_TOOL_SCHEMAS = [
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["status", "start", "commit", "diff", "request_publish",
+                        "enum": ["status", "diagnose", "start", "commit", "diff", "request_publish",
                                  "publish", "list_requests", "show_request", "checks", "cleanup",
                                  "repo_list", "repo_status", "repo_pull"],
-                        "description": "Default status. repo_list, repo_status and repo_pull are legacy; use manage_git for repository listing and sync."
+                        "description": "Default status; name a branch for one worktree. diagnose is local and read-only. repo_* are legacy; use manage_git for repository discovery/sync."
                     },
                     "repository": {"type": "string", "description": "Absolute checkout path from manage_git repositories, not a URL. Omit only for the Odysseus source checkout."},
                     "name": {"type": "string", "description": "start only: task name; the branch becomes agent/<repo>/<name> (agent/odysseus/<name> without repository)"},
@@ -448,6 +448,7 @@ FUNCTION_TOOL_SCHEMAS = [
                     "wait_seconds": {"type": "integer", "description": "checks only: wait up to this many seconds (0-900, default 0) for running checks to finish; ends early when the user writes"},
                     "base": {"type": "string", "description": "start only: existing ref or commit the new branch starts from (origin/main, a branch, or a SHA). Default: the configured base (Odysseus) or origin/HEAD"},
                     "expected_base": {"type": "string", "description": "start only: full commit SHA base must resolve to; start refuses on mismatch"},
+                    "expected_head": {"type": "string", "description": "request_publish/diagnose: full tested HEAD SHA. Refuse a different registered HEAD before network; diagnose explains clone drift and metadata blockers."},
                     "message": {"type": "string", "description": "Commit message (action=commit)"},
                     "title": {"type": "string", "description": "Draft PR title (action=request_publish)"},
                     "body": {"type": "string", "description": "Draft PR body (action=request_publish)"},

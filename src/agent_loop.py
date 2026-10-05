@@ -1923,6 +1923,12 @@ def _workspace_coding_rules(workspace: Optional[str]) -> str:
         f"- Active workspace: `{workspace}`. Treat relative paths as relative to this folder.\n"
         "- This mode is for coding, debugging, shell, file, build, benchmark, and repo tasks. Use the file and shell tools for repository work. Use email, calendar, notes or documents only when the request names them.\n"
         "- Work from the real filesystem and command output.\n"
+        "- Keep the registered repository, worktree path, branch and tested HEAD in coding handoffs. "
+        "Use named manage_agent_worktree status rather than a global inventory. Before request_publish, "
+        "pass expected_head=<tested SHA>. A separate clone does not update the registered branch. "
+        "If shell Git cannot see metadata or the HEAD differs, call manage_agent_worktree diagnose "
+        "with repository, branch and expected_head. Use its host-verified path and managed operations "
+        "before asking for settings changes; do not rewrite .git pointers or clone over existing work.\n"
         "- Use `apply_patch` for edits that belong together across files.\n"
         "- For a code repair, patch the canonical helper or boundary function responsible for the behavior.\n"
         "- For visual changes (pages, styles, icons, SVG), render with `preview_file` and compare with the reference you were given; a passing string test does not show what it looks like.\n"
@@ -5343,7 +5349,7 @@ def _bare_tool_name(tool_type: str) -> str:
 # the same failure the name-shape check was added to fix for MCP tools.
 _DEDUPE_POLLING_ACTIONS = frozenset({
     "poll", "status", "check", "wait", "progress", "tail", "watch", "list",
-    "list_requests", "show_request", "peek", "state", "checks",
+    "list_requests", "show_request", "peek", "state", "checks", "diagnose",
 })
 
 
