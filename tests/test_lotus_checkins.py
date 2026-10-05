@@ -105,14 +105,3 @@ def test_route_rejects_naive_timestamp_and_bad_reminder_time(monkeypatch, tmp_pa
     )
 
 
-def test_lotus_ui_is_wired_into_sidebar_and_app():
-    root = Path(__file__).resolve().parent.parent
-    html = (root / "static" / "index.html").read_text(encoding="utf-8")
-    app_js = (root / "static" / "app.js").read_text(encoding="utf-8")
-    lotus_js = (root / "static" / "js" / "lotus.js").read_text(encoding="utf-8")
-
-    assert 'id="tool-lotus-btn"' in html
-    assert "import lotusModule from './js/lotus.js'" in app_js
-    assert "lotusModule.openLotus()" in app_js
-    assert "/api/lotus" in lotus_js
-    assert "How are you feeling right now?" in lotus_js

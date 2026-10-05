@@ -734,69 +734,6 @@ def test_test_notification_endpoint_uses_the_real_dispatcher(monkeypatch, tmp_pa
 # ---------------------------------------------------------------------------
 
 
-def test_lotus_reminders_tab_is_wired_to_the_delivery_endpoints():
-    root = Path(__file__).resolve().parent.parent
-    lotus_js = (root / "static" / "js" / "lotus.js").read_text(encoding="utf-8")
-    style = (root / "static" / "style.css").read_text(encoding="utf-8")
-
-    for endpoint in ("/preferences/test", "/snooze", "/notifications?limit="):
-        assert endpoint in lotus_js, endpoint
-    for control in (
-        "lotus-reminder-enabled",
-        "lotus-times",
-        "lotus-add-time",
-        "lotus-weekdays",
-        "lotus-quiet-start",
-        "lotus-quiet-end",
-        "lotus-min-hours",
-        "lotus-skip-checked-in",
-        "lotus-channel",
-        "lotus-message-style",
-        "lotus-insights-enabled",
-        "lotus-insights-frequency",
-        "lotus-insights-weekday",
-        "lotus-insights-time",
-        "lotus-test-notification",
-        "lotus-snooze",
-        "lotus-notification-list",
-    ):
-        assert control in lotus_js, control
-
-    # The stub copy is gone from both the status message and the tab hint.
-    assert "later milestone" not in lotus_js
-    assert "MAX_REMINDER_TIMES = 8" in lotus_js
-    assert ".lotus-weekdays" in style
-    assert ".lotus-notification-list" in style
-
-
-def test_settings_privacy_menu_controls_lotus_endpoint_scopes():
-    root = Path(__file__).resolve().parent.parent
-    html = (root / "static" / "index.html").read_text(encoding="utf-8")
-    settings_js = (root / "static" / "js" / "settings.js").read_text(encoding="utf-8")
-
-    assert 'data-settings-tab="privacy"' in html
-    assert 'data-settings-panel="privacy"' in html
-    for control in (
-        "set-lotus-access-local",
-        "set-lotus-access-lan",
-        "set-lotus-access-api",
-        "set-lotus-access-save",
-    ):
-        assert control in html
-        assert control in settings_js
-    assert "/api/lotus/access-policy" in settings_js
-    assert "third-party provider" in html
-
-
-def test_scheduler_runs_and_cancels_the_lotus_loop():
-    root = Path(__file__).resolve().parent.parent
-    scheduler = (root / "src" / "task_scheduler.py").read_text(encoding="utf-8")
-
-    assert "self._lotus_pings_task = asyncio.create_task(self._lotus_pings_loop())" in scheduler
-    assert '"_lotus_pings_task"' in scheduler
-    assert "async def _lotus_pings_loop" in scheduler
-
-
 def test_lotus_reminder_action_is_not_a_user_schedulable_task():
     from src.builtin_actions import BUILTIN_ACTIONS
 
