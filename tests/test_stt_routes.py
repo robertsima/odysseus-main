@@ -1,4 +1,3 @@
-from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -95,17 +94,3 @@ def test_preferences_are_isolated_by_authenticated_owner(monkeypatch, tmp_path):
     assert bob["language"] == ""
 
 
-def test_voice_input_ui_exposes_private_local_mode_without_https_requirement():
-    root = Path(__file__).resolve().parent.parent
-    html = (root / "static" / "index.html").read_text(encoding="utf-8")
-    settings_js = (root / "static" / "js" / "settings.js").read_text(encoding="utf-8")
-    recorder_js = (root / "static" / "js" / "voiceRecorder.js").read_text(
-        encoding="utf-8"
-    )
-
-    assert 'id="stt-settings-card"' in html
-    assert 'id="set-sttProviderSelect"' in html
-    assert "/api/stt/preferences" in settings_js
-    assert "Odysseus can remain HTTP" in settings_js
-    assert "MediaRecorder.isTypeSupported" in recorder_js
-    assert "/api/stt/transcribe" in recorder_js

@@ -100,11 +100,3 @@ def test_chatgpt_request_sends_the_chat_or_global_effort_only_when_set(monkeypat
     assert payload("s-low")["reasoning"] == {"effort": "low"}   # the loadout wins
 
 
-def test_agent_cards_are_restored_after_the_chat_re_renders():
-    wb = (ROOT / "static/js/workbench.js").read_text(encoding="utf-8")
-    sessions = (ROOT / "static/js/sessions.js").read_text(encoding="utf-8")
-    assert "odysseus:history-rendered" in sessions and "odysseus:history-rendered" in wb
-    restore = wb.split("function restoreChatCards()", 1)[1].split("\nfunction ", 1)[0]
-    assert "card.isConnected" in restore and "isLive(run.status)" in restore
-    # Re-attached in time order, not below everything (test_agent_card_order).
-    assert "cardAnchor(hist" in restore

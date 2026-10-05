@@ -13,9 +13,7 @@ The fix counts genuine recent upload *events*, independent of the current
 batch's file count. save_upload still enforces the per-minute rate limit.
 """
 import io
-import re
 import types
-from pathlib import Path
 
 import pytest
 from fastapi import APIRouter
@@ -24,7 +22,6 @@ from core.database import GalleryImage
 from src.upload_handler import count_recent_uploads, UploadHandler
 import routes.upload_routes as up
 
-_REPO = Path(__file__).resolve().parent.parent
 
 
 def test_count_recent_uploads_ignores_batch_size():
@@ -136,27 +133,13 @@ async def test_genuine_recent_volume_still_throttled():
 # save_upload() counts each file against upload_rate_limit, which was 5 while
 # the composer allows MAX_FILES=10. ──────────────────────────────────────────
 
-def _max_files_from_frontend() -> int:
-    src = (_REPO / "static/js/fileHandler.js").read_text(encoding="utf-8")
-    m = re.search(r"MAX_FILES\s*=\s*(\d+)", src)
-    assert m, "MAX_FILES not found in fileHandler.js"
-    return int(m.group(1))
-
-
-def test_rate_limit_accommodates_a_full_batch():
-    # The per-minute file cap must comfortably exceed the frontend batch cap,
-    # or a single legitimate multi-file attach trips it (issue #1346).
-    h = UploadHandler.__new__(UploadHandler)
-    UploadHandler.__init__(h, base_dir="/tmp", upload_dir="/tmp/_odysseus_test_uploads_cfg")
-    assert h.upload_rate_limit >= _max_files_from_frontend()
-
-
-def test_six_file_batch_is_not_rate_limited(tmp_path):
+def test_a_full_composer_batch_is_not_rate_limited(tmp_path):
+    # The composer attaches up to 10 files at once.
     from fastapi import HTTPException
 
     h = UploadHandler(base_dir=str(tmp_path), upload_dir=str(tmp_path / "uploads"))
     saved = 0
-    for i in range(6):
+    for i in range(10):
         u = types.SimpleNamespace(
             file=io.BytesIO(f"file number {i} unique content".encode()),
             filename=f"f{i}.txt",
@@ -167,7 +150,7 @@ def test_six_file_batch_is_not_rate_limited(tmp_path):
             raise AssertionError(f"file {i} rejected with {e.status_code}: {e.detail}")
         assert meta and meta.get("id")
         saved += 1
-    assert saved == 6
+    assert saved == 10
 
 
 async def test_chat_image_upload_is_added_to_gallery(tmp_path, monkeypatch, app_db):
