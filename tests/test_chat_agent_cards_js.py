@@ -1,13 +1,14 @@
-"""Chat UI: collapsed sub-agent cards, per-turn activity summary, and the
-Control Room's sub-agent Conversation tab.
+"""Chat UI: collapsed sub-agent cards and the per-turn activity summary.
 
-* Worker cards (the live run card and a worker's handed-back result) render
-  collapsed and remember being opened across a refresh — ``cardState.js``,
-  driven through node so the real module runs against a stub localStorage.
+* Worker cards (the live run card and a worker's handed-back result) remember
+  being opened across a refresh — ``cardState.js``, driven through node so the
+  real module runs against a stub localStorage.
 * A turn's tool calls are summarised in one line ("Searched 3 times, read 2
   files, ran 1 worker") — ``agentThread.activitySummary``, also run in node.
-* The remaining wiring is pinned by source scans, the idiom
-  test_agents_dashboard_static.py already uses for these files.
+
+How the cards, the timeline and the Control Room's Conversation tab look and
+behave in the page is covered in tests/static/js/chatRenderer/test_agent_cards.py
+and tests/static/js/agentsDashboard/test_control_room.py.
 """
 import json
 import shutil
@@ -20,10 +21,6 @@ ROOT = Path(__file__).resolve().parent.parent
 JS = ROOT / "static" / "js"
 CARD_STATE = (JS / "cardState.js").read_text(encoding="utf-8")
 AGENT_THREAD = (JS / "agentThread.js").read_text(encoding="utf-8")
-WORKBENCH = (JS / "workbench.js").read_text(encoding="utf-8")
-RENDERER = (JS / "chatRenderer.js").read_text(encoding="utf-8")
-AGENTS = (JS / "agentsDashboard.js").read_text(encoding="utf-8")
-STYLE = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 
 _HAS_NODE = shutil.which("node") is not None
 needs_node = pytest.mark.skipif(not _HAS_NODE, reason="node is not installed")
@@ -86,43 +83,3 @@ console.log(JSON.stringify([
     assert r[3] == "Used 2 tools"
     assert r[4] == "Read 1 file, used 1 other tool"
     assert r[5] == ""
-
-
-def test_the_timeline_starts_collapsed_behind_the_summary():
-    refresh = AGENT_THREAD.split("export function refreshThread", 1)[1].split("export function refreshAllThreads", 1)[0]
-    assert "thread.dataset.activity !== 'open'" in refresh
-    assert 'data-ats="toggle"' in refresh and "aria-expanded" in refresh
-    # A live turn still shows the call it is making right now.
-    assert "!n.classList.contains('running')" in refresh
-    assert "if (action === 'toggle')" in AGENT_THREAD
-    # Both renderers give the classifier the real tool name, not the live label.
-    assert "node.dataset.tool = ev.tool" in RENDERER
-    assert "node.dataset.tool = json.tool" in (JS / "chat.js").read_text(encoding="utf-8")
-
-
-def test_worker_run_cards_are_collapsed_by_default_even_while_running():
-    card = WORKBENCH.split("function updateChatCard(ev)", 1)[1].split("// ── window plumbing", 1)[0]
-    assert "isCardOpen(`run:${ev.run_id}`)" in card
-    assert "setCardOpen(`run:${ev.run_id}`, opened)" in card
-    # Running used to force the card open in CSS.
-    assert ".agent-run-card.running .agent-run-steps" not in STYLE
-    assert ".agent-run-card:not(.open) .agent-run-foot { display: none; }" in STYLE
-
-
-def test_a_workers_handed_back_result_is_one_collapsed_line():
-    assert "if (isWorkerMsg) _makeWorkerResultCollapsible(wrap, r, textRaw, metadata);" in RENDERER
-    helper = RENDERER.split("function _makeWorkerResultCollapsible", 1)[1].split("\n}\n", 1)[0]
-    assert "isCardOpen(key)" in helper and "setCardOpen(key, nowOpen)" in helper
-    assert ".msg.msg-worker-result.collapsed > .body { display: none; }" in STYLE
-
-
-def test_control_room_shows_a_sub_agents_conversation():
-    detail = AGENTS.split("function renderDetail()", 1)[1].split("function steerLogHtml", 1)[0]
-    # Only a sub-agent (a chat with a parent) gets the tab.
-    assert "const isSubAgent = !!r.parent_session;" in detail
-    assert "['conversation', 'Conversation']" in detail
-    assert "tab === 'conversation' ? conversationHtml(r)" in detail
-    # Read from the chat's own saved history, tool events included.
-    assert "/api/history/${encodeURIComponent(sid)}?limit=${CONVERSATION_LIMIT}" in detail
-    assert "meta.tool_events" in detail
-    assert 'data-ag="convo-refresh"' in detail and "act === 'convo-refresh'" in AGENTS

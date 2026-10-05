@@ -74,8 +74,3 @@ def test_cards_go_back_where_their_runs_happened():
     # Nothing saved after it yet: at the end, as while it runs.
     assert placed["still_running"] is None
     assert placed["unknown"] is None
-
-
-def test_messages_carry_the_time_they_were_saved():
-    renderer = (ROOT / "static" / "js" / "chatRenderer.js").read_text(encoding="utf-8")
-    assert renderer.count("wrap.dataset.ts = metadata.timestamp") == 2
