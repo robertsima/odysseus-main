@@ -7,3 +7,6 @@
 playwright>=1.49,<2
 # Per-test coverage for the nightly coverage map (scripts/build_test_map.py).
 pytest-cov
+# The browser job reruns a failed test once (--reruns 1). A test that needed
+# the rerun shows as R in the summary, so flakiness stays visible.
+pytest-rerunfailures
