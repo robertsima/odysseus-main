@@ -33,7 +33,9 @@ def atomic_write_json(path: str, data: Any, *, indent: Optional[int] = None, mod
 
     try:
         with open(tmp, "w", encoding="utf-8") as f:
-            if mode is not None:
+            # os.fchmod does not exist on Windows before Python 3.13, and
+            # there the mode would only toggle the read-only flag.
+            if mode is not None and hasattr(os, "fchmod"):
                 os.fchmod(f.fileno(), mode)
             json.dump(data, f, indent=indent)
             f.flush()
