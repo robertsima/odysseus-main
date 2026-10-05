@@ -5,6 +5,7 @@ from fastapi import HTTPException, UploadFile
 
 from src.upload_limits import format_byte_limit, read_upload_limited
 
+
 def _upload(name: str, data: bytes) -> UploadFile:
     return UploadFile(filename=name, file=io.BytesIO(data))
 

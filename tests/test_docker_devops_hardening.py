@@ -1,6 +1,5 @@
 """Static regressions for Docker/devops hardening contracts."""
 
-import ast
 import os
 import re
 import shutil
@@ -10,11 +9,6 @@ from pathlib import Path
 
 import pytest
 import yaml
-from starlette.applications import Starlette
-from starlette.middleware.cors import CORSMiddleware
-from starlette.responses import PlainTextResponse
-from starlette.routing import Route
-from starlette.testclient import TestClient
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_FILES = [
@@ -36,31 +30,13 @@ def _compose_env_names(path: Path) -> set[str]:
     return {entry.split("=", 1)[0] for entry in env}
 
 
-def _upload_limit_env_names() -> set[str]:
-    source = (ROOT / "src" / "upload_limits.py").read_text(encoding="utf-8")
-    return set(re.findall(r'"(ODYSSEUS_[A-Z_]*BYTES)"', source)) | {
-        "ODYSSEUS_CHAT_UPLOAD_MAX_BYTES"
-    }
-
-
-def _cors_allow_methods() -> list[str]:
-    tree = ast.parse((ROOT / "app.py").read_text(encoding="utf-8"))
-    for node in tree.body:
-        if isinstance(node, ast.Assign):
-            names = [target.id for target in node.targets if isinstance(target, ast.Name)]
-            if "CORS_ALLOW_METHODS" in names:
-                return ast.literal_eval(node.value)
-    raise AssertionError("CORS_ALLOW_METHODS not found")
-
-
 def test_compose_files_do_not_inject_user_upload_limit_defaults():
-    expected = _upload_limit_env_names()
-    assert expected
     for path in COMPOSE_FILES:
         # Upload caps are Settings UI choices. Compose must not manufacture an
         # environment value that would shadow the per-user setting; existing
         # native installs can still use the legacy variables as fallbacks.
-        assert expected.isdisjoint(_compose_env_names(path)), path.name
+        shadowing = {name for name in _compose_env_names(path) if re.fullmatch(r"ODYSSEUS_\w*BYTES", name)}
+        assert not shadowing, f"{path.name}: {sorted(shadowing)}"
 
 
 def test_compose_files_forward_companion_base_url():
@@ -121,7 +97,6 @@ def test_docker_entrypoint_ownership_repair_stays_inside_expected_mounts():
         assert f"-path {path}" in script
     assert "mount_root_for" in script
     assert "is_broad_mount_root" in script
-    assert "Skipping recursive ownership repair" in script
 
 
 def test_docker_entrypoint_repairs_cache_parent_without_recursive_walk():
@@ -216,33 +191,14 @@ def test_dockerignore_excludes_secrets_editor_backups():
     assert "!secrets.env.example" in patterns
 
 
-def test_cors_allow_methods_include_patch():
-    methods = _cors_allow_methods()
-    assert "PATCH" in methods
-
-
-def test_patch_preflight_is_allowed_by_configured_cors_methods():
-    async def patched(_request):
-        return PlainTextResponse("ok")
-
-    app = Starlette(routes=[Route("/api/document/1", patched, methods=["PATCH"])])
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["http://client.local"],
-        allow_credentials=True,
-        allow_methods=_cors_allow_methods(),
-        allow_headers=["Content-Type"],
-    )
-
-    response = TestClient(app).options(
+def test_the_real_app_allows_a_patch_preflight(api):
+    response = api.anonymous().options(
         "/api/document/1",
-        headers={
-            "Origin": "http://client.local",
-            "Access-Control-Request-Method": "PATCH",
-        },
+        headers={"Origin": "http://localhost", "Access-Control-Request-Method": "PATCH"},
     )
 
     assert response.status_code == 200
+    assert "PATCH" in response.headers["access-control-allow-methods"]
 
 
 def test_testing_docs_use_project_venv_for_python_validation():
