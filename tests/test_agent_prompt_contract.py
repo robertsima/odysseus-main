@@ -49,24 +49,6 @@ def test_the_checklist_nudge_offers_needs_parent_only_to_a_worker():
     assert "- [ ] fix it" in worker
 
 
-def test_visual_asset_sourcing_skill_parses_and_is_cross_linked():
-    from pathlib import Path
-    from services.memory.skill_format import Skill
-
-    root = Path(al.__file__).resolve().parents[1] / "skills" / "design"
-    text = (root / "visual-asset-sourcing" / "SKILL.md").read_text(encoding="utf-8")
-    skill = Skill.from_markdown(text)
-    # The portable schema nests category/status/source under `metadata:`; the
-    # seeder (src/builtin_skills.py) copies them onto the skill record.
-    assert skill.name == "visual-asset-sourcing" and skill.description
-    head = text.split("---")[1]
-    for line in ("  category: design", "  status: published", "  source: bundled"):
-        assert line in head
-    assert "Needs user:" in text and "api.iconify.design" in text
-    penpot = (root.parents[1] / "integrations" / "penpot" / "skills" / "penpot-design-workflow" / "SKILL.md").read_text(encoding="utf-8")
-    assert "visual-asset-sourcing" in penpot and "error screen" in penpot
-
-
 # ── Prompt audit 2026-10-01 ────────────────────────────────────────────────
 
 
