@@ -19,7 +19,6 @@ Security invariant under test:
          service layer; they do not hardcode a value or drop the parameter
          (tests 4–5).
 """
-import sys
 from unittest.mock import MagicMock, AsyncMock
 
 import pytest
@@ -69,16 +68,8 @@ class _Query:
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def cleanup_imports(monkeypatch):
-    """Return (_apply_owner_filter, setup_cleanup_routes) from a clean import.
-
-    Drops any cached copy of the cleanup modules from sys.modules before
-    importing so that prior tests' monkeypatched state does not bleed in.
-    monkeypatch restores sys.modules entries on teardown.
-    """
-    monkeypatch.delitem(sys.modules, "src.cleanup_service", raising=False)
-    monkeypatch.delitem(sys.modules, "routes.cleanup_routes", raising=False)
-
+def cleanup_imports():
+    """Return (_apply_owner_filter, setup_cleanup_routes)."""
     import src.cleanup_service as svc
     import routes.cleanup_routes as rts
     return svc._apply_owner_filter, rts.setup_cleanup_routes

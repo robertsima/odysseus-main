@@ -4,7 +4,6 @@ Exercises the actual _refresh_token_cache() and _token_cache in app.py
 to verify the atomic swap fix eliminates the race window.
 """
 import os
-import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -14,25 +13,20 @@ import pytest
 
 
 @pytest.fixture
-def app_module(monkeypatch):
-    """Import app.py with AUTH_ENABLED=true and minimal mocked deps.
+def app_module(api, monkeypatch):
+    """app.py as the api fixture imported it, with a fake token table.
 
-    Sets up a real AuthManager user ('admin') so normalize_known_username
-    resolves the token owner.  Replaces SessionLocal with a MagicMock so
-    _refresh_token_cache() can run without a real DB.
+    The api fixture's auth file has an 'admin' user, so
+    normalize_known_username resolves the token owner. SessionLocal is a
+    MagicMock so _refresh_token_cache() reads the rows _seed() hands it, and
+    the token cache starts empty and is put back after the test.
     """
-    monkeypatch.setenv("AUTH_ENABLED", "true")
-    monkeypatch.setenv("DATABASE_URL", "sqlite:///:memory:")
-
-    # Clear cached app module
-    monkeypatch.delitem(sys.modules, "app", raising=False)
-
-    import app as app_mod  # noqa: E402
-
-    app_mod.SessionLocal = MagicMock()
-    app_mod.logger = MagicMock()
-    app_mod.auth_manager.setup("admin", "TestPass123!")
-
+    app_mod = api.module
+    monkeypatch.setattr(app_mod, "SessionLocal", MagicMock())
+    monkeypatch.setattr(app_mod, "logger", MagicMock())
+    monkeypatch.setattr(app_mod, "_token_cache", {})
+    monkeypatch.setattr(app_mod.app.state, "_token_cache", app_mod._token_cache)
+    monkeypatch.setattr(app_mod.app.state, "_token_cache_dirty", True)
     return app_mod
 
 

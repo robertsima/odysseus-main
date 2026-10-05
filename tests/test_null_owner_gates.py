@@ -12,52 +12,11 @@ Pattern under test (multi-tenant deploy):
 """
 
 import os
-import sys
-import types
 import pytest
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from tests.helpers.calendar_routes import import_calendar_routes
-
-# `tests/conftest.py` stubs the heavy optional deps. We additionally
-# stub `core.database` here because the real module instantiates
-# SQLAlchemy declarative classes at import-time — which blows up under
-# the conftest's `sqlalchemy.*` MagicMock stubs ("metaclass conflict").
-# Stub also a handful of route modules each of these targeted modules
-# happens to drag in at import-time.
-@pytest.fixture(autouse=True)
-def _null_owner_stubs(monkeypatch):
-    for _stub, _attrs in (
-        ("core.database", (
-            "Base", "SessionLocal", "CalendarCal", "CalendarDeletedEvent", "CalendarEvent",
-            "Document", "DocumentVersion", "Session", "ChatMessage",
-            "GalleryImage", "GalleryAlbum", "Note", "ScheduledTask",
-            "TaskRun", "ModelEndpoint", "Webhook",
-        )),
-        ("core.auth", ("AuthManager",)),
-        ("src.endpoint_resolver", ()),
-    ):
-        if _stub not in sys.modules:
-            m = types.ModuleType(_stub)
-            for _name in _attrs:
-                setattr(m, _name, MagicMock())
-            sys.modules[_stub] = m
-        else:
-            m = sys.modules[_stub]
-            for _name in _attrs:
-                if not hasattr(m, _name):
-                    setattr(m, _name, MagicMock())
-        monkeypatch.setitem(sys.modules, _stub, m)
-
-    # src.webhook_manager is only dragged in by _import_webhook_helper().
-    if "src.webhook_manager" not in sys.modules:
-        wm = types.ModuleType("src.webhook_manager")
-        wm.WebhookManager = MagicMock()
-        wm.validate_webhook_url = MagicMock()
-        wm.validate_events = MagicMock()
-        sys.modules["src.webhook_manager"] = wm
-        monkeypatch.setitem(sys.modules, "src.webhook_manager", wm)
 
 from fastapi import HTTPException
 
@@ -184,9 +143,7 @@ def test_gallery_owner_filter_passes_user():
 # calendar/notes/gallery gates above and _verify_session_owner.
 
 def _import_webhook_helper():
-    """Import routes.webhook_routes. Stubs for core.database (ChatMessage,
-    Webhook) and src.webhook_manager are provided by the _null_owner_stubs
-    autouse fixture."""
+    """Import routes.webhook_routes."""
     return __import__(
         "routes.webhook_routes", fromlist=["_caller_owns_session"]
     )
@@ -284,49 +241,49 @@ def _ep(name, owner, *, is_enabled=True):
     return SimpleNamespace(name=name, owner=owner, is_enabled=is_enabled)
 
 
-def _select(rows, owner):
+def _select(monkeypatch, rows, owner):
     wh_mod = _import_webhook_helper()
     # _select_api_chat_fallback_endpoint uses the module-level ModelEndpoint
-    # (not a local import), so we patch the module attribute directly.
-    wh_mod.ModelEndpoint = _ModelEndpoint
+    # (not a local import), so the fake class goes on the module attribute.
+    monkeypatch.setattr(wh_mod, "ModelEndpoint", _ModelEndpoint)
     return wh_mod._select_api_chat_fallback_endpoint(_DB(rows), owner)
 
 
-def test_sync_chat_fallback_never_picks_another_owners_endpoint():
+def test_sync_chat_fallback_never_picks_another_owners_endpoint(monkeypatch):
     # bob's private endpoint is first in the table, but alice must never get it.
     rows = [_ep("bob-private", "bob"), _ep("alice-private", "alice")]
-    ep = _select(rows, "alice")
+    ep = _select(monkeypatch, rows, "alice")
     assert ep is not None and ep.name == "alice-private"
 
 
-def test_sync_chat_fallback_prefers_owned_or_shared_only():
+def test_sync_chat_fallback_prefers_owned_or_shared_only(monkeypatch):
     rows = [_ep("bob-private", "bob"), _ep("shared", None)]
-    ep = _select(rows, "alice")
+    ep = _select(monkeypatch, rows, "alice")
     # Only the legacy null-owner shared row is visible to alice.
     assert ep is not None and ep.name == "shared"
 
 
-def test_sync_chat_fallback_returns_none_when_only_others_endpoints():
+def test_sync_chat_fallback_returns_none_when_only_others_endpoints(monkeypatch):
     rows = [_ep("bob-private", "bob"), _ep("carol-private", "carol")]
     # No owned/shared row → fall through to the 400, never borrow bob's key.
-    assert _select(rows, "alice") is None
+    assert _select(monkeypatch, rows, "alice") is None
 
 
-def test_sync_chat_fallback_skips_disabled_owned_endpoint():
+def test_sync_chat_fallback_skips_disabled_owned_endpoint(monkeypatch):
     rows = [_ep("alice-disabled", "alice", is_enabled=False), _ep("shared", None)]
-    ep = _select(rows, "alice")
+    ep = _select(monkeypatch, rows, "alice")
     assert ep is not None and ep.name == "shared"
 
 
-def test_sync_chat_fallback_null_owner_uses_shared_rows_only():
+def test_sync_chat_fallback_null_owner_uses_shared_rows_only(monkeypatch):
     # When no token owner is known, only null-owner (shared) endpoints are
     # visible — private endpoints of any user must not be returned.
     rows = [_ep("bob-private", "bob"), _ep("shared", None)]
-    ep = _select(rows, None)
+    ep = _select(monkeypatch, rows, None)
     assert ep is not None and ep.name == "shared"
 
 
-def test_sync_chat_fallback_null_owner_returns_none_with_no_shared():
+def test_sync_chat_fallback_null_owner_returns_none_with_no_shared(monkeypatch):
     # No shared rows → fail closed rather than returning another user's endpoint.
     rows = [_ep("bob-private", "bob"), _ep("alice-private", "alice")]
-    assert _select(rows, None) is None
+    assert _select(monkeypatch, rows, None) is None

@@ -11,20 +11,9 @@ reach whatever internal base_url they configured. Mirrors the
 webhook `_first_enabled_endpoint` (#1045) and session `_owned_endpoint` fixes.
 """
 
-import sys
-import types
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
-# The helper resolves `from src.database import ModelEndpoint` at call time.
-# Stub the module so we can hand it a fake declarative class whose column
-# comparisons return inspectable predicates (the real one is a SQLAlchemy
-# class, MagicMock'd to oblivion by conftest). owner_filter stays REAL.
-_sd = types.ModuleType("src.database")
-_sd.ModelEndpoint = MagicMock()
-sys.modules.setdefault("src.database", _sd)
-
-from routes.research_routes import _owned_enabled_endpoint, _resolve_endpoint_runtime  # noqa: E402
+from routes.research_routes import _owned_enabled_endpoint, _resolve_endpoint_runtime
 
 
 class _Predicate:
@@ -77,57 +66,60 @@ def _ep(eid, owner, *, is_enabled=True):
     return SimpleNamespace(id=eid, owner=owner, is_enabled=is_enabled, api_key="sk-secret")
 
 
-def _resolve(rows, owner, endpoint_id=None):
-    sys.modules["src.database"].ModelEndpoint = _ModelEndpoint
+def _resolve(monkeypatch, rows, owner, endpoint_id=None):
+    # The helper imports ModelEndpoint from src.database at call time; hand it
+    # a fake class whose column comparisons are inspectable predicates.
+    # owner_filter stays real.
+    monkeypatch.setattr("src.database.ModelEndpoint", _ModelEndpoint)
     return _owned_enabled_endpoint(_DB(rows), owner, endpoint_id)
 
 
 # --- explicit endpoint_id (POST /api/research/start, body.endpoint_id) --------
 
-def test_endpoint_id_rejects_another_owners_private_endpoint():
+def test_endpoint_id_rejects_another_owners_private_endpoint(monkeypatch):
     # bob's private endpoint exists, but alice asking for it by id resolves None
     # → the route raises 404 ("Endpoint not found or disabled"), never builds
     #   headers from bob's key.
     rows = [_ep("ep-bob", "bob"), _ep("ep-alice", "alice")]
-    assert _resolve(rows, "alice", "ep-bob") is None
+    assert _resolve(monkeypatch, rows, "alice", "ep-bob") is None
 
 
-def test_endpoint_id_returns_callers_own_endpoint():
+def test_endpoint_id_returns_callers_own_endpoint(monkeypatch):
     rows = [_ep("ep-bob", "bob"), _ep("ep-alice", "alice")]
-    ep = _resolve(rows, "alice", "ep-alice")
+    ep = _resolve(monkeypatch, rows, "alice", "ep-alice")
     assert ep is not None and ep.id == "ep-alice"
 
 
-def test_endpoint_id_allows_legacy_null_owner_shared_row():
+def test_endpoint_id_allows_legacy_null_owner_shared_row(monkeypatch):
     rows = [_ep("ep-shared", None)]
-    ep = _resolve(rows, "alice", "ep-shared")
+    ep = _resolve(monkeypatch, rows, "alice", "ep-shared")
     assert ep is not None and ep.id == "ep-shared"
 
 
-def test_endpoint_id_skips_disabled_even_when_owned():
+def test_endpoint_id_skips_disabled_even_when_owned(monkeypatch):
     rows = [_ep("ep-alice", "alice", is_enabled=False)]
-    assert _resolve(rows, "alice", "ep-alice") is None
+    assert _resolve(monkeypatch, rows, "alice", "ep-alice") is None
 
 
 # --- bare first-enabled fallback (no endpoint_id, nothing configured) ---------
 
-def test_fallback_never_picks_another_owners_endpoint():
+def test_fallback_never_picks_another_owners_endpoint(monkeypatch):
     # bob's private endpoint is first in the table, alice must never borrow it.
     rows = [_ep("ep-bob", "bob"), _ep("ep-shared", None)]
-    ep = _resolve(rows, "alice")
+    ep = _resolve(monkeypatch, rows, "alice")
     assert ep is not None and ep.id == "ep-shared"
 
 
-def test_fallback_returns_none_when_only_others_endpoints():
+def test_fallback_returns_none_when_only_others_endpoints(monkeypatch):
     rows = [_ep("ep-bob", "bob"), _ep("ep-carol", "carol")]
-    assert _resolve(rows, "alice") is None
+    assert _resolve(monkeypatch, rows, "alice") is None
 
 
 # --- legacy single-user / unresolved owner: owner_filter no-op ---------------
 
-def test_null_owner_is_legacy_single_user_noop():
+def test_null_owner_is_legacy_single_user_noop(monkeypatch):
     rows = [_ep("ep-x", "bob"), _ep("ep-y", "alice")]
-    ep = _resolve(rows, None, "ep-x")
+    ep = _resolve(monkeypatch, rows, None, "ep-x")
     assert ep is not None and ep.id == "ep-x"
 
 

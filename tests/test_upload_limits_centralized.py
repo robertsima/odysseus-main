@@ -9,12 +9,10 @@ constant read through the validated ``read_byte_limit_env``. These tests pin:
   it locally (no scattered raw getenv / hardcoded literal).
 """
 
-import importlib
+import importlib.util
 from pathlib import Path
 
 import pytest
-
-import src.upload_limits as upload_limits
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -30,18 +28,24 @@ _LIMITS = {
 }
 
 
+def _fresh_upload_limits():
+    """Run src/upload_limits.py again as a separate module object.
+
+    The limits are read at import. Reloading the real module would rebind
+    them under the routes that imported them, so the copy stays out of
+    sys.modules.
+    """
+    spec = importlib.util.find_spec("src.upload_limits")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _reload_clean(monkeypatch):
-    """Reload upload_limits with all the limit env vars unset."""
+    """A fresh upload_limits with all the limit env vars unset."""
     for env, _ in _LIMITS.values():
         monkeypatch.delenv(env, raising=False)
-    return importlib.reload(upload_limits)
-
-
-@pytest.fixture(autouse=True)
-def _restore_module():
-    # Ensure later tests see the env-default module, not a test-mutated reload.
-    yield
-    importlib.reload(upload_limits)
+    return _fresh_upload_limits()
 
 
 @pytest.mark.parametrize("name,env,default", [(n, e, d) for n, (e, d) in _LIMITS.items()])
@@ -55,7 +59,7 @@ def test_env_override(monkeypatch, name, env, default):
     for e, _ in _LIMITS.values():
         monkeypatch.delenv(e, raising=False)
     monkeypatch.setenv(env, "4242")
-    mod = importlib.reload(upload_limits)
+    mod = _fresh_upload_limits()
     assert getattr(mod, name) == 4242
 
 
@@ -65,7 +69,7 @@ def test_invalid_env_fails_fast(monkeypatch, env):
         monkeypatch.delenv(e, raising=False)
     monkeypatch.setenv(env, "not-an-int")
     with pytest.raises(ValueError, match=env):
-        importlib.reload(upload_limits)
+        _fresh_upload_limits()
 
 
 @pytest.mark.parametrize("env", [e for e, _ in _LIMITS.values()])
@@ -74,7 +78,7 @@ def test_non_positive_env_rejected(monkeypatch, env):
         monkeypatch.delenv(e, raising=False)
     monkeypatch.setenv(env, "0")
     with pytest.raises(ValueError, match="greater than 0"):
-        importlib.reload(upload_limits)
+        _fresh_upload_limits()
 
 
 def test_routes_import_from_upload_limits_not_local_defs():

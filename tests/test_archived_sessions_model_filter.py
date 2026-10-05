@@ -42,6 +42,18 @@ def _stub_multipart_if_missing(monkeypatch):
     monkeypatch.setitem(sys.modules, "python_multipart", stub)
 
 
+def _fresh_router(monkeypatch, sr):
+    """Give setup_session_routes an empty router for this test.
+
+    It adds its routes to the module-level router that app.py includes, so a
+    MagicMock session manager registered here would answer /api/session in
+    every app built later in the process.
+    """
+    from fastapi import APIRouter
+
+    monkeypatch.setattr(sr, "router", APIRouter(prefix="/api"))
+
+
 @pytest.fixture
 def archived_endpoint(monkeypatch, app_db):
     import routes.session_routes as sr
@@ -50,6 +62,7 @@ def archived_endpoint(monkeypatch, app_db):
     _stub_multipart_if_missing(monkeypatch)
     monkeypatch.setattr(sr, "SessionLocal", app_db.SessionLocal)
     monkeypatch.setattr(sr, "effective_user", lambda request: "alice")
+    _fresh_router(monkeypatch, sr)
     router = sr.setup_session_routes(MagicMock(), {})
     return _route(router, "/api/sessions/archived")
 

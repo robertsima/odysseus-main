@@ -7,12 +7,23 @@ chat to an offshore/public endpoint surfaced as an intermittent 503 that cleared
 on resend. The connect budget is now LLMConfig.CONNECT_TIMEOUT (env
 LLM_CONNECT_TIMEOUT), applied via _call_timeout/_stream_timeout helpers.
 """
-import importlib
-import httpx
-import pytest
+import importlib.util
 
-from src import llm_core
+import httpx
+
 from src.llm_core import LLMConfig, _call_timeout, _stream_timeout
+
+
+def _fresh_llm_core():
+    """Run src/llm_core.py again as a separate module object.
+
+    Reloading the real module would hand other tests a new LLMConfig and new
+    caches behind the names they imported, so the copy stays out of sys.modules.
+    """
+    spec = importlib.util.find_spec("src.llm_core")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_default_connect_timeout_is_widened_not_three():
@@ -49,9 +60,4 @@ def test_helpers_are_config_driven(monkeypatch):
 
 def test_env_override_is_honoured(monkeypatch):
     monkeypatch.setenv("LLM_CONNECT_TIMEOUT", "6.5")
-    reloaded = importlib.reload(llm_core)
-    try:
-        assert reloaded.LLMConfig.CONNECT_TIMEOUT == 6.5
-    finally:
-        monkeypatch.delenv("LLM_CONNECT_TIMEOUT", raising=False)
-        importlib.reload(llm_core)  # restore module-level default for other tests
+    assert _fresh_llm_core().LLMConfig.CONNECT_TIMEOUT == 6.5

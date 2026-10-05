@@ -1,40 +1,25 @@
 """Regression tests for password-change session revocation."""
 
 import asyncio
-import importlib
-import sys
-import types
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 from fastapi import HTTPException
 
-from tests.helpers.import_state import clear_module
 
+@pytest.fixture(autouse=True)
+def _string_password_hashes(monkeypatch):
+    """Skip bcrypt: hash to a readable string on the real core.auth."""
+    import core.auth as auth_mod
 
-def _real_core_package():
-    root = Path(__file__).resolve().parent.parent
-    core_path = str(root / "core")
-    core = sys.modules.get("core")
-    if core is None:
-        core = types.ModuleType("core")
-        sys.modules["core"] = core
-    core.__path__ = [core_path]
-    clear_module("core.auth")
-    return core
-
-
-def _auth_module():
-    _real_core_package()
-    return importlib.import_module("core.auth")
+    monkeypatch.setattr(auth_mod, "_hash_password", lambda password: f"hash:{password}")
+    monkeypatch.setattr(auth_mod, "_verify_password", lambda password, hashed: hashed == f"hash:{password}")
 
 
 def _make_manager(tmp_path):
-    auth_mod = _auth_module()
-    auth_mod._hash_password = lambda password: f"hash:{password}"
-    auth_mod._verify_password = lambda password, hashed: hashed == f"hash:{password}"
+    import core.auth as auth_mod
+
     auth_path = tmp_path / "auth.json"
     mgr = auth_mod.AuthManager(str(auth_path))
     assert mgr.create_user("alice", "old-password", is_admin=False)
@@ -91,8 +76,6 @@ def test_create_session_trusted_rejects_username_renamed_after_verification(tmp_
 
 
 def _change_password_endpoint(auth_manager):
-    sys.modules.pop("routes.auth_routes", None)
-    _real_core_package()
     from routes.auth_routes import ChangePasswordRequest, setup_auth_routes
 
     router = setup_auth_routes(auth_manager)
@@ -103,8 +86,6 @@ def _change_password_endpoint(auth_manager):
 
 
 def _login_endpoint(auth_manager):
-    sys.modules.pop("routes.auth_routes", None)
-    _real_core_package()
     from routes.auth_routes import LoginRequest, setup_auth_routes
 
     router = setup_auth_routes(auth_manager)

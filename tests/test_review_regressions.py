@@ -33,11 +33,6 @@ class _FakeModelEndpoint:
     owner = _FakeColumn("owner")
 
 
-class _FakeDbSession:
-    id = _FakeColumn("id")
-    endpoint_url = _FakeColumn("endpoint_url")
-
-
 class _FakeQuery:
     def __init__(self, rows):
         self.rows = list(rows)
@@ -77,51 +72,6 @@ def _default_chat_endpoint():
     raise AssertionError("/api/default-chat route not found")
 
 
-def _install_model_route_import_stubs(monkeypatch):
-    core_mod = types.ModuleType("core")
-    core_mod.__path__ = []
-    db_mod = types.ModuleType("core.database")
-    db_mod.SessionLocal = lambda: _FakeDb([])
-    db_mod.ModelEndpoint = _FakeModelEndpoint
-    db_mod.Session = _FakeDbSession
-    db_mod.Document = MagicMock()
-    db_mod.DocumentVersion = MagicMock()
-    db_mod.GalleryImage = MagicMock()
-    middleware_mod = types.ModuleType("core.middleware")
-    middleware_mod.require_admin = lambda request: None
-    multipart_mod = types.ModuleType("python_multipart")
-    multipart_mod.__version__ = "0.0.13"
-    models_mod = types.ModuleType("core.models")
-    models_mod.ChatMessage = MagicMock()
-    exceptions_mod = types.ModuleType("core.exceptions")
-    exceptions_mod.SessionNotFoundError = type("SessionNotFoundError", (Exception,), {})
-    session_mgr_mod = types.ModuleType("core.session_manager")
-    session_mgr_mod.SessionManager = MagicMock()
-    # `core` above is a stub module with no __path__, so every core.* submodule
-    # the routes import has to be registered here too. chat_routes and
-    # model_routes both grew `from core.log_safety import redact_url` and this
-    # fixture did not follow, which turned three tests into
-    # ModuleNotFoundError before they asserted anything. Use the real function:
-    # it is pure string work with no imports of its own, so stubbing it would
-    # only risk the fake and the real one disagreeing.
-    from core.log_safety import redact_url as _real_redact_url
-
-    log_safety_mod = types.ModuleType("core.log_safety")
-    log_safety_mod.redact_url = _real_redact_url
-
-    monkeypatch.delitem(sys.modules, "routes.model_routes", raising=False)
-    monkeypatch.delitem(sys.modules, "routes.chat_routes", raising=False)
-    monkeypatch.delitem(sys.modules, "routes.session_routes", raising=False)
-    monkeypatch.setitem(sys.modules, "core", core_mod)
-    monkeypatch.setitem(sys.modules, "core.database", db_mod)
-    monkeypatch.setitem(sys.modules, "core.middleware", middleware_mod)
-    monkeypatch.setitem(sys.modules, "python_multipart", multipart_mod)
-    monkeypatch.setitem(sys.modules, "core.models", models_mod)
-    monkeypatch.setitem(sys.modules, "core.exceptions", exceptions_mod)
-    monkeypatch.setitem(sys.modules, "core.session_manager", session_mgr_mod)
-    monkeypatch.setitem(sys.modules, "core.log_safety", log_safety_mod)
-
-
 def _install_core_auth_stub(monkeypatch):
     """Install the narrow auth surface needed by tool-policy tests."""
     core_mod = types.ModuleType("core")
@@ -148,7 +98,6 @@ def _install_core_middleware_stub(monkeypatch):
 
 
 def test_providers_requires_admin_before_discovery_and_cache(monkeypatch):
-    _install_model_route_import_stubs(monkeypatch)
     import routes.model_routes as model_routes
 
     class _Discovery:
@@ -160,6 +109,7 @@ def test_providers_requires_admin_before_discovery_and_cache(monkeypatch):
             return {"providers": [{"host": "internal.example"}]}
 
     discovery = _Discovery()
+    monkeypatch.setattr(model_routes, "require_admin", lambda request: None)
     router = model_routes.setup_model_routes(discovery)
     endpoint = next(
         route.endpoint
@@ -184,7 +134,6 @@ def test_providers_requires_admin_before_discovery_and_cache(monkeypatch):
 
 
 def test_default_chat_does_not_auto_pick_shared_endpoint_for_fresh_user(monkeypatch):
-    _install_model_route_import_stubs(monkeypatch)
     import routes.model_routes as model_routes
     import routes.prefs_routes as prefs_routes
 
@@ -226,7 +175,6 @@ def test_default_chat_does_not_auto_pick_shared_endpoint_for_fresh_user(monkeypa
 
 
 def test_default_chat_uses_owned_endpoint_as_regular_user_last_resort(monkeypatch):
-    _install_model_route_import_stubs(monkeypatch)
     import routes.model_routes as model_routes
     import routes.prefs_routes as prefs_routes
 
@@ -1341,7 +1289,6 @@ async def test_webhook_tool_reuses_private_url_validation():
 def test_default_chat_skips_hidden_first_model(monkeypatch):
     """get_default_chat picks first visible model when default_model is empty
     and the first cached model is hidden."""
-    _install_model_route_import_stubs(monkeypatch)
     import routes.model_routes as model_routes
     import routes.prefs_routes as prefs_routes
 
@@ -1375,7 +1322,6 @@ def test_default_chat_skips_hidden_first_model(monkeypatch):
 
 def test_default_chat_admin_skips_hidden_first_model(monkeypatch):
     """Admin user with global defaults also skips hidden models in fallback."""
-    _install_model_route_import_stubs(monkeypatch)
     import routes.model_routes as model_routes
 
     ep = SimpleNamespace(
@@ -1407,7 +1353,6 @@ def test_default_chat_admin_skips_hidden_first_model(monkeypatch):
 
 def test_default_chat_all_models_hidden_returns_empty_model(monkeypatch):
     """When all cached models are hidden, get_default_chat returns model: ''."""
-    _install_model_route_import_stubs(monkeypatch)
     import routes.model_routes as model_routes
 
     ep = SimpleNamespace(
