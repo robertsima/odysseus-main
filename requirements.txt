@@ -64,7 +64,7 @@ pytest-xdist
 # TestClient import when only classic httpx is present. Runtime code keeps
 # using `httpx` above; this is test-client only.
 httpx2
-dulwich==1.2.5
+dulwich==1.2.9
 # DATABASE_URL defaults to sqlite (core/database.py), but when pointed at an
 # external Postgres, SQLAlchemy's postgresql dialect imports psycopg2 inside
 # create_engine() and raises ModuleNotFoundError if missing. -binary avoids

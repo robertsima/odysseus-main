@@ -65,7 +65,8 @@ register(Capability(
     feature_key="rag",
     default_enabled=True,
     settings=(
-        "vault_directory", "notes_directory", "notes_archive_directory",
+        "vault_directory", "vault_write_directory",
+        "notes_directory", "notes_archive_directory",
         "vault_default_sensitivity", "vault_folder_sensitivity",
     ),
     # RAG can be disabled without disabling the file-backed notes UI or the

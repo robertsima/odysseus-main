@@ -43,6 +43,10 @@ DEFAULT_SETTINGS = {
     # Markdown file, so it inherits the folder's label like everything else.
     # Empty means "use PERSONAL_DIR", so an existing deployment keeps working.
     "vault_directory": "",
+    # Where the human vault editor saves. Empty means "the vault folder", so
+    # model reads and human writes share one path unless a deployment mounts a
+    # separate writable view (src.rag_sensitivity.vault_write_root).
+    "vault_write_directory": "",
     "notes_directory": "Notes",
     "notes_archive_directory": "Notes/Archive",
     # Folder-wide by default, per-file override available — the coarse default

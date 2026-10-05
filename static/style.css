@@ -35295,6 +35295,10 @@ body.notes-drag-mode .note-card-pin svg {
   background: color-mix(in srgb, var(--accent, var(--red)) 4%, transparent);
   font-size: 9px;
 }
+.vault-human-note.vault-write-blocked {
+  color: var(--fg);
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+}
 #vault-file-editor {
   flex: 1;
   min-height: 0;
@@ -43650,6 +43654,6 @@ details.admin-ep-advanced[open] > summary { opacity: 0.8; }
   .pa-meta { flex-basis: 100%; }
 }
 
-/* Agent round wall time, visible after delivery in both chat themes. */
-.agent-round-duration{display:inline-flex;align-items:center;margin-inline-start:8px;padding:2px 7px;border:1px solid currentColor;border-radius:999px;font-size:11px;font-weight:600;opacity:.8;white-space:nowrap;vertical-align:middle}
-.agent-thread>.agent-round-duration{margin:6px 8px;color:var(--text-secondary,var(--fg));}
+/* Combined agent turn wall time, visible after delivery in both chat themes. */
+.agent-turn-duration{display:inline-flex;align-items:center;margin-inline-start:8px;padding:2px 7px;border:1px solid currentColor;border-radius:999px;font-size:11px;font-weight:600;opacity:.8;white-space:nowrap;vertical-align:middle}
+.agent-thread>.agent-turn-duration{margin:6px 8px;color:var(--text-secondary,var(--fg));}

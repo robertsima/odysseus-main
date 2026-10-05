@@ -1140,6 +1140,10 @@ def _safe_changes(path: Path, changes) -> None:
 def _validate_raw_parts(raw_parts) -> None:
     if not raw_parts or any(
         not part
+        # NTFS treats a colon as an alternate data stream separator. Enforce
+        # the portable filename rule here instead of relying on dulwich's
+        # version-dependent platform validators.
+        or b":" in part
         or not validate_path_element_default(part)
         or not validate_path_element_hfs(part)
         or not validate_path_element_ntfs(part)

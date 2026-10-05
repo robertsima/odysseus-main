@@ -1,5 +1,6 @@
 import json
 import os
+from types import SimpleNamespace
 
 import pytest
 from dulwich import porcelain
@@ -11,6 +12,58 @@ from src.agent_tools.git_tools import GitTool
 from src.agent_worktree import repository_local as local
 from src.agent_worktree import repository_sync as sync
 
+def test_status_rejects_ntfs_alternate_stream_before_content_helpers(monkeypatch):
+    # Model a dulwich validator that permits colons, as in the failing CI run.
+    monkeypatch.setattr(sync, "validate_path_element_ntfs", lambda _part: True)
+
+    class Index:
+        def is_sparse(self):
+            return False
+
+        def __len__(self):
+            return 1
+
+        def __iter__(self):
+            return iter([b"file:stream"])
+
+    repo = SimpleNamespace(
+        path="/approved/repo",
+        get_config=lambda: SimpleNamespace(),
+        open_index=lambda config=None: Index(),
+    )
+    monkeypatch.setattr(
+        sync, "get_tree_changes", lambda *a, **k: pytest.fail("content helper ran")
+    )
+    with pytest.raises(sync.RepositorySyncError) as exc:
+        sync._status(repo)
+    assert exc.value.code == "unsafe_tree_path"
+
+
+def test_tree_rejects_ntfs_alternate_stream_path(repository, monkeypatch):
+    # The explicit check must not depend on dulwich's version-specific rules.
+    monkeypatch.setattr(sync, "validate_path_element_ntfs", lambda _part: True)
+    with Repo(str(repository)) as repo:
+        blob = Blob.from_string(b"unsafe")
+        repo.object_store.add_object(blob)
+        tree = Tree()
+        tree.add(b"file:stream", 0o100644, blob.id)
+        repo.object_store.add_object(tree)
+        commit = Commit()
+        commit.tree = tree.id
+        commit.parents = [repo.refs[b"HEAD"]]
+        commit.author = commit.committer = b"Test <test@example.com>"
+        commit.author_time = commit.commit_time = 1
+        commit.author_timezone = commit.commit_timezone = 0
+        commit.message = b"unsafe tree fixture"
+        repo.object_store.add_object(commit)
+
+        with pytest.raises(sync.RepositorySyncError) as exc:
+            sync._validate_tree(repo, commit.id)
+    assert exc.value.code == "unsafe_tree_path"
+
+_REPORT_BACKLOG = pytest.mark.skip(
+    reason="Re-port backlog: uses fork-only internals replaced by upstream's agent core (website/upstream-sync-2026-09-18.md)"
+)
 
 _NEUTRAL_GIT_FIELDS = {
     "repository": "",

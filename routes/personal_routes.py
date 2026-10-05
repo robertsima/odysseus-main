@@ -1,6 +1,7 @@
 # routes/personal_routes.py
 """Routes for personal documents management."""
 import asyncio
+import errno
 import os
 import logging
 import shutil
@@ -42,6 +43,33 @@ class VaultFileCreate(BaseModel):
 # every indexer (src.index_walk.prune_index_dirs), so a trashed note is gone
 # from search but still recoverable on disk.
 VAULT_TRASH_DIR = ".trash"
+
+# Where to fix a vault the human editor cannot save into.
+VAULT_WRITE_SETTING_HINT = "Settings → Knowledge → Vault write folder"
+
+
+def _vault_dir_writable(path: str) -> bool:
+    """Whether this process may create files in ``path``. A read-only bind
+    mount reports False here (EROFS) even when the mode bits allow writes."""
+    return os.access(path, os.W_OK | os.X_OK)
+
+
+_READ_ONLY_SAVE_DETAIL = (
+    "The vault cannot be written here (read-only mount or no permission). Mount it "
+    f"read-write, or set {VAULT_WRITE_SETTING_HINT} to a writable mount of the same vault."
+)
+
+
+def _is_read_only_error(exc: OSError) -> bool:
+    # A read-only bind mount raises EROFS, which is not a PermissionError.
+    return isinstance(exc, PermissionError) or exc.errno == errno.EROFS
+
+
+def _path_within(path: str, root: str) -> bool:
+    try:
+        return os.path.commonpath([path, root]) == root
+    except ValueError:
+        return False
 
 
 def _personal_upload_dir_for_owner(owner: str | None, *, create: bool = True) -> str:
@@ -298,6 +326,60 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
             raise HTTPException(404, "Vault file not found")
         return target, rel
 
+    def _vault_write_status() -> Dict[str, Any]:
+        """Where human edits go and whether they can be saved there.
+
+        The read folder (``vault_directory``) is what models and retrieval
+        see; ``vault_write_directory`` optionally names a writable mount of
+        the same vault for the human editor. Reasons name the setting rather
+        than the host path, since non-admin users see them too.
+        """
+        from src.rag_sensitivity import configured_vault_write_directory, vault_root
+
+        read_root = os.path.realpath(vault_root())
+        configured = configured_vault_write_directory()
+        root = os.path.realpath(configured) if configured else read_root
+        separate = root != read_root
+        reason = ""
+        if separate and (_path_within(root, read_root) or _path_within(read_root, root)):
+            reason = (
+                "The vault write folder overlaps the vault folder. Set "
+                f"{VAULT_WRITE_SETTING_HINT} to a separate writable mount of the "
+                "same vault, or clear it to save into the vault folder."
+            )
+        elif not os.path.isdir(root):
+            reason = (
+                "The vault write folder does not exist or is not mounted. Fix "
+                f"{VAULT_WRITE_SETTING_HINT}, or clear it to save into the vault folder."
+                if separate else
+                "Configured vault directory is not mounted or does not exist"
+            )
+        elif not _vault_dir_writable(root):
+            reason = (
+                "The vault write folder is read-only. Mount it read-write, or "
+                f"choose another folder in {VAULT_WRITE_SETTING_HINT}."
+                if separate else
+                "The vault folder is read-only, so your edits cannot be saved. Set "
+                f"{VAULT_WRITE_SETTING_HINT} to a writable mount of the same vault "
+                "(models keep reading the vault folder), or mount the vault read-write."
+            )
+        return {"root": root, "separate": separate, "writable": not reason, "reason": reason}
+
+    def _vault_write_root() -> Tuple[str, bool]:
+        """``(write_root, separate)`` for a human save, or 409 explaining why
+        the save cannot happen."""
+        status = _vault_write_status()
+        if not status["writable"]:
+            raise HTTPException(409, status["reason"])
+        return status["root"], status["separate"]
+
+    def _vault_write_target(write_root: str, rel: str) -> str:
+        """The file under ``write_root`` that ``rel`` names, kept inside it."""
+        target = os.path.realpath(os.path.join(write_root, *rel.split("/")))
+        if not _path_within(target, write_root):
+            raise HTTPException(403, "Path must stay inside the vault write folder")
+        return target
+
     def _write_vault_file(target: str, payload: str) -> None:
         """Write ``payload`` to ``target`` atomically (temp file + replace)."""
         temp_name = None
@@ -309,12 +391,9 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
                 os.fsync(handle.fileno())
             os.replace(temp_name, target)
             temp_name = None
-        except PermissionError as exc:
-            raise HTTPException(
-                409,
-                "The host filesystem mount is read-only; make the vault mount writable for human editing.",
-            ) from exc
         except OSError as exc:
+            if _is_read_only_error(exc):
+                raise HTTPException(409, _READ_ONLY_SAVE_DETAIL) from exc
             raise HTTPException(500, f"Could not save vault file: {exc}") from exc
         finally:
             if temp_name and os.path.exists(temp_name):
@@ -462,10 +541,14 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
         """Return every Markdown file in the active vault for the human UI."""
         root = _vault_root()
         tree = _vault_tree_node(root)
+        write = _vault_write_status()
         return {
             "root_name": tree["name"],
             "tree": tree,
             "policy_scope": "llm_only",
+            # Human saves may go to a separate writable mount; the UI shows
+            # ``reason`` and keeps editing read-only when saving cannot work.
+            "write": {key: write[key] for key in ("separate", "writable", "reason")},
         }
 
     @router.get("/vault/file")
@@ -499,14 +582,26 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
         body: VaultFileUpdate,
         owner: str = Depends(_require_human_user),
     ):
-        """Save a vault file as a human, independent of the LLM policy labels."""
+        """Save a vault file as a human, independent of the LLM policy labels.
+
+        The file is chosen from the read folder (what the tree shows) and
+        written through the vault write folder when one is configured.
+        """
         target, rel = _resolve_vault_file(body.path)
         payload = body.content
         if len(payload.encode("utf-8")) > VAULT_EDITOR_MAX_BYTES:
             raise HTTPException(413, "Vault file is too large for the browser editor")
+        write_root, separate = _vault_write_root()
+        write_target = _vault_write_target(write_root, rel) if separate else target
+        if separate and not os.path.isfile(write_target):
+            raise HTTPException(
+                409,
+                f"{rel} is not in the vault write folder. The vault write folder must be "
+                f"a writable mount of the same vault; check {VAULT_WRITE_SETTING_HINT}.",
+            )
         if body.modified is not None:
             try:
-                current_modified = os.path.getmtime(target)
+                current_modified = os.path.getmtime(write_target)
             except OSError as exc:
                 raise HTTPException(404, "Vault file is no longer available") from exc
             if abs(current_modified - body.modified) > 0.000001:
@@ -515,9 +610,10 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
                     "This file changed outside Odysseus. Reopen it before saving so those changes are not overwritten.",
                 )
 
-        _write_vault_file(target, payload)
-        # Update the shared embedding corpus immediately. Failure here does not
-        # roll back the human's file edit; the periodic scanner will retry it.
+        _write_vault_file(write_target, payload)
+        # Update the shared embedding corpus immediately, under the read path
+        # models cite. Failure here does not roll back the human's file edit;
+        # the periodic scanner will retry it.
         indexed = _reindex_vault_file(target)
 
         return {
@@ -547,34 +643,35 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
             raise HTTPException(409, f"{rel} already exists")
         if len(body.content.encode("utf-8")) > VAULT_EDITOR_MAX_BYTES:
             raise HTTPException(413, "Vault file is too large for the browser editor")
-        parent = os.path.dirname(target)
+        write_root, separate = _vault_write_root()
+        write_target = _vault_write_target(write_root, rel) if separate else target
+        if separate and os.path.lexists(write_target):
+            raise HTTPException(409, f"{rel} already exists in the vault write folder")
+        parent = os.path.dirname(write_target)
         try:
             os.makedirs(parent, exist_ok=True)
-        except PermissionError as exc:
-            raise HTTPException(
-                409,
-                "The host filesystem mount is read-only; make the vault mount writable for human editing.",
-            ) from exc
         except OSError as exc:
+            if _is_read_only_error(exc):
+                raise HTTPException(409, _READ_ONLY_SAVE_DETAIL) from exc
             raise HTTPException(500, f"Could not create the folder for {rel}: {exc}") from exc
         # makedirs may have followed a symlinked folder: re-check the real
         # location before writing anything.
-        root = _vault_root()
-        try:
-            inside = os.path.commonpath([os.path.realpath(parent), root]) == root
-        except ValueError:
-            inside = False
-        if not inside:
+        if not _path_within(os.path.realpath(parent), write_root):
             raise HTTPException(403, "Path must stay inside the vault")
-        _write_vault_file(target, body.content)
-        indexed = _reindex_vault_file(target)
+        _write_vault_file(write_target, body.content)
+        # Index the read path models cite. A write folder that is not a mount
+        # of the same vault leaves the note invisible there; say so instead of
+        # indexing a path outside the model-readable vault.
+        visible = os.path.isfile(target)
+        indexed = _reindex_vault_file(target) if visible else False
         return {
             "success": True,
             "path": rel,
             "name": os.path.basename(rel),
             "content": body.content,
             "indexed": indexed,
-            "modified": os.path.getmtime(target),
+            "visible_in_vault": visible,
+            "modified": os.path.getmtime(target if visible else write_target),
             **_vault_file_policy(target),
         }
 
@@ -590,7 +687,14 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
         same-named note was trashed before). Its chunks leave retrieval now.
         """
         target, rel = _resolve_vault_file(path)
-        root = _vault_root()
+        root, separate = _vault_write_root()
+        source = _vault_write_target(root, rel) if separate else target
+        if separate and not os.path.isfile(source):
+            raise HTTPException(
+                409,
+                f"{rel} is not in the vault write folder. The vault write folder must be "
+                f"a writable mount of the same vault; check {VAULT_WRITE_SETTING_HINT}.",
+            )
         stem, ext = os.path.splitext(rel)
         dest_rel = f"{VAULT_TRASH_DIR}/{rel}"
         dest = os.path.join(root, *dest_rel.split("/"))
@@ -601,13 +705,10 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
             n += 1
         try:
             os.makedirs(os.path.dirname(dest), exist_ok=True)
-            os.replace(target, dest)
-        except PermissionError as exc:
-            raise HTTPException(
-                409,
-                "The host filesystem mount is read-only; make the vault mount writable for human editing.",
-            ) from exc
+            os.replace(source, dest)
         except OSError as exc:
+            if _is_read_only_error(exc):
+                raise HTTPException(409, _READ_ONLY_SAVE_DETAIL) from exc
             raise HTTPException(500, f"Could not delete {rel}: {exc}") from exc
         rag = _rag()
         if rag:

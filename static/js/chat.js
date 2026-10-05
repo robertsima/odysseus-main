@@ -12,7 +12,7 @@ import chatRenderer from './chatRenderer.js?v=20261002steer1';
 import chatStream from './chatStream.js?v=20261002approvals1';
 import { renderDiffCard } from './diffView.js';
 import agentThread from './agentThread.js?v=20260928subagentui1';
-import { showRoundDuration } from './roundTiming.js';
+import { showTurnDuration, totalTurnDuration } from './roundTiming.js';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js';
 import spinnerModule from './spinner.js';
@@ -2682,6 +2682,8 @@ function _personaNameForTurn() {
       if (streamingTTS) window.aiTTSManager.streamingStart();
       // Multi-bubble agent tracking
       let roundHolder = holder;       // Current AI text bubble (changes per round)
+      let turnTimingTarget = holder; // Stable badge host for the current saved turn segment
+      let completedRoundDurations = [];
       let roundText = '';             // Text accumulated for current round
       let roundReplyText = null;      // Reply-only text after a thinking transition
       let currentToolBubble = null;   // Current tool execution bubble
@@ -2723,6 +2725,11 @@ function _personaNameForTurn() {
           role.appendChild(ts);
         }
         holder = roundHolder;
+        // A steer saves the response-so-far as a separate assistant message.
+        // Start a fresh aggregate on the new message so its live timing agrees
+        // with the per-message durations persisted by the server.
+        turnTimingTarget = holder;
+        completedRoundDurations = [];
         currentHolder = holder;
         const active = _activeStreams.get(streamSessionId);
         if (active) active.holder = holder;
@@ -4408,7 +4415,10 @@ function _personaNameForTurn() {
                 } catch (_) {}
 
               } else if (json.type === 'round_complete') {
-                if (!_isBg) showRoundDuration(_metricsTargetForTurn(), json.duration_s);
+                if (typeof json.duration_s === 'number' && Number.isFinite(json.duration_s) && json.duration_s >= 0) {
+                  completedRoundDurations.push(json.duration_s);
+                  if (!_isBg) showTurnDuration(turnTimingTarget, totalTurnDuration(completedRoundDurations));
+                }
               } else if (json.type === 'agent_step') {
                 _closeOpenThinkingMarkup(_isBg);
                 if (_isBg) continue;
