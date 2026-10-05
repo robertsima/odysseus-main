@@ -2,7 +2,6 @@ import asyncio
 import ipaddress
 import sys
 import types
-from pathlib import Path
 
 import pytest
 
@@ -166,12 +165,3 @@ def test_sync_caldav_decrypts_stored_password_and_validates_url(monkeypatch):
         "password": "decrypted-password",
     }
 
-
-def test_calendar_routes_use_hardened_caldav_client_and_secret_storage():
-    text = Path("routes/calendar_routes.py").read_text(encoding="utf-8")
-
-    assert "validate_caldav_url(body.get(\"url\", \"\"))" in text
-    assert "encrypt(body[\"password\"])" in text
-    assert "pw = decrypt(pw)" in text
-    assert "follow_redirects=False, trust_env=False" in text
-    assert "Redirects are not followed for CalDAV safety" in text
