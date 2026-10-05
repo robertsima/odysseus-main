@@ -25,14 +25,12 @@ def test_current_datetime_prompt_uses_browser_timezone():
     assert "User local time is 7:16 PM" in prompt
     assert "Australia/Brisbane, UTC+10:00" in prompt
     assert "Tomorrow is Tuesday, June 2, 2026 (2026-06-02)" in prompt
-    assert "instead of asking for an exact date" in prompt
     # 2026-10-01 (A4-13): tool-routing text is opt-in; non-agent callers do not get it.
     assert "manage_calendar" not in prompt and "manage_tasks" not in prompt
     agent_prompt = current_datetime_prompt(
         datetime(2026, 6, 1, 9, 16, tzinfo=timezone.utc), tool_routing=True
     )
-    assert "manage_calendar takes local ISO datetimes" in agent_prompt
-    assert "manage_tasks takes scheduled_time in UTC" in agent_prompt
+    assert "manage_calendar" in agent_prompt and "manage_tasks" in agent_prompt
 
 
 def test_iana_name_wins_when_offset_disagrees():

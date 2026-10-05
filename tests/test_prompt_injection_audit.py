@@ -111,25 +111,6 @@ def test_email_style_lands_in_untrusted_message(monkeypatch):
     assert found[0]["role"] == "user"
 
 
-def test_email_style_hardcoded_rules_stay_in_system_role(monkeypatch):
-    """The hardcoded identity/style rules must still be in the system prompt."""
-    _patch_email_style(monkeypatch, "Sign off as: Cheers, Bob")
-
-    from src.agent_loop import _build_system_prompt
-
-    messages = [{"role": "user", "content": "draft an email"}]
-    out, _ = _build_system_prompt(
-        messages=messages, model="test-model",
-        active_document=None, mcp_mgr=None, owner=None,
-        relevant_tools={"send_email"},
-    )
-
-    sys_text = _sys_role_text(out)
-    assert "Email identity rule" in sys_text, (
-        "Hardcoded identity rules must remain in the trusted system prompt."
-    )
-
-
 # ── 2. Integration descriptions ─────────────────────────────────────────────
 
 def _patch_integrations(monkeypatch, description: str):

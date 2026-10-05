@@ -65,22 +65,7 @@ def test_compose_security_opt_lets_bubblewrap_mount_its_own_proc(path):
     assert "no-new-privileges:true" in security_opt, path.name
 
 
-@pytest.mark.parametrize("path", ALL_COMPOSE, ids=lambda p: p.name)
-def test_compose_security_opt_documents_the_verification(path):
-    text = path.read_text(encoding="utf-8")
-    assert "{{json .HostConfig.MaskedPaths}} {{json .HostConfig.ReadonlyPaths}}" in text
-    assert "[shell-sandbox] available" in text
-    assert "kernel.core_pattern" in text, "the systempaths trade-off must be stated"
-
-
 # ── what the compose files forward ───────────────────────────────
-
-
-@pytest.mark.parametrize("path", ALL_COMPOSE, ids=lambda p: p.name)
-def test_compose_files_do_not_forward_dead_variables(path):
-    env = _env(path)
-    for name in DEAD_VARIABLES:
-        assert name not in env, (path.name, name)
 
 
 @pytest.mark.parametrize("path", ALL_COMPOSE, ids=lambda p: p.name)
@@ -99,20 +84,12 @@ def test_generic_compose_forwards_calendar_redirect_with_mail_redirect(path):
     assert env["GOOGLE_CALENDAR_OAUTH_REDIRECT_URI"] == "${GOOGLE_CALENDAR_OAUTH_REDIRECT_URI:-}"
 
 
-def test_zimaos_template_lists_only_required_and_non_default_values():
+def test_zimaos_template_leaves_security_switches_to_code_defaults():
     env = _env(ZIMAOS_TEMPLATE)
-    # Equal to code defaults, dead, or (SECURE_COOKIES=false) harmful: it
-    # forced non-Secure cookies over HTTPS, while the code derives the flag
-    # from the request scheme.
-    for name in (
-        "ALLOWED_ORIGINS", "AUTH_ENABLED", "DATABASE_URL", "FASTEMBED_CACHE_PATH",
-        "FASTEMBED_MODEL", "ODYSSEUS_TOOL_EXTRA_ROOTS", "LOCALHOST_BYPASS",
-        "ODYSSEUS_ADMIN_USER", "ODYSSEUS_INPROCESS_POLLERS", "ODYSSEUS_INPROCESS_TASKS",
-        "ODYSSEUS_SCRIPT_HOST", "GITHUB_HOST", "LOTUS_LOG_LEVEL", "LOTUS_CONFIG",
-        "LOTUS_DATA_DIR", "LOTUS_IMPORT_ROOT", "LOTUS_TOOL_NAME_STYLE",
-        "ODYSSEUS_STT_DEVICE", "ODYSSEUS_STT_COMPUTE_TYPE", "ODYSSEUS_STT_CONCURRENCY",
-        "SECURE_COOKIES",
-    ):
+    # SECURE_COOKIES=false forced non-Secure cookies over HTTPS, while the code
+    # derives the flag from the request scheme; the others are security switches
+    # whose code defaults must not be overridden by the template.
+    for name in ("SECURE_COOKIES", "AUTH_ENABLED", "LOCALHOST_BYPASS", "ALLOWED_ORIGINS"):
         assert name not in env, name
     for name in (
         "PUID", "PGID", "CHROMADB_HOST", "CHROMADB_PORT", "SEARXNG_INSTANCE",

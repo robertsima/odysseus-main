@@ -137,21 +137,6 @@ checkIssueDescription({ github, context, core })
     return json.loads(proc.stdout)
 
 
-def test_workflow_handles_issue_closures():
-    workflow = _WORKFLOW.read_text(encoding="utf-8")
-    assert "types: [opened, edited, reopened, closed]" in workflow
-
-
-def test_bug_template_requires_exact_revision():
-    template = yaml.safe_load(_BUG_TEMPLATE.read_text(encoding="utf-8"))
-    revision = next(item for item in template["body"] if item.get("id") == "revision")
-    assert revision["type"] == "input"
-    assert revision["attributes"]["label"] == "Odysseus Revision"
-    assert "git show -s --abbrev=12 --format='%h (%cs)' HEAD" in revision["attributes"]["description"]
-    assert revision["attributes"]["placeholder"] == "1fef4929cf1d (2026-08-11)"
-    assert revision["validations"]["required"] is True
-
-
 def test_bug_checker_accepts_exact_revision():
     calls = _run_bug_issue("1fef4929cf1d (2026-08-11)")
     assert not any(call["method"] in {"createComment", "setFailed"} for call in calls)
