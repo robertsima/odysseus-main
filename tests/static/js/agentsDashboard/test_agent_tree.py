@@ -34,31 +34,31 @@ def open_chat(new_page, static_app, *, width, height, style="agamemnon", rows=No
     return page
 
 
-def durations(page) -> list[str]:
-    return page.evaluate("[...document.querySelectorAll('#chat-history .agent-round-duration')].map(n => n.textContent.trim())")
+def turn_durations(page) -> list[str]:
+    return page.evaluate("[...document.querySelectorAll('#chat-history .agent-turn-duration')].map(n => n.textContent.trim())")
 
 
 @pytest.mark.parametrize("style, width", [("agamemnon", 1440), ("agamemnon", 390), ("classic", 390)])
-def test_each_round_of_a_multi_round_reply_shows_its_duration(new_page, static_app, style, width):
+def test_multi_round_reply_shows_one_combined_turn_duration(new_page, static_app, style, width):
     history = copy.deepcopy(HISTORY)
     history["history"][1] = {**history["history"][1], "content": "Checked the migration.\n\nOutlined risks.",
                              "metadata": {"round_texts": ["Checked the migration.", "Outlined risks."],
                                           "round_durations_s": [63.24, 5.0]}}
     page = open_chat(new_page, static_app, width=width, height=1180 if width < 500 else 920, style=style, history=history)
-    page.wait_for_selector("#chat-history .agent-round-duration")
-    assert durations(page) == ["Round · 1m 3s", "Round · 5.0s"]
+    page.wait_for_selector("#chat-history .agent-turn-duration")
+    assert turn_durations(page) == ["Turn · 1m 8s"]
     # The reply after it was never timed, so it shows no duration.
-    assert page.evaluate("!document.querySelector('#chat-history .msg:last-child .agent-round-duration')")
+    assert page.evaluate("!document.querySelector('#chat-history .msg:last-child .agent-turn-duration')")
 
 
-def test_a_single_timed_round_shows_its_duration_and_an_untimed_legacy_reply_does_not(new_page, static_app):
+def test_a_single_round_shows_turn_duration_and_untimed_legacy_reply_does_not(new_page, static_app):
     history = copy.deepcopy(HISTORY)
     history["history"][1] = {**history["history"][1], "content": "Here is the migration plan.",
                              "metadata": {"round_durations_s": [2.34]}}
     page = open_chat(new_page, static_app, width=390, height=1180, history=history)
-    page.wait_for_selector("#chat-history .agent-round-duration")
-    assert durations(page) == ["Round · 2.3s"]
-    assert page.evaluate("!document.querySelectorAll('#chat-history .msg')[3].querySelector('.agent-round-duration')")
+    page.wait_for_selector("#chat-history .agent-turn-duration")
+    assert turn_durations(page) == ["Turn · 2.3s"]
+    assert page.evaluate("!document.querySelectorAll('#chat-history .msg')[3].querySelector('.agent-turn-duration')")
 
 
 def nested_fleet():
