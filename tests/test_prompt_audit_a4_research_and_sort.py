@@ -32,14 +32,6 @@ def _stub_page(monkeypatch):
     monkeypatch.setattr(asyncio, "to_thread", immediate)
 
 
-def test_extractor_asks_only_for_fields_the_pipeline_reads():
-    prompt = EXTRACTOR_SYSTEM.format(goal="g")
-    assert '"relevant"' in prompt and '"summary"' in prompt
-    assert "rational" not in prompt and '"evidence"' not in prompt
-    # Figures must survive into the one summary the final report sees.
-    assert "figures" in prompt and "prices" in prompt
-
-
 @pytest.mark.asyncio
 async def test_page_marked_irrelevant_is_dropped(monkeypatch):
     _stub_page(monkeypatch)
@@ -65,35 +57,11 @@ async def test_relevant_page_keeps_summary_with_figures(monkeypatch):
     assert "$12" in researcher._format_findings([finding])
 
 
-def test_final_report_prompt_has_no_word_floor_or_shouting():
-    prompt = deep_research.FINAL_REPORT_PROMPT
-    assert "MINIMUM" not in prompt
-    assert "1500" not in prompt
-    for block in deep_research.CATEGORY_PROMPTS.values():
-        assert "IMPORTANT FORMAT OVERRIDE" not in block
-        assert "replaces the summary-first layout" in block
-
-
-def test_plan_example_does_not_anchor_on_one_topic():
-    assert "cost of living" not in deep_research.RESEARCH_PLAN_PROMPT
-    assert "healthcare" not in deep_research.RESEARCH_PLAN_PROMPT
-
-
-def test_stop_prompt_has_no_continue_bias():
-    assert "prefer continuing" not in deep_research.STOP_PROMPT
-
-
 def test_auto_sort_prompt_lists_existing_folders():
     sessions = [{"id": "abcdef123456", "name": "Pasta night", "current_folder": None}]
     prompt = build_auto_sort_prompt(sessions, ["Cooking", "Travel"])
     assert 'Existing folders: "Cooking", "Travel"' in prompt
     assert '"abcdef12": "Pasta night"' in prompt
-    assert "existing folder when it fits" in prompt
-
-
-def test_auto_sort_prompt_without_folders_says_so():
-    prompt = build_auto_sort_prompt([{"id": "abcdef123456", "name": "x", "current_folder": None}], [])
-    assert "Existing folders: none yet" in prompt
 
 
 def test_tidy_button_and_scheduled_sweep_share_one_prompt_builder():

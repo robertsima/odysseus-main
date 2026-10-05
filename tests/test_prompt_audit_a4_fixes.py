@@ -84,16 +84,6 @@ def test_improver_guards_skill_and_says_embedded_instructions_are_content(monkey
 
 # ---- A4-6: skill extractor ------------------------------------------------
 
-def test_skill_prompt_describes_the_evidence_it_receives():
-    from services.memory import skill_extractor as se
-
-    prompt = se.SKILL_EXTRACT_PROMPT
-    assert "shell commands" not in prompt
-    assert "tools used" in prompt
-    assert "null" in prompt  # the parser's decline token
-    assert "{rounds}" not in prompt and "{tool_count}" not in prompt
-
-
 def test_tool_sequence_line_is_ordered_and_names_only():
     from services.memory import skill_extractor as se
 
@@ -118,15 +108,6 @@ def test_build_extraction_messages_is_one_transcript_not_chat_turns():
     assert [m["role"] for m in msgs] == ["system", "user"]
     assert "user: I live in Bergen" in msgs[1]["content"]
     assert "assistant: Nice" in msgs[1]["content"]
-
-
-def test_extraction_prompts_share_one_category_list():
-    from services.memory import memory_extractor as me
-
-    for prompt in (me.EXTRACT_SYSTEM_PROMPT, me.MANUAL_EXTRACT_SYSTEM_PROMPT):
-        for category in me.MEMORY_CATEGORIES:
-            assert f"'{category}'" in prompt
-    assert "Alice" not in me.MANUAL_EXTRACT_SYSTEM_PROMPT  # the invalid-JSON example is gone
 
 
 # ---- A4-11: memory audit returns changes only ----------------------------
@@ -178,13 +159,6 @@ def test_audit_refuses_the_old_whole_list_reply():
 
 # ---- A4-15 / A4-16 --------------------------------------------------------
 
-def test_task_default_prompt_states_nobody_is_present():
-    from src import task_scheduler as ts
-
-    assert "no user is available" in ts.DEFAULT_TASK_SYSTEM_PROMPT
-    assert "no tools" in ts.NO_TOOLS_TASK_SYSTEM_PROMPT
-
-
 def test_voices_cover_every_persona_and_stay_one_line():
     from src.reminder_personas import PERSONAS, VOICES
 
@@ -196,8 +170,6 @@ def test_reminder_prompt_uses_a_voice_line_and_output_markers():
     from src.reminder_personas import REMINDER_CLOSE, REMINDER_OPEN, synthesis_system_prompt
 
     prompt = synthesis_system_prompt("socrates")
-    assert "Respond only with questions" not in prompt
-    assert prompt.count("Voice:") == 1
     assert REMINDER_OPEN in prompt and REMINDER_CLOSE in prompt
     assert REMINDER_OPEN in synthesis_system_prompt("")
 

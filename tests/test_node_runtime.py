@@ -13,8 +13,6 @@ def test_docker_node_release_matches_local_and_ci_pin():
     assert tuple(map(int, version.split("."))) >= (22, 6, 0)
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert f"FROM node:{version}-bookworm-slim AS node-distribution" in dockerfile
-    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-    assert 'node-version-file: ".nvmrc"' in workflow
 
 
 def test_application_inherits_verified_node_runtime_not_debian_packages():

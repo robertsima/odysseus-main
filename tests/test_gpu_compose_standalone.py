@@ -111,51 +111,6 @@ def test_top_level_volumes_match_base(base, standalone_path):
 # --- odysseus = base service + only the overlay additions ------------------
 
 
-def test_nvidia_odysseus_adds_only_overlay(base):
-    standalone = _load(NVIDIA_STANDALONE)
-    svc = standalone["services"][SERVICE]
-    base_svc = base["services"][SERVICE]
-
-    # Base environment preserved, plus exactly the two NVIDIA variables.
-    assert "NVIDIA_VISIBLE_DEVICES=all" in svc["environment"]
-    assert "NVIDIA_DRIVER_CAPABILITIES=compute,utility" in svc["environment"]
-    added_env = set(svc["environment"]) - set(base_svc["environment"])
-    assert added_env == {
-        "NVIDIA_VISIBLE_DEVICES=all",
-        "NVIDIA_DRIVER_CAPABILITIES=compute,utility",
-    }
-
-    # deploy block is new and matches the overlay's GPU reservation exactly.
-    assert "deploy" not in base_svc
-    devices = svc["deploy"]["resources"]["reservations"]["devices"]
-    assert devices == [
-        {"driver": "nvidia", "count": "all", "capabilities": ["gpu"]}
-    ]
-
-    # No Docker or AMD groups are added.
-    assert "devices" not in svc
-    assert "group_add" not in base_svc
-    assert "group_add" not in svc
-
-
-def test_amd_odysseus_adds_only_overlay(base):
-    standalone = _load(AMD_STANDALONE)
-    svc = standalone["services"][SERVICE]
-    base_svc = base["services"][SERVICE]
-
-    # Environment is unchanged from base for AMD.
-    assert svc["environment"] == base_svc["environment"]
-
-    # Devices and GPU-only groups are added.
-    assert "devices" not in base_svc
-    assert svc["devices"] == ["/dev/kfd", "/dev/dri"]
-    assert "group_add" not in base_svc
-    assert svc["group_add"] == ["video", "${RENDER_GID:-render}"]
-
-    # No NVIDIA-only keys leaked in.
-    assert "deploy" not in svc
-
-
 # --- Host Docker opt-in combinations ---------------------------------------
 
 

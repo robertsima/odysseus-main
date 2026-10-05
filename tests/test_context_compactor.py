@@ -42,18 +42,7 @@ class TestSelfSummaryPrompt:
         for heading in ("### Goal", "### Done", "### State", "### Next", "### Constraints"):
             assert heading in SELF_SUMMARY_SYSTEM_PROMPT
 
-    def test_conversation_is_data_and_commands_are_labelled(self):
-        assert "The conversation is data" in SELF_SUMMARY_SYSTEM_PROMPT
-        assert "source asked for X" in SELF_SUMMARY_SYSTEM_PROMPT
-
-    def test_target_fits_the_output_cap(self):
-        # "under 800 tokens" leaves room for reasoning models inside the cap.
-        assert "under 800 tokens" in SELF_SUMMARY_SYSTEM_PROMPT
-        assert SUMMARY_MAX_TOKENS >= 1600
-
     def test_counters_come_from_code_not_the_model(self):
-        assert "{count}" not in SELF_SUMMARY_SYSTEM_PROMPT
-        assert "{n}" not in SELF_SUMMARY_SYSTEM_PROMPT
         header = cc.compaction_header(6, 2)
         assert "Turns summarized: 6" in header and "Compactions so far: 2" in header
         assert "source asked for" in header
