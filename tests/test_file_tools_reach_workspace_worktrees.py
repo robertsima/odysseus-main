@@ -36,8 +36,8 @@ def _repo(path: Path) -> Path:
     path.mkdir(parents=True)
     _git(path, "init", "-q", "-b", "main")
     _git(path, "config", "core.autocrlf", "false")
-    (path / "app.py").write_text("print('hi')\n", encoding="utf-8")
-    _git(path, "add", "app.py")
+    (path / "service.py").write_text("print('hi')\n", encoding="utf-8")
+    _git(path, "add", "service.py")
     _git(path, "commit", "-q", "-m", "initial")
     return path
 
@@ -60,7 +60,7 @@ def world(tmp_path, monkeypatch):
 
 
 def test_a_worktree_of_the_workspace_repository_is_in_reach(world):
-    target = world["slice"] / "app.py"
+    target = world["slice"] / "service.py"
     assert tool_execution._resolve_tool_path(str(target)) == os.path.realpath(target)
     # A new file (not there yet) inside the worktree resolves too.
     new = world["slice"] / "checkins" / "form.py"
@@ -71,13 +71,13 @@ def test_a_worktree_of_the_workspace_repository_is_in_reach(world):
 
 def test_a_worktree_of_another_repository_stays_out_of_reach(world):
     with pytest.raises(ValueError, match="outside the workspace"):
-        tool_execution._resolve_tool_path(str(world["other_tree"] / "app.py"))
+        tool_execution._resolve_tool_path(str(world["other_tree"] / "service.py"))
     with pytest.raises(ValueError, match="outside the workspace"):
-        tool_execution._resolve_tool_path(str(world["other"] / "app.py"))
+        tool_execution._resolve_tool_path(str(world["other"] / "service.py"))
 
 
 def test_relative_paths_stay_workspace_relative_and_deny_lists_still_apply(world):
-    assert tool_execution._resolve_tool_path("app.py") == os.path.realpath(world["umni"] / "app.py")
+    assert tool_execution._resolve_tool_path("service.py") == os.path.realpath(world["umni"] / "service.py")
     (world["slice"] / ".ssh").mkdir()
     with pytest.raises(ValueError, match="sensitive"):
         tool_execution._resolve_tool_path(str(world["slice"] / ".ssh" / "id_rsa"))
@@ -95,7 +95,7 @@ def test_a_forged_pointer_outside_the_root_does_not_qualify(world, tmp_path):
 def test_read_and_edit_file_work_in_the_worktree(world):
     from src.agent_tools.filesystem_tools import EditFileTool, ReadFileTool
 
-    target = world["slice"] / "app.py"
+    target = world["slice"] / "service.py"
     read = asyncio.run(ReadFileTool().execute(json.dumps({"path": str(target)}), {}))
     assert "print('hi')" in json.dumps(read), read
     edited = asyncio.run(EditFileTool().execute(json.dumps(
@@ -103,4 +103,4 @@ def test_read_and_edit_file_work_in_the_worktree(world):
     assert edited.get("exit_code", 0) == 0, edited
     assert target.read_text(encoding="utf-8") == "print('check-in')\n"
     # The workspace checkout itself is untouched.
-    assert (world["umni"] / "app.py").read_text(encoding="utf-8") == "print('hi')\n"
+    assert (world["umni"] / "service.py").read_text(encoding="utf-8") == "print('hi')\n"

@@ -4,8 +4,6 @@ imaplib does not quote mailbox arguments for SELECT/APPEND/MOVE/COPY, so callers
 must quote names such as "[Gmail]/All Mail" or "Sent Items" themselves.
 """
 
-from pathlib import Path
-
 import pytest
 
 pytest.importorskip("mcp")
@@ -133,22 +131,39 @@ def test_mcp_quote_helper_handles_spaced_and_quoted_mailboxes():
     assert es._q('Label "Needs Reply"') == '"Label \\"Needs Reply\\""'
 
 
-def test_known_imap_mailbox_call_sites_are_quoted():
-    mcp = Path("mcp_servers/email_server.py").read_text()
-    assert "conn.select(folder" not in mcp
-    assert "conn.select(source_folder" not in mcp
-    assert "imap.append(sent_folder" not in mcp
-    assert 'conn.uid("MOVE", _b(msg_set), dest_folder)' not in mcp
-    assert 'conn.uid("COPY", _b(msg_set), dest_folder)' not in mcp
-    assert 'conn.uid("MOVE", _b(uid), dest_folder)' not in mcp
-    assert 'conn.uid("COPY", _b(uid), dest_folder)' not in mcp
+def test_mcp_move_and_bulk_move_quote_a_spaced_source_folder(monkeypatch):
+    conn = FakeMoveConn()
+    monkeypatch.setattr(es, "_imap_connect", lambda account=None: conn)
 
-    pollers = Path("routes/email_pollers.py").read_text()
-    assert "conn.select(sent_name" not in pollers
-    assert "imap.append(sent_folder" not in pollers
+    assert es._move_message("123", "Sent Items", "Archive") is True
+    assert es._bulk_move(["123"], "Sent Items", "Archive") == 1
 
-    document_routes = Path("routes/document/document_routes.py").read_text()
-    assert "conn.select(doc.source_email_folder" not in document_routes
+    selected = [call[1] for call in conn.calls if call[0] == "select"]
+    assert selected and set(selected) == {'"Sent Items"'}
+
+
+def test_the_poller_scan_selects_spaced_sent_folders_quoted():
+    """A server that rejects an unquoted name with a space, as real ones do."""
+    from routes.email_pollers import _scan_recent_uids
+
+    selected = []
+
+    class StrictConn:
+        def select(self, name, readonly=False):
+            selected.append(name)
+            if " " in name.strip('"') and not name.startswith('"'):
+                return "BAD", []
+            return ("OK", [b"1"]) if name.strip('"') in ("INBOX", "Sent Items") else ("NO", [])
+
+        def uid(self, command, *args):
+            return "OK", [b"41 42"]
+
+    found = _scan_recent_uids(StrictConn(), "01-Jan-2026", include_sent=True)
+
+    assert ("Sent Items", b"42") in found
+    assert '"Sent Items"' in selected
+    assert "Sent Items" not in selected
+
 
 
 def test_mcp_move_message_quotes_destination_for_move_and_fallback_copy(monkeypatch):

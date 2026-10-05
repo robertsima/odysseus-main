@@ -84,30 +84,28 @@ def test_dav_client_does_not_follow_redirect_to_internal_host():
         public.shutdown()
 
 
-def test_sync_and_writeback_construct_clients_through_the_helper():
-    """Guard against a raw DAVClient (redirects enabled) creeping back in.
-    Every DAVClient on the sync/write-back paths must go through
-    ``_build_dav_client`` so the redirect protection can't be bypassed."""
-    sync_src = (caldav_sync.__file__)
-    wb_src = (caldav_writeback.__file__)
-    with open(sync_src, encoding="utf-8") as f:
-        sync_text = f.read()
-    with open(wb_src, encoding="utf-8") as f:
-        wb_text = f.read()
+def test_every_client_the_sync_and_writeback_paths_open_refuses_redirects(monkeypatch):
+    """A raw DAVClient (redirects enabled) creeping back into either path would
+    reopen the SSRF. Run both paths with the constructor watched; no network is
+    reachable, so each path fails after building its client."""
+    caldav = pytest.importorskip("caldav")
+    built = []
+    real = caldav.DAVClient
 
-    # In caldav_sync the only raw constructions live inside the helper itself
-    # — one for Basic Auth (username/password), one for Google's Bearer-token
-    # path. Assert both live inside _build_dav_client's body, not just that
-    # the file-wide count matches, so a raw DAVClient() added anywhere else
-    # (bypassing the redirect-disable) still fails this test.
-    helper_start = sync_text.index("def _build_dav_client(")
-    helper_end = sync_text.index("\ndef ", helper_start + 1)
-    helper_body = sync_text[helper_start:helper_end]
-    assert helper_body.count("caldav.DAVClient(") == 2
-    assert sync_text.count("caldav.DAVClient(") == 2
-    assert "max_redirects = 0" in sync_text
-    assert "_build_dav_client(" in sync_text
+    class Watched(real):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            built.append(self)
 
-    # Write-back must not construct its own raw client; it reuses the helper.
-    assert "caldav.DAVClient(" not in wb_text
-    assert "_build_dav_client(" in wb_text
+    monkeypatch.setattr(caldav, "DAVClient", Watched)
+    url = "https://calendar.example.com/dav"
+
+    caldav_sync._sync_blocking("alice", url, "u", "p")
+    caldav_sync._sync_blocking("alice", url, "", "", token="bearer-token")
+    try:
+        caldav_writeback._writeback_blocking("cal", {"uid": "e1"}, False, url, "u", "p")
+    except Exception:
+        pass  # discovery cannot reach the host; the client was still built
+
+    assert len(built) == 3
+    assert [client.session.max_redirects for client in built] == [0, 0, 0]

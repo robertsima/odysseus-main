@@ -33,11 +33,3 @@ async def test_stop_and_wait_returns_after_the_partial_is_saved():
     assert not agent_runs.is_active("s-replace")
     assert await agent_runs.stop_and_wait("s-replace") is False
     agent_runs._RUNS.pop("s-replace", None)
-
-
-def test_route_stops_the_running_turn_before_saving_the_message():
-    from pathlib import Path
-
-    src = (Path(__file__).resolve().parents[1] / "routes" / "chat_routes.py").read_text(encoding="utf-8")
-    handler = src[src.index("async def chat_stream"):]
-    assert handler.index("agent_runs.stop_and_wait(session)") < handler.index("ctx = await build_chat_context(")

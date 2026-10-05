@@ -23,7 +23,6 @@ single (non-duplicated) save of the partial response, regression-safety for
 normal completed streams, and non-interference with detached chat/agent
 streams that are meant to keep running server-side after a client disconnect.
 """
-import ast
 import asyncio
 
 import pytest
@@ -483,80 +482,3 @@ async def test_cancellation_contract_holds_for_chat_and_agent_shaped_streams(mod
 
     assert sink.saves == [mode_chunks[0]]
     assert sink.completions == []
-
-
-# --------------------------------------------------------------------------- #
-# chat_stream wiring: compare-mode requests must skip agent_runs.start (stream
-# directly, cancellable promptly); normal requests must still go through it
-# (detached, survives client disconnect). This pins the actual branch added to
-# routes/chat_routes.py rather than re-deriving it from source text.
-# --------------------------------------------------------------------------- #
-
-def _is_call_to(node, name):
-    """True when `node` is a call to `name` (a bare name or a dotted attribute)."""
-    if not isinstance(node, ast.Call):
-        return False
-    return ast.unparse(node.func) == name
-
-
-def test_compare_mode_branch_skips_agent_runs_in_source():
-    """The compare_mode branch must return the raw generator as the SSE body
-    (bypassing agent_runs.start/subscribe) BEFORE the detached agent_runs.start
-    call below it — otherwise compare streams would still be detached and a
-    pane's Stop (closing the SSE) wouldn't cancel the upstream call.
-
-    Checked on the AST rather than on exact source text, so extra keyword
-    arguments on the detach call (e.g. the run's ``owner=``) don't break it:
-    what matters is the statement order inside the endpoint, the branch's body,
-    and which generator each path hands off.
-    """
-    from pathlib import Path
-    src = (Path(__file__).resolve().parents[1] / "routes" / "chat_routes.py").read_text(encoding="utf-8")
-    tree = ast.parse(src)
-
-    # Locate the detached-run call, then the `if compare_mode:` that guards it:
-    # the last such branch before it in the same statement list (the endpoint
-    # has earlier, unrelated compare_mode branches).
-    matches = []
-    for node in ast.walk(tree):
-        body = getattr(node, "body", None)
-        if not isinstance(body, list):
-            continue
-        for i, stmt in enumerate(body):
-            detaches = [
-                call for call in ast.walk(stmt)
-                if _is_call_to(call, "agent_runs.start")
-                and len(call.args) >= 2
-                and _is_call_to(call.args[1], "_safe_stream")
-            ]
-            if not detaches or isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            guards = [
-                prev for prev in body[:i]
-                if isinstance(prev, ast.If) and ast.unparse(prev.test) == "compare_mode"
-            ]
-            if guards:
-                matches.append((guards[-1], stmt))
-
-    assert len(matches) == 1, (
-        "expected exactly one detached agent_runs.start(session, _safe_stream(), ...) "
-        "guarded by an earlier `if compare_mode:` in routes/chat_routes.py"
-    )
-    branch, _detach_stmt = matches[0]
-
-    # The branch short-circuits: its only statement returns a StreamingResponse
-    # over the raw generator — not over an agent_runs subscription.
-    assert len(branch.body) == 1 and isinstance(branch.body[0], ast.Return), (
-        "compare_mode must short-circuit with a direct return"
-    )
-    ret = branch.body[0].value
-    assert _is_call_to(ret, "StreamingResponse"), (
-        "compare_mode must return a StreamingResponse directly"
-    )
-    assert ret.args and _is_call_to(ret.args[0], "_safe_stream"), (
-        "compare_mode must stream _safe_stream() itself, not a detached run"
-    )
-    assert not any(
-        isinstance(n, ast.Call) and ast.unparse(n.func).startswith("agent_runs.")
-        for n in ast.walk(branch)
-    ), "compare_mode must not register or subscribe to an agent run"

@@ -102,9 +102,9 @@ def test_approve_prints_a_one_time_code(cli, capsys, monkeypatch, tmp_path):
     # A second approve on the same request issues a *new* code rather than
     # reprinting the old one, and the record never stores plaintext.
     code = out.split("approval code:")[1].strip().splitlines()[0]
-    from src.agent_worktree import approval as approval_mod
-
-    stored = open(approval_mod._record_path(load_config(), record["id"]), encoding="utf-8").read()
+    records = list((tmp_path / "state").rglob(f"{record['id']}*"))
+    assert records, "the approval record was not written under the state dir"
+    stored = "".join(path.read_text(encoding="utf-8") for path in records)
     assert code not in stored
 
 

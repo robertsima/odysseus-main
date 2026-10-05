@@ -363,12 +363,22 @@ async def test_start_route_maps_rate_limit_to_429(fake_cli, monkeypatch):
     await _endpoint("/api/claude-code/login/cancel", "POST")(req, {})
 
 
-def test_no_agent_tool_can_submit_a_code():
+@pytest.mark.parametrize("action", ["login", "submit_code", "code", "auth"])
+async def test_no_agent_tool_can_submit_a_code(monkeypatch, action):
     """The chat tool has no login action; only the admin UI drives this."""
-    assert "login" not in cct._ACTIONS
-    import inspect
-    source = inspect.getsource(cct)
-    assert "claude_code_login" not in source
+    reached = []
+    for name in ("start", "submit_code", "cancel"):
+        async def spy(*args, _name=name, **kwargs):
+            reached.append(_name)
+        monkeypatch.setattr(ccl, name, spy)
+
+    result = await cct.ClaudeCodeTool().execute(
+        json.dumps({"action": action, "code": GOOD_CODE, "session_id": "any"}), {"owner": "alice"})
+
+    assert result["exit_code"] == 1
+    assert "unknown action" in result["error"]
+    assert reached == []
+    _no_secret(result, GOOD_CODE)
 
 
 async def test_not_signed_in_hint_points_to_settings(monkeypatch, tmp_path):

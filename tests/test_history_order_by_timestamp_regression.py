@@ -7,18 +7,12 @@ does **not** inherit ``TimestampMixin`` and exposes only a ``timestamp`` column,
 so ``DbChatMessage.created_at`` raised ``AttributeError`` at query-build time ->
 HTTP 500 on Stop, last-message metadata updates, and Continue/merge.
 
-This test pins three things:
+This test pins two things:
   1. the model genuinely has ``timestamp`` and no ``created_at`` (justifies the fix);
-  2. the corrected ``order_by(DbChatMessage.timestamp)`` query builds and runs;
-  3. ``routes/history_routes.py`` never orders a ChatMessage query by the
-     non-existent ``created_at`` column again.
+  2. the corrected ``order_by(DbChatMessage.timestamp)`` query builds and runs.
+The handlers themselves run in tests/routes/history/history_routes.
 """
-from pathlib import Path
-
 from core.database import ChatMessage as DbChatMessage, Session as DbSession
-
-
-HISTORY_ROUTES = Path(__file__).resolve().parent.parent / "routes" / "history" / "history_routes.py"
 
 
 def test_chatmessage_model_has_timestamp_not_created_at():
@@ -59,10 +53,3 @@ def test_order_by_timestamp_query_executes(make_test_db):
     finally:
         db.close()
 
-
-def test_history_routes_do_not_order_by_created_at():
-    text = HISTORY_ROUTES.read_text(encoding="utf-8")
-    assert "DbChatMessage.created_at" not in text, (
-        "history_routes must order ChatMessage queries by `.timestamp`, not the "
-        "non-existent `.created_at` column (raises AttributeError -> HTTP 500, #1659)"
-    )

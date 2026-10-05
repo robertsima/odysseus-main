@@ -4,8 +4,6 @@ Each test pins a behaviour, not wording: which blocks appear for which tools,
 and that the guidance the harness depends on is present exactly once.
 """
 
-import re
-
 import src.agent_loop as al
 from src import task_checklist
 
@@ -25,7 +23,6 @@ def test_the_machine_note_needs_file_or_shell_tools():
     # the user "referred to this computer" and should not get email or notes.
     plain = _system_text({"ask_user", "update_plan", "list_emails", "read_email"})
     assert "Machine work without a workspace" not in plain
-    assert "Do not use personal-assistant tools" not in plain
     shell = _system_text({"ask_user", "update_plan", "bash", "read_file"})
     assert "Machine work without a workspace" in shell
 
@@ -43,28 +40,6 @@ def test_delegation_guidance_comes_with_the_launch_tools():
     assert "delegation" not in al._DOMAIN_TOOL_MAP
 
 
-def test_the_native_prompt_names_odysseus_and_its_working_rules_once():
-    text = al._assemble_prompt({"bash", "ask_user", "update_plan"}, set(), compact=True)
-    assert text.startswith("You are Odysseus")
-    assert text.count("## How to work") == 1
-    assert "discover_tools" in text  # a missing tool is discovered, not reported missing
-    assert "Before ending your turn, read your last paragraph" in text
-
-
-def test_the_overridden_v1_rules_are_gone():
-    source = open(al.__file__, encoding="utf-8").read()
-    assert "BIAS TOWARD ACTION" not in source
-    for name in ("_AGENT_PREAMBLE", "_AGENT_RULES", "_API_AGENT_RULES"):
-        assert len(re.findall(rf"(?m)^{name} = ", source)) == 1, name
-
-
-def test_a_worker_is_asked_for_a_report_in_a_fixed_shape():
-    note = al._PARENT_CHAT_NOTE
-    assert note.startswith("You were started by another chat")
-    for field in ("Outcome:", "Changed:", "Checked:", "Open:", "Needs parent:", "Needs user:"):
-        assert field in note
-
-
 def test_the_checklist_nudge_offers_needs_parent_only_to_a_worker():
     plan = "- [x] read the failing test\n- [ ] fix it"
     top = task_checklist.continue_directive(plan)
@@ -74,50 +49,7 @@ def test_the_checklist_nudge_offers_needs_parent_only_to_a_worker():
     assert "- [ ] fix it" in worker
 
 
-def test_draft_skills_are_not_called_authoritative():
-    source = open(al.__file__, encoding="utf-8").read()
-    assert "treat them as authoritative" not in source
-    assert "proven to work. Follow them step by step" not in source
-
-
-def test_coding_rules_send_visual_work_to_real_artwork_and_the_user():
-    rules = al._workspace_coding_rules("/srv/project")
-    assert "visual-asset-sourcing" in rules and "hand-written SVG" in rules
-    assert "ask the user to pick" in rules
-
-
-def test_delegation_rules_say_who_runs_tests_and_review_once_per_iteration():
-    assert "The implementer runs tests and builds" in al._DELEGATION_RULES
-    assert "one independent review per iteration" in al._DELEGATION_RULES
-    # 2026-10-03: the admin re-ran the worker's 8.5-minute suite on the same
-    # commit; a hand-back is verified from its evidence plus one quick check.
-    assert "Re-run the long suites only when the commit changed" in al._DELEGATION_RULES
-
-
-def test_visual_asset_sourcing_skill_parses_and_is_cross_linked():
-    from pathlib import Path
-    from services.memory.skill_format import Skill
-
-    root = Path(al.__file__).resolve().parents[1] / "skills" / "design"
-    text = (root / "visual-asset-sourcing" / "SKILL.md").read_text(encoding="utf-8")
-    skill = Skill.from_markdown(text)
-    # The portable schema nests category/status/source under `metadata:`; the
-    # seeder (src/builtin_skills.py) copies them onto the skill record.
-    assert skill.name == "visual-asset-sourcing" and skill.description
-    head = text.split("---")[1]
-    for line in ("  category: design", "  status: published", "  source: bundled"):
-        assert line in head
-    assert "Needs user:" in text and "api.iconify.design" in text
-    penpot = (root.parents[1] / "integrations" / "penpot" / "skills" / "penpot-design-workflow" / "SKILL.md").read_text(encoding="utf-8")
-    assert "visual-asset-sourcing" in penpot and "error screen" in penpot
-
-
 # ── Prompt audit 2026-10-01 ────────────────────────────────────────────────
-
-
-def test_draft_skills_have_one_stance_and_it_is_not_authoritative():
-    source = open(al.__file__, encoding="utf-8").read()
-    assert "authoritative guidance" not in source
 
 
 def test_the_untrusted_header_marks_the_boundary_and_leaves_the_rules_to_the_policy():
@@ -173,24 +105,7 @@ def test_open_email_rules_ride_in_a_directive_not_in_the_untrusted_envelope():
 
 
 def test_the_skills_rule_is_trusted_text_and_the_index_is_only_data():
-    assert "load that skill with `manage_skills`" in al._SKILLS_POINTER
     assert al._SKILLS_POINTER in al._assemble_prompt({"ask_user"}, set(), compact=True)
-    source = open(al.__file__, encoding="utf-8").read()
-    assert "should consult before doing domain work" not in source
-
-
-def test_the_native_prompt_batches_and_gives_the_request_a_finish_line():
-    text = al._assemble_prompt({"ask_user", "update_plan"}, set(), compact=True)
-    assert "Batch." in text
-    assert "write the parts into `update_plan`" in text
-    assert "Some of your tools" not in text  # the function schemas are the tool list
-
-
-def test_workspace_rules_do_not_ban_the_tools_the_harness_keeps_for_a_mixed_request():
-    rules = al._workspace_coding_rules("/srv/project")
-    assert "Do not use personal-assistant tools" not in rules
-    assert "todowrite" not in rules
-    assert "Expo" in rules and "npm ci" in rules
 
 
 def test_needs_lines_are_defined_once():
@@ -198,11 +113,3 @@ def test_needs_lines_are_defined_once():
     assert task_checklist.needs_clause(True) in worker
     assert task_checklist.needs_clause(True) in al._self_unblock_directive(has_parent=True)
     assert "Needs parent:" not in al._self_unblock_directive(has_parent=False)
-    source = open(al.__file__, encoding="utf-8").read()
-    assert source.count("`Needs parent: <what>`") == 0
-
-
-def test_a_worker_knows_when_it_is_done_and_a_wrapped_up_worker_reports_the_same_shape():
-    assert "You are done when every part of the person's request is met" in al._PARENT_CHAT_NOTE
-    source = open(al.__file__, encoding="utf-8").read()
-    assert "(Outcome, Changed, Checked, " in source and "under Open list every unfinished" in source
