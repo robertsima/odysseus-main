@@ -91,9 +91,13 @@ async def _run_followup(rec: dict) -> bool:
     # history + save_sessions(); a concurrent live turn does the same, and with
     # no per-session lock the two interleave (reordered/clobbered messages).
     # Defer — return False so we retry on the next tick once the turn finishes.
+    # is_busy, not is_active: a worker's turn is headless (track_external), so
+    # it has no stream. On 2026-10-06 the is_active check let a follow-up start
+    # a second loop beside a running worker in the same worktree; each loop
+    # took the other's edits for someone else's and the worker stopped blocked.
     try:
         from src import agent_runs
-        if agent_runs.is_active(sess.id):
+        if agent_runs.is_busy(sess.id):
             logger.info("bg-followup: session %s busy (live turn) — deferring job %s", sess.id, rec.get("id"))
             return False
     except Exception:
@@ -140,6 +144,13 @@ async def _run_followup(rec: dict) -> bool:
     sm.save_sessions()
     logger.info("bg-followup: auto-continued session %s for job %s (%d chars, %d tools)",
                 sess.id, rec["id"], len(full), len(tool_events))
+    # In a worker chat this reply is the worker's latest result. Without the
+    # hand-up it stayed in the worker chat and the parent (and the person) never
+    # heard that the work had finished.
+    if full.strip():
+        from src.agent_control import _hand_up_when_done
+
+        await _hand_up_when_done(sm, sess.id, sess, full, "completed", getattr(sess, "owner", None))
     return True
 
 
