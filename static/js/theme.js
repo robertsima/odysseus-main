@@ -55,6 +55,11 @@ const FONT_MAP = {
   mono: "'Fira Code', monospace",
   sans: "system-ui, -apple-system, 'Segoe UI', sans-serif",
   serif: "Georgia, 'Times New Roman', serif",
+  humanist: "'Trebuchet MS', 'Segoe UI', sans-serif",
+  editorial: "Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif",
+  classic: "'Times New Roman', Times, serif",
+  code: "'Cascadia Code', 'SFMono-Regular', Consolas, 'Liberation Mono', monospace",
+  rounded: "ui-rounded, 'Arial Rounded MT Bold', system-ui, sans-serif",
   opendyslexic: "'OpenDyslexic', sans-serif",
 };
 const DEFAULT_FONT = 'mono';
@@ -468,6 +473,7 @@ export function applyUiScale(scale) {
 }
 
 const _BG_CLASSES = ['bg-pattern-dots', 'bg-pattern-lattice',
+  'bg-pattern-grid', 'bg-pattern-diagonal', 'bg-pattern-rings', 'bg-pattern-aurora',
   'bg-pattern-synapse', 'bg-pattern-rain', 'bg-pattern-constellations',
   'bg-pattern-perlin-flow',
   'bg-pattern-petals', 'bg-pattern-sparkles', 'bg-pattern-embers'];
@@ -1207,7 +1213,8 @@ export function initThemeUI() {
     nf.value = _initFont;
     nf.addEventListener('change', () => {
       applyFontDensity(nf.value, document.getElementById('theme-density-select').value);
-      const s = getSaved(); if (s) _saveFull(s.name, s.colors);
+      const s = getSaved() || { name: DEFAULT_THEME, colors: THEMES[DEFAULT_THEME] };
+      _saveFull(s.name, s.colors);
     });
     // Fetch custom fonts from local folder and populate dropdown
     fetch('/api/fonts/custom', { credentials: 'same-origin' })
@@ -1257,7 +1264,8 @@ export function initThemeUI() {
     np.value = _initPattern;
     np.addEventListener('change', () => {
       applyBgPattern(np.value);
-      const s = getSaved(); if (s) _saveFull(s.name, s.colors);
+      const s = getSaved() || { name: DEFAULT_THEME, colors: THEMES[DEFAULT_THEME] };
+      _saveFull(s.name, s.colors);
     });
   }
 

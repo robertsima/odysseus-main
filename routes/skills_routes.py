@@ -2055,7 +2055,11 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         # candidates so the event-driven Skills Audit pipeline still runs.
         if not match.get("audit_verdict"):
             _fire_skill_added(user)
-        return {"ok": True, "name": sk.name}
+        # update_skill serializes frontmatter; return the stored text and its
+        # hash so an editor can save again without dropping conflict checks.
+        saved_md = skills_manager.read_skill_md(sk.name, owner=user)
+        return {"ok": True, "name": sk.name, "markdown": saved_md,
+                "version": hashlib.sha256(saved_md.encode('utf-8')).hexdigest()}
 
     @router.put("/{skill_id}")
     async def update_skill(request: Request, skill_id: str, body: SkillUpdateRequest):
