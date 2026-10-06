@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 from dulwich import porcelain
+from dulwich.client import LocalGitClient
 
 from src.agent_worktree import repository_remote as rr
 from src.agent_worktree import repository_sync as rs
@@ -442,6 +443,37 @@ def test_fetch_falls_back_to_the_default_branch_when_the_upstream_was_deleted(
     with porcelain.open_repo(str(path)) as repo:
         assert repo.refs[b"refs/remotes/origin/trunk"] == head
         assert repo.refs[b"HEAD"] == head
+
+
+def test_fetch_reads_files_larger_than_8_kib(checkout, monkeypatch):
+    # 2026-10-06: dulwich 1.2.9 capped the inflated *whole* loose object at
+    # 8 KiB while parsing its header, so every fetch failed with "object
+    # header exceeds maximum size" once the checkout held a file over 8 KiB.
+    path, branch = checkout
+    big = b"".join(b"line %d of a tracked file\n" % i for i in range(2000))
+    with porcelain.open_repo(str(path)) as repo:
+        (path / "big.txt").write_bytes(big)
+        porcelain.add(repo, ["big.txt"])
+        porcelain.commit(repo, message=b"big", author=b"T <t@e>", committer=b"T <t@e>")
+    upstream = path.parent / "upstream"
+    porcelain.clone(str(path), str(upstream)).close()
+    with porcelain.open_repo(str(upstream)) as repo:
+        (upstream / "big.txt").write_bytes(big + b"tail\n")
+        porcelain.add(repo, ["big.txt"])
+        remote_oid = porcelain.commit(
+            repo, message=b"grow", author=b"T <t@e>", committer=b"T <t@e>"
+        )
+    monkeypatch.setattr(
+        rr, "_client", lambda url, token: (LocalGitClient(), str(upstream))
+    )
+
+    result = rr._fetch_sync(path)
+
+    assert result["after"] == remote_oid.decode()
+    with porcelain.open_repo(str(path)) as repo:
+        assert repo.refs[b"refs/remotes/origin/" + branch] == remote_oid
+        blob = repo[repo[repo[remote_oid].tree][b"big.txt"][1]]
+        assert blob.data == big + b"tail\n"
 
 
 def test_fetch_without_a_known_default_still_reports_the_missing_branch(
