@@ -1,9 +1,10 @@
-"""One skill filter for the agent loop's index, the chat route's index and the
-keyword-matched "Relevant skills" block (2026-10-01).
+"""One skill filter for the agent loop's index and the keyword-matched
+"Relevant skills" block (2026-10-01).
 
 Before, the loop compared `requires_toolsets` with native tool names only (so a
-connected Penpot never showed its skill), the chat route filtered nothing and
-ignored the loadout scope, and the keyword match filtered nothing.
+connected Penpot never showed its skill), and the keyword match filtered
+nothing. The chat route's own copy of the index is gone (2026-10-06); see
+tests/src/chat_processor/test_skills_index_left_to_agent_loop.py.
 """
 
 from __future__ import annotations
@@ -87,19 +88,6 @@ def _index_names(world, **kwargs):
     return set(getattr(block, "names", ()))
 
 
-def _chat_names(world, session_id=None):
-    from services.memory.skills import SkillsManager
-    from src.chat_processor import ChatProcessor
-
-    cp = ChatProcessor(None, None, skills_manager=SkillsManager(str(world.root)))
-    preface, _, _ = cp.build_context_preface(
-        message="hello", session=SimpleNamespace(id=session_id), agent_mode=True, use_rag=False,
-        use_memory=False,
-    )
-    text = "\n".join(m["content"] for m in preface)
-    return {n for n in ("penpot-design-workflow", "plain-notes") if f"- {n}" in text or f"`{n}`" in text}
-
-
 def _relevant_names(world, monkeypatch, message="design a penpot mockup"):
     from src.agent_loop import _build_system_prompt
 
@@ -137,18 +125,15 @@ def test_visibility_fails_open(world, monkeypatch):
 
 def test_connected_penpot_shows_the_skill_on_every_path(world, monkeypatch):
     world.connect()
-    assert "penpot-design-workflow" in _index_names(world)                      # A
-    assert "penpot-design-workflow" in _chat_names(world)                       # B
-    text, _ = _relevant_names(world, monkeypatch)                               # C
+    assert "penpot-design-workflow" in _index_names(world)                      # index
+    text, _ = _relevant_names(world, monkeypatch)                               # keyword match
     assert "### penpot-design-workflow" in text
 
 
 def test_absent_penpot_hides_the_skill_on_every_path(world, monkeypatch):
-    names = _index_names(world)                                                 # A
+    names = _index_names(world)                                                 # index
     assert "penpot-design-workflow" not in names and "plain-notes" in names
-    assert "penpot-design-workflow" not in _chat_names(world)                   # B
-    assert "plain-notes" in _chat_names(world)
-    text, _ = _relevant_names(world, monkeypatch)                               # C
+    text, _ = _relevant_names(world, monkeypatch)                               # keyword match
     assert "### penpot-design-workflow" not in text and "penpot-design-workflow" not in text
 
 
@@ -159,17 +144,10 @@ def test_tool_gone_hides_skill_even_when_integration_is_up(world):
     assert "penpot-design-workflow" not in _index_names(world)
 
 
-def test_loadout_scope_applies_to_the_chat_route_index(world, monkeypatch):
+def test_loadout_scope_applies_to_the_index(world):
     world.connect()
-    import core.database as database
-
-    monkeypatch.setattr(
-        database, "get_session_settings",
-        lambda sid, **_k: {"skill_access": "selected", "skill_names": ["plain-notes"]},
-    )
-    assert _chat_names(world, session_id="s1") == {"plain-notes"}
-    monkeypatch.setattr(database, "get_session_settings", lambda sid, **_k: {"skill_access": "none"})
-    assert _chat_names(world, session_id="s1") == set()
+    assert _index_names(world, skill_scope={"plain-notes"}) == {"plain-notes"}
+    assert _index_names(world, skill_scope=set()) == set()
 
 
 def test_one_learned_skill_does_not_arm_the_gate_when_only_shipped_skills_are_shown(world, monkeypatch):

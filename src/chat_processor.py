@@ -529,9 +529,6 @@ class ChatProcessor:
                 except Exception as _e:
                     logger.warning("Failed to increment memory uses: %s", _e)
 
-            # (skills index injection moved out — see below; only fires in
-            # agent mode so chat mode and incognito stay clean.)
-
         # RAG: search if enabled and rag_manager available, inject only above threshold
         #
         # Contentless turns skip it. This search is two ChromaDB collections and
@@ -723,43 +720,8 @@ class ChatProcessor:
                         f"A linked page was not read: {status}.",
                     ))
 
-        # Skills index — progressive disclosure. Only injected when the
-        # model has the `manage_skills` tool available (agent_mode), and
-        # never in incognito mode (the user has explicitly opted out of
-        # context retention this turn). In plain chat mode the model can't
-        # call the tool anyway, so the index would be noise.
-        if agent_mode and not incognito and use_skills and self.skills_manager:
-            try:
-                # The same filter and loadout scope the agent loop applies, so
-                # this index and the loop's never disagree about a skill. It
-                # fails open: an error here shows what was shown before.
-                from src import skill_toolsets
-
-                _vis, _scope = skill_toolsets.session_skill_context(getattr(session, "id", None))
-                idx = skill_toolsets.scope_skills(
-                    self.skills_manager.index_for(
-                        owner=owner,
-                        active_toolsets=None if _vis.active_toolsets is None else list(_vis.active_toolsets),
-                        available_integrations=_vis.available_integrations,
-                    ),
-                    _scope,
-                )
-            except Exception as e:
-                logger.debug(f"Skills index unavailable: {e}")
-                idx = []
-            if idx:
-                by_cat: Dict[str, list] = {}
-                for s in idx:
-                    by_cat.setdefault(s.get("category") or "general", []).append(s)
-                lines = ["[Available skills — call manage_skills(action='view', name='...') to load one when relevant]"]
-                for cat in sorted(by_cat):
-                    lines.append(f"  {cat}:")
-                    for s in sorted(by_cat[cat], key=lambda x: x["name"]):
-                        desc = s.get("description") or ""
-                        lines.append(f"    - {s['name']}: {desc}" if desc else f"    - {s['name']}")
-                preface.append(untrusted_context_message(
-                    "available skills index",
-                    "\n".join(lines),
-                ))
+        # No skills index here: the agent loop injects it for every agent turn
+        # and leaves it out on low-signal ones. A second copy from this preface
+        # doubled the list and always armed the tool gate (2026-10-06).
 
         return preface, rag_sources, web_sources
