@@ -15,15 +15,15 @@ Most checks live in files under `.github/workflows/`. CodeQL uses the
 checked-in advanced configuration in `.github/workflows/codeql.yml`. They run
 automatically; you do not start them.
 
-| Check | What it protects against | Blocks a merge? |
-|---|---|---|
-| **Secret scan** (gitleaks) | An API key, token, or password being committed by mistake or on purpose | Yes |
-| **Workflow security** (actionlint + zizmor) | A broken or insecure automation file that could leak the repo's access token | Yes |
-| **Dependency review** | A pull request that adds a software library with a known security hole | Yes |
-| **pip-audit** | Known security holes in the Python libraries already used | No (advisory) |
-| **Container scan: hadolint** | Mistakes and insecure patterns in the `Dockerfile` | Yes |
-| **Container scan: Trivy** | Known security holes in the Docker image | No (advisory) |
-| **CodeQL** | Real bugs in the app's own code: injection, auth mistakes, path traversal | No (advisory) |
+| Check | What it protects against | Runs on a pull request | Blocks a merge? |
+|---|---|---|---|
+| **Secret scan** (gitleaks) | An API key, token, or password being committed by mistake or on purpose | Always | Yes |
+| **Workflow security** (actionlint + zizmor) | A broken or insecure automation file that could leak the repo's access token | When `.github/workflows/` changes | Yes |
+| **Dependency review** | A pull request that adds a software library with a known security hole | When a requirements or `package*.json` file changes | Yes |
+| **pip-audit** | Known security holes in the Python libraries already used | Same as Dependency review, plus weekly | No (advisory) |
+| **Container scan: hadolint** | Mistakes and insecure patterns in the `Dockerfile` | When the `Dockerfile` changes | Yes |
+| **Container scan: Trivy** | Known security holes in the Docker image | When the `Dockerfile`, `.dockerignore` or a dependency file changes | No (advisory) |
+| **CodeQL** | Real bugs in the app's own code: injection, auth mistakes, path traversal | Never; runs on pushes to `dev`/`main` and weekly | No (advisory) |
 
 "Blocks a merge" means a red X appears on the pull request and, once you enable
 the setting below, the **Merge** button is disabled until it is fixed.
@@ -70,15 +70,14 @@ This makes the **Merge** button refuse to work until the gating checks pass.
 6. In the search box that appears, add these checks by name:
    - `Python syntax (compileall)`
    - `JS syntax (node --check)`
+   - `Python tests (pytest)`
+   - `Browser tests (pytest -m browser)`
    - `gitleaks`
-   - `actionlint`
-   - `zizmor (Actions SAST)`
-   - `hadolint (Dockerfile lint)`
-   - `dependency-review (PR gate)`
 
-   The first two come from the correctness CI (`ci.yml`); the rest are this
-   security suite. Leave pytest, pip-audit, Trivy, and CodeQL unchecked so they
-   stay advisory.
+   Require only checks that run on every pull request. A check that runs only
+   when certain files change (workflow security, hadolint, dependency review)
+   never reports on other pull requests, and a required check that never
+   reports blocks the merge forever. They still show a red X when they do run.
 7. Also enable **Require a pull request before merging** and **Require review
    from Code Owners** (this uses the `.github/CODEOWNERS` file so every change
    needs your sign-off).

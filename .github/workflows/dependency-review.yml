@@ -10,13 +10,22 @@
 #   - pip-audit: scans the project's current Python requirements against the
 #     advisory database. Advisory only (it never blocks a merge), because it can
 #     flag a pre-existing issue in an already-shipped dependency.
+#
+# On a pull request both run only when a dependency file changes. pip-audit
+# also runs weekly, which is how a new advisory for a pinned package shows up.
 
 name: Dependency review
 
 on:
   pull_request:
+    paths:
+      - 'requirements*.txt'
+      - 'package*.json'
+      - '.github/workflows/dependency-review.yml'
   push:
     branches: [main]
+  schedule:
+    - cron: "41 4 * * 1"
   workflow_dispatch:
 
 # Default-deny token; jobs grant only read access.
@@ -90,8 +99,11 @@ jobs:
         with:
           python-version: '3.12'
 
+      # `pip-audit -r` resolves into a temporary venv whose pip upgrade failed
+      # on PR #62 ("Failed to upgrade `pip`"), so nothing was audited. Install
+      # the requirements here and audit this environment instead.
       - name: Run pip-audit on requirements
         run: |
           set -euo pipefail
-          pip install pip-audit==2.10.0
-          pip-audit -r requirements.txt -r requirements-optional.txt --strict
+          pip install -r requirements.txt -r requirements-optional.txt pip-audit==2.10.0
+          pip-audit --strict

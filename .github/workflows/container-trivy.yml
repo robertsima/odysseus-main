@@ -12,20 +12,19 @@
 #     held to a read-only token and never publishes results. Only `publish`,
 #     which runs on push to main (curated, fast-forwarded from reviewed dev),
 #     gets security-events:write to upload SARIF.
-#   - Cost. Docs-only changes do not rebuild the image (paths-ignore below),
-#     matching docker-publish.yml. hadolint stays on the broad trigger in
-#     container-scan.yml so the blocking gate always reports.
+#   - Cost. A pull request rebuilds and scans the image only when it changes
+#     what goes into the image's packages: the Dockerfile or a dependency file.
 
 name: Container scan (Trivy)
 
 on:
   pull_request:
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'website/**'
-      - 'assets/branding/**'
-      - '.github/ISSUE_TEMPLATE/**'
+    paths:
+      - 'Dockerfile*'
+      - '.dockerignore'
+      - 'requirements*.txt'
+      - 'package*.json'
+      - '.github/workflows/container-trivy.yml'
   push:
     branches: [main]
     paths-ignore:

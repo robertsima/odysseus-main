@@ -1,12 +1,10 @@
 name: CodeQL
 
-# Advanced setup so CodeQL also runs on pull requests (including from forks),
-# surfacing findings before merge instead of only after a change lands on dev.
+# Runs on pushes to dev/main and weekly, not on pull requests: its three jobs
+# were the slowest PR checks, and its findings are advisory.
 on:
   push:
     branches: [dev, main]
-  pull_request:
-    branches: [dev]
   schedule:
     - cron: "17 3 * * 1"
 
