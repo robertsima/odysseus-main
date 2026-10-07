@@ -45,6 +45,7 @@ Final local focused runs before commit:
 - 13 Chromium live-chat/panels/font tests passed, including the former nested-fence xfail. Earlier browser failures were missing Playwright in a reset sandbox; installed test dependencies and the required-browser lane passed.
 - 14 Node migration/chat/poll tests passed; 14 theme/migration tests passed (overlap).
 - Shell script syntax, changed JS syntax and `git diff --check` checked.
+- Final verification found two stale Node fixtures reading/writing the legacy toggle key after migration. The chat fixture and assertions now use the canonical key; separate storage-migration tests retain legacy-input coverage. The focused rerun passed 11 tests. The failed earlier full lane remains in its original evidence directory rather than being reported as green.
 
 Final full-lane and capture provenance is in the final commit's evidence directory. Capture command: `python .visual-check/capture.py`. It starts `python app.py` with isolated temporary storage, new account, loopback binding, MCP/pollers/tasks disabled; no live settings or data are read. Login/empty panels use a real backend; active-agent activity is separately marked as canned. Standalone OAuth HTML is rendered locally without performing authorization. Captures add desktop, 700px and mobile states and real unit archive/restore counts. Screenshots do not establish live integration behavior.
 
@@ -70,3 +71,5 @@ docker compose -p agamemnon-release-check -f docker-compose.yml logs --no-color 
 Require healthy ChromaDB before accepting startup. Create a fresh account at `http://127.0.0.1:17000`, configure only a sandbox model, send a useful task, verify its persisted reply after reload, add a test note, index it and verify retrieval returns that note. Record model/server versions and commands alongside captures. Do not reuse production API tokens. Stop only the named test project after the check; no production volumes are involved.
 
 Other gates: fresh-account mail/calendar/Todoist/Penpot/Windows Pi credentials and sandbox services; native Windows/macOS package builds; formal contrast/accessibility checks; external plugin installation. Local tests establish owner/security/configuration contracts, not live authorization. The parent arranges exactly one read-only independent review of the final commit. No reviewer or new writer was started for this continuation.
+
+Latest `dev` integration and revalidation are required before the final PR/merge. Robert has pushed additional changes. The parent must coordinate integration using confirmed exact heads; this continuation does not merge, rebase or pull those changes. Existing evidence covers only the named release-readiness commit, not the eventual integrated commit.
