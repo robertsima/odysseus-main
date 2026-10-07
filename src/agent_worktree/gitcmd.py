@@ -32,7 +32,7 @@ MAX_CAPTURE_CHARS = 200_000
 
 # Committer identity for agent commits. Fixed so history shows plainly that a
 # machine produced the commit, and so the agent cannot impersonate a person.
-AGENT_NAME = "Odysseus Agent"
+AGENT_NAME = "Agamemnon Agent"
 AGENT_EMAIL = "odysseus-agent@users.noreply.github.com"
 
 

@@ -301,3 +301,18 @@ def test_dotted_python_import_paths_are_not_autolinked(node_available):
     assert 'href="https://imblearn.com' not in html
     assert 'href="https://sklearn.me' not in html
     assert 'href="https://example.com/docs"' in html
+
+
+@pytest.mark.parametrize("close", ["````", "``````"])
+def test_outer_long_fence_preserves_inner_fence(node_available, close):
+    html = _run_markdown_case("````markdown\n```python\nprint('inner block')\n```\nSTILL-INSIDE-OUTER-FENCE\n" + close)
+    assert html.count("<pre>") == 1
+    assert "STILL-INSIDE-OUTER-FENCE" in html
+    assert "```python" in html
+
+
+def test_inline_backticks_do_not_close_fenced_block(node_available):
+    html = _run_markdown_case("```text\nliteral ``` inside\nstill code\n```\noutside")
+    assert html.count("<pre>") == 1
+    assert "literal ``` inside" in html
+    assert "still code" in html

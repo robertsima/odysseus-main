@@ -1377,10 +1377,13 @@ def _move_email_message(conn, uid: str, dest: str, role: str = "") -> bool:
 
 
 def _apply_odysseus_headers(msg, kind: str | None = None, ref_id: str | None = None):
+    msg["X-Agamemnon-Origin"] = "agamemnon-ui"
     msg["X-Odysseus-Origin"] = ODYSSEUS_MAIL_ORIGIN
     if kind:
+        msg["X-Agamemnon-Kind"] = re.sub(r"[^A-Za-z0-9_.-]", "-", kind)[:64]
         msg["X-Odysseus-Kind"] = re.sub(r"[^A-Za-z0-9_.-]", "-", kind)[:64]
     if ref_id:
+        msg["X-Agamemnon-Ref"] = re.sub(r"[^A-Za-z0-9_.:-]", "-", ref_id)[:128]
         msg["X-Odysseus-Ref"] = re.sub(r"[^A-Za-z0-9_.:-]", "-", ref_id)[:128]
 
 
@@ -4254,7 +4257,7 @@ def setup_email_routes():
 
     @router.post("/compose-from-odysseus")
     async def compose_from_odysseus(data: dict, owner: str = Depends(require_owner)):
-        """Stage an Odysseus document or gallery image as a compose upload."""
+        """Stage an Agamemnon document or gallery image as a compose upload."""
         kind = str(data.get("kind") or "").strip().lower()
         item_id = str(data.get("id") or "").strip()
         if kind not in {"document", "gallery"} or not item_id:

@@ -3626,11 +3626,11 @@ const AGENT_CONFIGS = {
     defaultName: 'Codex Agent',
     pluginPath: '/api/codex/plugin.zip',
     setupDescription: 'Downloads a plugin bundle and registers it.',
-    buildSetup: (origin, token) => `export ODYSSEUS_URL=${origin}
-export ODYSSEUS_API_TOKEN='${token}'
+    buildSetup: (origin, token) => `export AGAMEMNON_URL=${origin}
+export AGAMEMNON_API_TOKEN='${token}'
 mkdir -p ~/plugins
-curl -fsSL -H "Authorization: Bearer $ODYSSEUS_API_TOKEN" "$ODYSSEUS_URL/api/codex/plugin.zip" -o /tmp/odysseus-codex-plugin.zip
-python3 -m zipfile -e /tmp/odysseus-codex-plugin.zip ~/plugins
+curl -fsSL -H "Authorization: Bearer $AGAMEMNON_API_TOKEN" "$AGAMEMNON_URL/api/codex/plugin.zip" -o /tmp/agamemnon-codex-plugin.zip
+python3 -m zipfile -e /tmp/agamemnon-codex-plugin.zip ~/plugins
 python3 - <<'PY'
 import json
 from pathlib import Path
@@ -3646,16 +3646,16 @@ data.setdefault("name", "personal")
 data.setdefault("interface", {}).setdefault("displayName", "Personal")
 plugins = data.setdefault("plugins", [])
 entry = {
-    "name": "odysseus",
-    "source": {"source": "local", "path": "./plugins/odysseus"},
+    "name": "agamemnon",
+    "source": {"source": "local", "path": "./plugins/agamemnon"},
     "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
     "category": "Productivity",
 }
-data["plugins"] = [item for item in plugins if item.get("name") != "odysseus"] + [entry]
+data["plugins"] = [item for item in plugins if item.get("name") not in ("agamemnon", "odysseus")] + [entry]
 p.write_text(json.dumps(data, indent=2) + "\\n")
 PY
-codex plugin add odysseus@personal
-python3 ~/plugins/odysseus/scripts/odysseus_api.py capabilities`,
+codex plugin add agamemnon@personal
+python3 ~/plugins/agamemnon/scripts/agamemnon_api.py capabilities`,
   },
   claude: {
     label: 'Claude Agent',
@@ -3664,13 +3664,13 @@ python3 ~/plugins/odysseus/scripts/odysseus_api.py capabilities`,
     defaultName: 'Claude Agent',
     pluginPath: '/api/claude/plugin.zip',
     setupDescription: 'Downloads a plugin bundle and registers it.',
-    buildSetup: (origin, token) => `export ODYSSEUS_URL=${origin}
-export ODYSSEUS_API_TOKEN='${token}'
+    buildSetup: (origin, token) => `export AGAMEMNON_URL=${origin}
+export AGAMEMNON_API_TOKEN='${token}'
 CLAUDE_DIR="\${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 mkdir -p "$CLAUDE_DIR"
-curl -fsSL -H "Authorization: Bearer $ODYSSEUS_API_TOKEN" "$ODYSSEUS_URL/api/claude/plugin.zip" -o /tmp/odysseus-claude-skill.zip
-python3 -m zipfile -e /tmp/odysseus-claude-skill.zip "$CLAUDE_DIR/"
-python3 "$CLAUDE_DIR/skills/odysseus/scripts/odysseus_api.py" capabilities`,
+curl -fsSL -H "Authorization: Bearer $AGAMEMNON_API_TOKEN" "$AGAMEMNON_URL/api/claude/plugin.zip" -o /tmp/agamemnon-claude-skill.zip
+python3 -m zipfile -e /tmp/agamemnon-claude-skill.zip "$CLAUDE_DIR/"
+python3 "$CLAUDE_DIR/skills/agamemnon/scripts/agamemnon_api.py" capabilities`,
   },
 };
 

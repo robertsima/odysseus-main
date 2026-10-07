@@ -118,7 +118,7 @@ function _filterPool(start, end) {
 // something and cancels whatever scheduled task is running; a person coming
 // back to the tab is already reported by the interactive activity heartbeat
 // (static/app.js), so this loses no real signal.
-const _CAL_PASSIVE_HEADERS = { 'X-Odysseus-Poll': '1' };
+const _CAL_PASSIVE_HEADERS = { 'X-Agamemnon-Poll': '1' };
 
 async function _fetchEvents(start, end, force, passive) {
   if (!force && _rangeIsCached(start, end)) {

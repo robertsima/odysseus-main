@@ -1,6 +1,6 @@
 # Cookbook serve: debugging a failing model launch
 
-The Cookbook routes reproduce what a person does in Odysseus > Cookbook: read which serves run, read their output to find why one crashed, change the launch command, relaunch, stop a stuck one. All routes are under `/api/codex/cookbook/`. Helper: `~/.claude/skills/odysseus/scripts/odysseus_api.py`.
+The Cookbook routes reproduce what a person does in Agamemnon > Cookbook: read which serves run, read their output to find why one crashed, change the launch command, relaunch, stop a stuck one. All routes are under `/api/codex/cookbook/`. Helper: `~/.claude/skills/odysseus/scripts/odysseus_api.py`.
 
 ## Routes
 

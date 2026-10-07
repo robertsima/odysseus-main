@@ -24,7 +24,7 @@ def _git_library_available() -> tuple[bool, str]:
 def _cookbook_server_configured() -> tuple[bool, str]:
     """A remote Cookbook server (Cookbook › Servers) can serve models, too.
 
-    Serving usually happens on a GPU box over SSH, not in the Odysseus
+    Serving usually happens on a GPU box over SSH, not in the Agamemnon
     container, so a runtime binary on this host's PATH is not the only way to
     satisfy the capability. Read from the saved Cookbook state without a
     request; an unreadable file counts as no server.

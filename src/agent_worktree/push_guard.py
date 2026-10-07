@@ -12,11 +12,11 @@ Detection is deliberately narrow in two directions:
 * Only commands that contact a remote are matched. Local work (``status``,
   ``diff``, ``add``, ``commit``, ``branch``, ``switch``) must keep working
   normally, because that is how the agent is supposed to prepare a change.
-* Only the **Odysseus** checkout is redirected to ``manage_agent_worktree``.
+* Only the **Agamemnon** checkout is redirected to ``manage_agent_worktree``.
   That tool publishes one repository — the configured ``ODYSSEUS_AGENT_REPO`` —
   so pointing a push in some other project at it is worse than useless. In the
   2026-09-10 logs a push in ``/app/data/development/dog-trainer`` was redirected
-  there, and the agent dutifully created an Odysseus worktree branch called
+  there, and the agent dutifully created an Agamemnon worktree branch called
   ``agent/odysseus/umni-publish``, removed it, hunted for a GitHub integration,
   and reported the work done without publishing anything. A third-party
   repository gets guidance about *itself*, and is left alone entirely when it
@@ -99,7 +99,7 @@ def _github_hosts() -> set:
 FETCH_AUTH_HINT = (
     "The shell has no GitHub credential: no SSH key, no token, no terminal to prompt at. "
     "Fetch or pull with manage_git (action fetch, fetch_branch or pull): it reaches GitHub over "
-    "HTTPS with Odysseus's GitHub connection, git@github.com: remotes included. Publish with "
+    "HTTPS with Agamemnon's GitHub connection, git@github.com: remotes included. Publish with "
     "manage_agent_worktree. Do not report the repository as unreachable because of this error."
 )
 
@@ -189,7 +189,7 @@ def _is_inside(path: str, root: str) -> bool:
 
 
 def is_odysseus_repository(path: str, cfg=None) -> bool:
-    """True when `path` is the Odysseus checkout manage_agent_worktree owns,
+    """True when `path` is the Agamemnon checkout manage_agent_worktree owns,
     or one of the worktrees it creates from that checkout."""
     try:
         from src.agent_worktree.config import load_config
@@ -376,7 +376,7 @@ def guidance(kind: str) -> str:
         "credential, and it opens a draft pull request after a human approves:",
         "",
         '  1. manage_agent_worktree {"action": "start", "name": "<short-task-name>"}',
-        "     (add \"repository\" and \"base\" for a checkout other than Odysseus).",
+        "     (add \"repository\" and \"base\" for a checkout other than Agamemnon).",
         "     Work inside the worktree path it returns, not in any other checkout.",
         '  2. manage_agent_worktree {"action": "commit", "message": "..."}',
         '  3. manage_agent_worktree {"action": "request_publish", "title": "...", "body": "..."}',
@@ -403,19 +403,19 @@ def guidance(kind: str) -> str:
 
 
 def foreign_repository_guidance(kind: str, repo: str) -> str:
-    """Guidance for a publish command in a repository that is NOT Odysseus.
+    """Guidance for a publish command in a repository that is NOT Agamemnon.
 
     ``manage_agent_worktree`` publishes exactly one repository. Naming it here
-    sends the agent to create an Odysseus branch for someone else's project,
+    sends the agent to create an Agamemnon branch for someone else's project,
     which is what happened on 2026-09-10, so this message deliberately tells it
     not to.
     """
     try:
         from src.agent_worktree.config import load_config
 
-        slug = load_config().repo_slug or "the Odysseus repository"
+        slug = load_config().repo_slug or "the Agamemnon repository"
     except Exception:
-        slug = "the Odysseus repository"
+        slug = "the Agamemnon repository"
     remote = _remote_url(repo)
     store = empty_credential_store(repo)
     what = "Pushing to a remote" if kind == "git-push" else "Creating a pull request or release"
@@ -435,8 +435,8 @@ def foreign_repository_guidance(kind: str, repo: str) -> str:
     lines = [
         first,
         "",
-        f"This is NOT the Odysseus checkout, so manage_agent_worktree cannot publish it — "
-        f"without a repository argument that tool pushes {slug}. Do not start an Odysseus "
+        f"This is NOT the Agamemnon checkout, so manage_agent_worktree cannot publish it — "
+        f"without a repository argument that tool pushes {slug}. Do not start an Agamemnon "
         "worktree for this work; it would create a branch in the wrong repository. (A "
         "human-approved publish of this project is possible only from a worktree started "
         f"with repository={repo!r}, if the operator's publishing credential can reach it.)",
@@ -460,13 +460,13 @@ def foreign_repository_guidance(kind: str, repo: str) -> str:
         "on the next attempt.",
         "",
         "Do not retry the push and do not look for a GitHub integration or API token in "
-        "Odysseus; the one that exists publishes only " + slug + ".",
+        "Agamemnon; the one that exists publishes only " + slug + ".",
     ]
     return "\n".join(lines)
 
 
 def _names_agent_branch(command: object) -> bool:
-    """A push of an ``agent/odysseus/*`` branch is Odysseus work wherever it
+    """A push of an ``agent/odysseus/*`` branch is Agamemnon work wherever it
     is typed — the branch prefix is the tool's own namespace."""
     try:
         from src.agent_worktree.config import BRANCH_PREFIX

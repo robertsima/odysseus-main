@@ -21,7 +21,7 @@ Turn messy intent into a small, realistic Todoist plan that connects values to d
 6. **Write each task as a next action**: a verb-led title, visible, concrete, easy to start. Add a due date only when it helps, a priority only when it changes behavior, and a description for context, acceptance criteria, links or a checklist.
 7. **Fit capacity.** One day holds 1-3 anchor tasks, 2-5 small tasks and an explicit buffer. Label the excess later, parking lot or waiting.
 8. **Create tasks only when the user asked or clearly consented.** Otherwise present the proposed list first.
-9. After creating dated tasks, tell the user Odysseus Calendar shows them after Todoist calendar sync.
+9. After creating dated tasks, tell the user Agamemnon Calendar shows them after Todoist calendar sync.
 
 ## Leverage checks
 

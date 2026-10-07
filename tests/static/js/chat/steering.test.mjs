@@ -97,7 +97,7 @@ test('the lifecycle poll promotes an injected steer and marks itself as a poll',
   await waitFor(() => !steerBubble(id).classList.contains('msg-user-steered'), { what: 'the promotion', timeout: POLL_WAIT });
 
   assert.ok(pollHeaders.length > 0);
-  assert.ok(pollHeaders.every((h) => h['X-Odysseus-Poll'] === '1'), JSON.stringify(pollHeaders));
+  assert.ok(pollHeaders.every((h) => h['X-Agamemnon-Poll'] === '1'), JSON.stringify(pollHeaders));
   await endTurn(stream);
 });
 

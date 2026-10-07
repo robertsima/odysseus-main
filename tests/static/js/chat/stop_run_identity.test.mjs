@@ -75,7 +75,7 @@ test('Stop before the headers arrive sends nothing, then fires with the exact ru
   const response = reply.headers('run-9');
   await page.waitFor(() => stopRequests().length === 1, { what: 'the exact Stop' });
   assert.equal(stopRequests()[0].method, 'POST');
-  assert.equal(stopRequests()[0].headers['X-Odysseus-Run-Id'], 'run-9');
+  assert.equal(stopRequests()[0].headers['X-Agamemnon-Run-Id'], 'run-9');
   await page.waitFor(() => chatPost().signal.aborted, { what: 'the reader to abort' });
   response.release();
   await sending;
@@ -92,7 +92,7 @@ test('the reply timeout before the headers arrive also waits for the run id', as
 
   const response = reply.headers('run-timeout');
   await page.waitFor(() => stopRequests().length === 1, { what: 'the exact Stop' });
-  assert.equal(stopRequests()[0].headers['X-Odysseus-Run-Id'], 'run-timeout');
+  assert.equal(stopRequests()[0].headers['X-Agamemnon-Run-Id'], 'run-timeout');
   assert.equal(chatPost().signal.aborted, true);
   response.release();
   await sending;

@@ -808,7 +808,7 @@ function _personaNameForTurn() {
     fetch(`/api/chat/stop/${encodeURIComponent(sessionId)}`, {
       method: 'POST',
       credentials: 'same-origin',
-      headers: { 'X-Odysseus-Run-Id': runId },
+      headers: { 'X-Agamemnon-Run-Id': runId },
     }).catch(() => {});
   }
 
@@ -1510,7 +1510,7 @@ function _personaNameForTurn() {
           // This is a reconciliation timer, not user activity. Without the
           // marker the foreground keepalive middleware can mistake it for a
           // user interaction and interfere with detached work.
-          headers: { 'X-Odysseus-Poll': '1' },
+          headers: { 'X-Agamemnon-Poll': '1' },
         });
         if (res.ok) {
           const status = await res.json();
@@ -2661,7 +2661,7 @@ function _personaNameForTurn() {
         return;
       }
       _approvalDelivered = true;
-      const streamRunId = res.headers.get('X-Odysseus-Run-Id') || '';
+      const streamRunId = res.headers.get('X-Agamemnon-Run-Id') || res.headers.get('X-Odysseus-Run-Id') || '';
       if (streamRunId) _rememberStreamRunId(streamSessionId, streamRunId, streamGeneration);
 
       // Mark the chat log busy while streaming so screen readers wait for the
@@ -5659,7 +5659,7 @@ function _personaNameForTurn() {
       return false;
     }
     if (!res.ok || !res.body) return false;
-    const resumeRunId = res.headers.get('X-Odysseus-Run-Id') || '';
+    const resumeRunId = res.headers.get('X-Agamemnon-Run-Id') || res.headers.get('X-Odysseus-Run-Id') || '';
     if (resumeRunId) _streamRunIds.set(sessionId, resumeRunId);
 
     const box = document.getElementById('chat-history');

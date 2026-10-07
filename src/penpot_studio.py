@@ -761,7 +761,7 @@ async def move_shapes(client: PenpotClient, file_id: str, page_id: str,
 async def _get(url: str, *, params: Optional[dict] = None, timeout: float = 20.0) -> httpx.Response:
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True,
-                                     headers={"User-Agent": "Odysseus-PenpotStudio/1.0"}) as http:
+                                     headers={"User-Agent": "Agamemnon-PenpotStudio/1.0"}) as http:
             resp = await http.get(url, params=params)
     except httpx.HTTPError as exc:
         raise PenpotError(f"could not fetch {url}: {type(exc).__name__}: {exc}") from exc
@@ -963,7 +963,7 @@ async def fetch_svg_url(url: str, max_bytes: int = 2_000_000) -> str:
     """Fetch a public SVG. Redirects are followed by hand so each hop is
     re-validated (a public URL must not bounce us to an internal one)."""
     async with httpx.AsyncClient(timeout=20.0, follow_redirects=False,
-                                 headers={"User-Agent": "Odysseus-PenpotStudio/1.0"}) as http:
+                                 headers={"User-Agent": "Agamemnon-PenpotStudio/1.0"}) as http:
         for _ in range(5):
             await _assert_public(url)
             try:

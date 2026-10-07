@@ -339,7 +339,7 @@ export function mountLoadoutsEditor(container, { profiles: initial = [], canEdit
       const match = (r.headers.get('Content-Disposition') || '').match(/filename="?([^";]+)"?/);
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      a.download = match ? match[1] : 'odysseus-agent-profiles.json';
+      a.download = match ? match[1] : 'agamemnon-agent-profiles.json';
       a.click();
       URL.revokeObjectURL(a.href);
       say('Export downloaded');

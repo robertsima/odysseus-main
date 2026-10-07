@@ -2,7 +2,7 @@
 
 The document is deliberately small and versioned::
 
-    {"format": "odysseus-agent-profiles", "version": 1,
+    {"format": "agamemnon-agent-profiles", "version": 1,
      "exported_at": "2026-09-23T12:00:00Z", "profiles": [...]}
 
 Each entry in ``profiles`` is exactly what
@@ -39,7 +39,8 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from src import agent_loadouts, agent_profiles
 
-FORMAT = "odysseus-agent-profiles"
+FORMAT = "agamemnon-agent-profiles"
+LEGACY_FORMAT = "odysseus-agent-profiles"
 VERSION = 1
 MODES = ("merge", "replace")
 _TEXT_FIELDS = ("description", "instructions", "persona_name")
@@ -111,7 +112,7 @@ def export_profiles(names: Any = None) -> Dict[str, Any]:
 def _check_document(doc: Any) -> List[Any]:
     if not isinstance(doc, dict):
         raise ValueError("import: expected a JSON object")
-    if doc.get("format") != FORMAT:
+    if doc.get("format") not in (FORMAT, LEGACY_FORMAT):
         raise ValueError(f"import: not an agent profile export (format must be {FORMAT!r})")
     version = doc.get("version")
     if isinstance(version, bool) or version != VERSION:

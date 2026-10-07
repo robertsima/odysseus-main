@@ -1,10 +1,10 @@
 """Safe delegation to a locally installed Claude Code CLI.
 
-Odysseus never talks to Anthropic itself on this path. It runs the unmodified
+Agamemnon never talks to Anthropic itself on this path. It runs the unmodified
 ``claude`` binary in headless (``-p``) mode inside an approved Git checkout,
 with the operator's own Claude login or API key doing the authentication. The
 harness never reads, stores, or forwards those credentials: the only thing it
-hands the child is (optionally) a scoped *Odysseus* token so Claude can call
+hands the child is (optionally) a scoped *Agamemnon* token so Claude can call
 back into this instance during the job. The child's environment is an
 allowlist (``_base_child_environment``), not the server's: no GitHub or other
 server credentials reach it, deletes/force/remote commands are denied with
@@ -13,7 +13,7 @@ server credentials reach it, deletes/force/remote commands are denied with
 Two ways in:
 
 * the admin chat tool ``delegate_to_claude_code`` (this module's
-  :class:`ClaudeCodeTool`), which the primary Odysseus agent calls, and
+  :class:`ClaudeCodeTool`), which the primary Agamemnon agent calls, and
 * ``/api/claude-code/tasks`` (routes/claude_code_routes.py) for automation.
 
 Both share the per-repository locks, the process limit, the task runner, and
@@ -97,9 +97,9 @@ _SAFE_TEST_RUNNERS = (r"pytest|python -m pytest|npm test|pnpm test|yarn test"
                       r"|npx tsc --noEmit"
                       r"|(?:\./gradlew|gradle) (?:test|check|build)"
                       r"|(?:\./mvnw|mvn) (?:test|verify|compile)")
-# The bundled Odysseus skill helper (clients/claude/skills/odysseus/
+# The bundled Agamemnon skill helper (clients/claude/skills/odysseus/
 # scripts/odysseus_api.py). Allowing it lets a delegated Claude session call
-# back into Odysseus through the scope-gated /api/codex/* API — the only
+# back into Agamemnon through the scope-gated /api/codex/* API — the only
 # way the "bidirectional" half of the integration can work inside one job.
 # Anchored to that exact script path so the rule cannot widen into
 # arbitrary python.
@@ -640,7 +640,7 @@ def project_test_rules(repository: Any) -> tuple[list[str], list[str]]:
 
 
 def default_tools() -> list[str]:
-    """The default allowlist, plus the Odysseus callback helper when the
+    """The default allowlist, plus the Agamemnon callback helper when the
     callback is configured (otherwise the helper is unreachable and Claude
     would only ever see a denial)."""
     tools = list(DEFAULT_TOOLS)
@@ -697,7 +697,7 @@ _CHILD_ENV_EXACT = frozenset({
 # Locale categories (LC_ALL, LC_CTYPE, ...) and Claude Code's own
 # CLAUDE_CODE_* switches (CLAUDE_CODE_MAX_OUTPUT_TOKENS, ...).
 _CHILD_ENV_PREFIXES = ("LC_", "CLAUDE_CODE_")
-# CLAUDE_CODE_* names that are *Odysseus* configuration, not Claude Code's:
+# CLAUDE_CODE_* names that are *Agamemnon* configuration, not Claude Code's:
 # the child has no use for them, and the token-file path points at the
 # callback credential.
 _ODYSSEUS_CLAUDE_CODE_VARS = frozenset({
@@ -725,7 +725,7 @@ def _base_child_environment() -> dict[str, str]:
     Deliberately absent: every GitHub credential (GITHUB_*, GH_TOKEN,
     ODYSSEUS_AGENT_GITHUB_TOKEN, GIT_ASKPASS, SSH_AUTH_SOCK, GIT_CONFIG_*
     credential helpers). Claude commits in the local checkout only;
-    publishing goes through Odysseus' own human-gated path
+    publishing goes through Agamemnon' own human-gated path
     (manage_agent_worktree request_publish/publish), so the child never
     authenticates to GitHub. :data:`DISALLOWED_TOOLS` denies the matching
     commands.
@@ -743,7 +743,7 @@ def _claude_environment() -> dict[str, str]:
 
     Starts from :func:`_base_child_environment` — an allowlist, never
     ``os.environ``. A deployment may give delegated Claude sessions scoped
-    access back to Odysseus with a private token file. Keeping the token out
+    access back to Agamemnon with a private token file. Keeping the token out
     of argv avoids process-list exposure; the child receives it only in its
     environment (it is scoped to the /api/codex/* callback, which is the
     point of handing it over).
@@ -1052,7 +1052,7 @@ def _parse_args(args: dict, tool_name: str = _DEFAULT_TOOL_NAME) -> dict:
         test_rules, test_commands = project_test_rules(repository)
         tools = tools + [rule for rule in test_rules if rule not in tools]
         if test_commands:
-            prompt = (f"{prompt}\n\n[Odysseus] Test and build commands you may run in this checkout (the "
+            prompt = (f"{prompt}\n\n[Agamemnon] Test and build commands you may run in this checkout (the "
                       f"shell starts at its root): {', '.join(f'`{c}`' for c in test_commands[:12])}. "
                       "Other commands that run code are denied; run the relevant checks before you finish "
                       "and say which, if any, you could not run.")
@@ -1392,7 +1392,7 @@ def _save_binary_setting(path: Path) -> Optional[str]:
 
 
 async def _other_installs(binary: Path, env: dict, extra: tuple = ()) -> list[dict]:
-    """Claude Code installs Odysseus knows about that ``binary`` is not: the
+    """Claude Code installs Agamemnon knows about that ``binary`` is not: the
     image default, the native launcher, and a path just rebound away from.
     Reported, never deleted — the admin decides."""
     found: list[dict] = []
@@ -1691,7 +1691,7 @@ async def status_report() -> dict:
 
     This is the preflight the 2026-09-10 test lacked: it says whether Claude
     Code is installed, signed in, which repositories it may work in, and
-    whether the callback into Odysseus is configured — in one call.
+    whether the callback into Agamemnon is configured — in one call.
     """
     binary = binary_path()
     info = await binary_info(binary)

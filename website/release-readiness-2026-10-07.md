@@ -1,69 +1,72 @@
 # Release readiness review: 7 October 2026
 
-## Decision
+## Decision and provenance
 
-**Release remains blocked.** Confirmed archive and configuration defects are repaired. Local regressions and fresh-process browser contracts have observed evidence. A stock Docker/healthy-vector installation and credential-backed first model/external integrations are not verified. Remaining identifier migration/branding inventory is not complete. This report is not approval to publish or deploy.
+**Ready for independent review, not cleared for public release.** Local archive/configuration/UI defects have repairs and regressions. Stock-container startup with healthy vector retrieval, live provider/integration credentials and native packages remain release gates.
 
-Source: `/app/data/development/odysseus-main`. Worktree: `/app/data/agent_worktrees/release-readiness`, branch `agent/odysseus/release-readiness`, integration base `origin/dev` at `c50e6511d91ac14438f2aa27219f541cdb8258a2`. Dirty source work was preserved. Final SHA and capture provenance are in the handoff and `.visual-check/<SHA>/manifest.json`; they cannot be embedded here without changing that SHA.
+Repository: `/app/data/development/odysseus-main`. Worktree: `/app/data/agent_worktrees/release-readiness`. Branch: `agent/odysseus/release-readiness`. Base: `origin/dev`, `c50e6511d91ac14438f2aa27219f541cdb8258a2`. Source dirty work was preserved. No live data/config/loadouts were changed. No publish request, push, deploy or merge was made.
 
-## Criterion outcomes
+The final tested source commit is the commit containing this report. Exact SHA, final full-suite result, capture times, runtime startup log and diff are recorded under `.visual-check/<that SHA>/verification.txt` and `manifest.json`. This avoids a self-referential SHA in a tracked report. Earlier full results are not evidence for that final commit: `4666ad9d` had 11,076 Python passes; `b6761b18` had 11,089. The final lane runs after this report is committed. Read its `full.log` and `full.exit`, not the earlier counts.
 
-| Criterion | Outcome and evidence |
+## Seven criterion outcomes
+
+| Criterion | Outcome and observed checks |
 |---|---|
-| Phalanx represents agents coherently | Repaired root-only archive, which exposed children as roots. UI shows roots and children and archives/restores units. Real backend capture checks six live rows become zero live rows, six archived rows and six restored rows. `test_archive_takes_the_unit.py` and `test_unit_archive_atomic.py` cover restart lineage, pending approvals after finished turns, transactional write rollback, nested independently archived units and concurrent worker launch. |
-| Functionality, UI and reliability | Representative fresh-account panels, keyboard activation/focus, attachments, login and streaming chat are checked. Existing broader regression lane plus focused browser contracts cover owner isolation and error paths. One pre-existing strict browser xfail remains: nested Markdown fences render incorrectly (`tests/static/index/test_live_chat.py:72`). This is a release issue, not a green browser result. |
-| Agamemnon theme and fonts | New account defaults to Agamemnon/Space Grotesk. Login, composer, Brain/Skills, Workbench and Phalanx use the selected UI font. Saved explicit preferences remain supported. Chromium tests cover 1440/390 widths; captures add 700. Website palette and product title updated. Desktop Tk launcher text/palette updated; native launcher rendering is not available in this headless Linux runtime. |
-| Rename product references | Main UI, agent identity/domain prompts, reminder persona labels, launcher, generated research reports, primary guides and Claude integration instructions updated. Historical evidence, remote repository paths and persisted identifiers still contain old strings. Canonical env/header aliases are implemented for principal runtime boundaries, but the complete plugin/executable/browser-key migration inventory remains open. CI deployment image name is unchanged. |
-| Blank slate | Real subprocess uses fresh temporary app data, no personal notes/memory/sessions/loadouts. Normal seeded suggested skills remain. Blank API responses/startup are checked. Separate fresh subprocess provisions a local scripted OpenAI-compatible endpoint and verifies streaming/saved reply and worker handback through browser tests. This proves the harness contract, not model quality or live provider access. Healthy ChromaDB and stock Compose are blocked by unavailable Docker/server runtime. |
-| Decouple operator-specific setup | Pi worker root/script/acceptance-note paths are operator settings, not `D:/Development`/AI Mind assumptions. Repository integration base follows discovered default/main/trunk when unsaved, not `dev`. Built-in skills were scanned for Robert/AI Mind/Vault Mind/hardcoded development paths; no such defaults found. Historical diagnostic anecdotes are not configuration or blank-slate proof. Windows Pi needs an operator-provided SSH host and installation paths; no Windows host was accessed. |
-| Environment cognitive complexity | Shared Public URL defaults for OAuth, derived GitHub API base, canonical env aliases and Compose forwarding reduce duplicate address settings. MCP provider creation resolves saved Public URL at request time instead of freezing import-time env. Invalid GitHub host raises before credential routing, never falls back to public GitHub. Contract regressions verify all legacy Compose env names have canonical forwarding. |
+| Phalanx accurately represents agents | PASS locally. Durable parent/child grouping, unit archive/restore and restart ancestry are covered. Real isolated backend captures show a parent plus five children: six live rows, zero live after archive, six archived, six restored. Pending approvals after a finished turn, failed writes, independently archived nested descendants and child-launch races have regressions. |
+| Functionality/UI/reliability sweep | PASS for local tested scenarios, release-gated for external services. Fresh-process sign-in, streaming/persisted model reply, worker handback, major-panel keyboard/focus, attachments and owner/error paths are checked. The nested Markdown fence defect is repaired; its former strict browser xfail is now a passing assertion. Full regression evidence is keyed to the final commit. This is not an exhaustive accessibility or external-service certification. |
+| Agamemnon theme and fonts | PASS on browser default/saved-choice scenarios. Agamemnon/Space Grotesk at 1440/700/390; login, composer, Brain/Skills, Workbench, Phalanx, Settings and selected-font persistence. Standalone OAuth pages now share hosted Space Grotesk, charcoal/gold palette and focus outlines. Native launcher rendering/build is unverified here. |
+| Product rename | Canonical UI/prompt/setup/export branding and compatibility bridges implemented. Profile/plugin imports accept both versions of the format name; new downloads/setup use Agamemnon. Browser preference migration, plugin global alias, CLI dispatcher, client ZIP canonical/legacy paths, header aliases and portable executable alias are covered below. CI deployment image is unchanged. Historical audits, old inputs and internal identifiers remain explicitly documented, not exempted as current product branding. |
+| Blank slate | PASS for isolated local startup and model protocol contracts; blocked for healthy-vector/live-model stock installation. Fresh temporary app storage has no personal sessions/notes/memory/profiles. Suggested skills are seeded by ordinary startup, not copied from personal data. A separate scripted model tests streaming, save/reload and worker return. It does not prove model quality or actual provider authorization. |
+| Operator-specific coupling | Removed Pi drive/script/vault/hardware assumptions; operator settings replace them. Repository base follows discovery rather than assuming dev. Client guidance uses configured directories instead of named personal vaults. No personal notes/memory/saved agent skills are used as blank-slate evidence. Windows execution remains credential/environment-gated. |
+| Environment complexity | Canonical forwarding in CPU/NVIDIA/AMD Compose; shared Public URL OAuth defaults; MCP resolves saved URL at provider creation; invalid GitHub host fails closed before credentials are routed. Environment conflicts favor canonical values; secret values are not logged. Contract tests cover forwarding, URL changes and invalid-host refusal. |
 
-## Archive safety boundary
+## Archive correctness
 
-`core.database.archive_session_unit` writes archive flags and `archived_with` settings in one transaction. A failed flush rolls back every row and no cached flag is changed. Missing/foreign rows and malformed settings fail closed. Independently archived children retain their earlier restore marker and are not taken by a later ancestor archive. Persisted restore was already transactional through `unarchive_sessions`; the earlier report incorrectly described restore as individual commits.
+`core.database.archive_session_unit` persists flags and `archived_with` markers in one transaction. Flush failure rolls back every row and leaves cache flags unchanged. Missing/foreign rows or invalid settings fail closed. Independently archived descendants retain their own unit marker and are not restored with a later ancestor unit. **Persisted restore was already transactional** through `unarchive_sessions`; the earlier report claiming individual restore commits was wrong.
 
-`src.agent_lifecycle.unit_lock` coordinates managed worker creation/registration, send-to-session child creation and busy registration, archive validation/commit, and restore. It is a process lock, consistent with the documented single-uvicorn-worker deployment; **multi-process deployment is not supported by this change**. No external model/tool await is held inside the critical sections. Archive checks `tool_approval_store.has_pending_for_session` for every target, not only activity telemetry. Pending expired/retired decisions follow the real approval store's cleanup semantics. Strict lineage read failure refuses the operation.
+`src.agent_lifecycle.unit_lock` coordinates managed worker creation/registration, send-to-session child creation/busy registration, archive validation/commit and restore. Archive queries the real approval store for every target, including finished turns. Expired/retired approvals follow store semantics. No model/tool await is held in the critical section. This is a process lock: the supported deployment is one app process, not multiple Uvicorn workers.
 
-Root/child grouping uses durable `parent_session` links in addition to live worker metadata. Archived intermediates are included when discovering nested descendants after restart. Restore chooses the root/ancestor unit and its marked descendants, retaining independently archived branches. Captures distinguish live-parent and archived-unit states; separate canned activity captures are labelled fixtures.
+Tests: `tests/routes/agents_routes/test_archive_takes_the_unit.py`, `test_unit_archive_atomic.py`, worker/send-to-session regressions. Captures distinguish real persisted unit ancestry from separately labelled canned activity fixtures.
 
-## UI fixes and contracts
+## UI and upgrade repairs
 
-Onboarding hints previously survived their owning panel and covered Calendar/Tasks. The hint now checks its panel is still visible after delayed scheduling and observes panel close to dismiss. Chromium regression closes Calendar, opens Tasks and verifies no stale hint remains. Browser tests activate Brain, Skills, Workbench and Phalanx from keyboard, check focused controls and Escape closure at desktop/mobile. Attachment preview add/remove is checked at both widths; backend upload ownership/vision tests run separately.
+- First-use hints are dismissed with their owning panel, including delayed scheduling. Notes help belongs to the Notes stacking context and cannot cover Brain. Browser checks use `elementFromPoint` for the reproduced overlay.
+- Markdown closing fences must be on their own line and at least as long as the opening fence. Nested shorter fences remain literal code. Unit tests cover inline backticks and longer closers; the real-process browser regression asserts one code block and marker placement.
+- Keyboard activates Brain/Skills/Workbench/Phalanx at desktop/mobile, checks control focus and Escape closure. Attachment previews add/remove at both widths; upload ownership/vision is tested separately.
+- [Upgrade contracts](brand-upgrade.md) enumerate canonical profile format, plugin bundle paths/global, client environment aliases, CLI dispatcher, Windows executable alias, local-storage migration, header compatibility, reminder personas and retained service/registry identities. Old imports and dummy credentials have local regressions. New client setup replaces either old/new marketplace entry rather than adding another configured product.
+- Stored data, Git registries, branch names and service identities are not globally rewritten. They remain supported transition inputs so an upgrade cannot create a second scheduler or strand approvals. Historical source references are preserved for audit provenance.
+- No dependency versions changed. Test dependencies were installed locally with `pip install -r requirements-test.txt`; frontend pinned packages were installed with `npm ci --prefer-offline`.
 
-The frontend is served without a bundler. Changed JS syntax and `git diff --check` are checked. `npm ci --prefer-offline` installed pinned dependencies; no dependency versions changed, so this branch does not introduce a dependency-reinstall requirement.
+## Checked locally
 
-## Configuration and upgrade behavior
+Final local focused runs before commit:
 
-- `src/env_aliases.py` maps `AGAMEMNON_*` to legacy internal reads before application configuration. Canonical value wins when both exist; no secret values are logged. Stock CPU/NVIDIA/AMD Compose files now forward canonical counterparts for all their legacy variables. `.env.example` documents this.
-- `APP_PUBLIC_URL` is the common OAuth origin, with integration-specific overrides retained. Both Google and MCP consult saved configuration; MCP builds redirect metadata dynamically. Existing already-registered OAuth clients may require reauthorization after origin changes.
-- `GITHUB_HOST` derives REST host when no explicit API base exists. Invalid host fails closed. Private enterprise/live credential validation requires credentials and was not attempted.
-- Internal calls emit `X-Agamemnon-Internal-Token`; server still accepts `X-Odysseus-Internal-Token` with the same loopback/token protections. Canonical owner/poll headers are accepted, and legacy aliases remain. Webhooks emit canonical and old event/signature headers for consumers upgrading separately.
-- Existing Claude workflow run names are recognized alongside new Agamemnon names. Existing persisted reminder persona ID `odysseus` now displays and prompts as Agamemnon; no existing scheduled task is stranded.
-- Remote repository URLs, artifact filenames, plugin globals, executable paths, browser storage keys and database integration IDs require explicit migration/aliases. They were not blindly rewritten. This is **remaining migration work**, not a blanket exemption from the requested rename. Only the CI deployment image was explicitly excluded by the user.
+- 156 profile/plugin/Markdown/client authorization tests passed; 261 client/header/email/scheduler contracts passed; 626 Git/Claude/Cookbook tests passed; 626 Git/Claude/environment/MCP contracts passed (overlapping groups, not additive unique coverage).
+- 13 Chromium live-chat/panels/font tests passed, including the former nested-fence xfail. Earlier browser failures were missing Playwright in a reset sandbox; installed test dependencies and the required-browser lane passed.
+- 14 Node migration/chat/poll tests passed; 14 theme/migration tests passed (overlap).
+- Shell script syntax, changed JS syntax and `git diff --check` checked.
 
-## Evidence and provenance
+Final full-lane and capture provenance is in the final commit's evidence directory. Capture command: `python .visual-check/capture.py`. It starts `python app.py` with isolated temporary storage, new account, loopback binding, MCP/pollers/tasks disabled; no live settings or data are read. Login/empty panels use a real backend; active-agent activity is separately marked as canned. Standalone OAuth HTML is rendered locally without performing authorization. Captures add desktop, 700px and mobile states and real unit archive/restore counts. Screenshots do not establish live integration behavior.
 
-Untracked `.visual-check` holds scripts/logs. `capture.py` launches `python app.py` in isolated storage with sign-in on, bind restricted to loopback, MCP/pollers/tasks disabled. It deletes temporary data on shutdown. No operator data/config/loadouts are touched. It captures login, blank slate, Phalanx, notes, tasks, Calendar, Brain, Workbench and Settings at 1440/700/390, plus real unit archive states. Manifest records source SHA, time, width and fixture distinction.
+## Reproducible release gates
 
-Focused resume checks:
+This sandbox has Docker CLI 29.6.2, but no usable daemon socket and no Compose plugin (`docker compose ...` reports unsupported flags). Python has `chromadb-client`, not a server. Do not call those missing checks passes.
 
-- 331 Python tests passed across archive, worker launch, send-to-session, OAuth/GitHub configuration and upload ownership.
-- 113 middleware/webhook/foreground-gate tests passed.
-- 8 Chromium login/chat/settings/font tests passed, 1 strict known xfail (nested Markdown fence).
-- 6 new Chromium panels/Skills/keyboard/onboarding/attachment tests passed. Final capture inspection found a second Notes-specific first-use overlay outside tourHints; it now belongs to the Notes pane stacking context, with an elementFromPoint regression proving Brain covers it.
-- Repaired full lane: 11,088 Python passed, 4 skipped, 3 xfailed; Node 520 passed, 2 TODO; exit 0. This precedes only the final Notes hint containment change, which has six Chromium passes and JS syntax checks. No claim is made that the full lane was run on that final hint change.
-- New archive write-fault test injects SQLAlchemy flush failure and verifies flags, markers and cache unchanged; concurrent launch waits for archive and then refuses the archived parent.
-- Canonical Compose forwarding, invalid GitHub URL rejection, saved Public URL provider metadata tested locally without external credentials.
+On an isolated Docker-capable test host, from this branch:
 
-The first resumed full lane failed: 58 failed, 11,030 passed, 4 skipped, 3 xfailed. Most failures were in-memory workflow tests exercising a missing persisted row; launch now rejects a durably archived row while leaving existing manager/ownership validation intact. The unit test for the new transaction boundary and the README guard were updated, and the bundled-skill history was regenerated so existing installs can upgrade unchanged skill bodies. The repaired workflow/database/skill group had 129 passes with one README markup expectation subsequently corrected. The final rerun is separate and must be read before accepting the commit.
+```sh
+# Use a new folder, never the operator's live app/log directories.
+export APP_DATA_DIR="$PWD/.release-sandbox/data"
+export APP_LOGS_DIR="$PWD/.release-sandbox/logs"
+export APP_BIND=127.0.0.1 APP_PORT=17000
+mkdir -p "$APP_DATA_DIR" "$APP_LOGS_DIR"
+docker compose -p agamemnon-release-check -f docker-compose.yml config --quiet
+docker compose -p agamemnon-release-check -f docker-compose.yml build
+docker compose -p agamemnon-release-check -f docker-compose.yml up -d
+docker compose -p agamemnon-release-check -f docker-compose.yml ps
+docker compose -p agamemnon-release-check -f docker-compose.yml logs --no-color chromadb odysseus
+```
 
-Historical full lane on `4666ad9d` was 11,076 Python passed, 4 skipped, 3 xfailed; Node 520 passed, 2 TODO. It is **not** evidence for the resumed changes or final HEAD. The final resumed full-lane output/result is in `resume-full-final.log`/`resume-full-final.exit` and the handoff. Failed attempts and corrected test setup are retained; successful claims are based on actual outputs, not delegation claims.
+Require healthy ChromaDB before accepting startup. Create a fresh account at `http://127.0.0.1:17000`, configure only a sandbox model, send a useful task, verify its persisted reply after reload, add a test note, index it and verify retrieval returns that note. Record model/server versions and commands alongside captures. Do not reuse production API tokens. Stop only the named test project after the check; no production volumes are involved.
 
-## Blockers and remaining release work
-
-1. Complete compatibility-aware rename: plugin/executable/browser-key aliases and remaining current product prose. Historical snapshots should be labelled as historical rather than falsified.
-2. Docker executable/daemon is absent here; installed package is `chromadb-client`, not a Chroma server. Stock Compose image build/start and healthy vector storage are therefore unverified. No live vector endpoint or app environment was read to bypass isolation.
-3. No live model/provider credentials were supplied. Scripted model proves protocol/stream/persistence/handoff contracts only. A useful first task with an actual model and healthy vector retrieval remains a release gate.
-4. External mail/calendar/Todoist/Penpot/Windows Pi live integrations need fresh-account credentials and sandbox services. Local owner/security/configuration regressions are evidence, not substitute live credentials.
-5. Repair pre-existing nested Markdown fence browser xfail. Formal contrast audit, every deep panel and native Windows/macOS launcher rendering are not complete.
-6. Parent arranges the single independent read-only review of the final commit and capture evidence. No additional reviewer/writer or publication request is created by this worktree.
+Other gates: fresh-account mail/calendar/Todoist/Penpot/Windows Pi credentials and sandbox services; native Windows/macOS package builds; formal contrast/accessibility checks; external plugin installation. Local tests establish owner/security/configuration contracts, not live authorization. The parent arranges exactly one read-only independent review of the final commit. No reviewer or new writer was started for this continuation.

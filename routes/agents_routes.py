@@ -999,7 +999,7 @@ def setup_agents_routes(session_manager) -> APIRouter:
             raise HTTPException(404, str(exc))
         stamp = document["exported_at"][:10]
         return JSONResponse(document, headers={
-            "Content-Disposition": f'attachment; filename="odysseus-agent-profiles-{stamp}.json"'})
+            "Content-Disposition": f'attachment; filename="agamemnon-agent-profiles-{stamp}.json"'})
 
     @router.post("/profiles/import")
     async def import_profiles(request: Request):

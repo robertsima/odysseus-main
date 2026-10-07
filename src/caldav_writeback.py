@@ -41,7 +41,7 @@ def build_event_ical(ev: dict) -> str:
     from icalendar.prop import vRecur
 
     cal = Calendar()
-    cal.add("prodid", "-//Odysseus//CalDAV write-back//EN")
+    cal.add("prodid", "-//Agamemnon//CalDAV write-back//EN")
     cal.add("version", "2.0")
 
     ve = iEvent()

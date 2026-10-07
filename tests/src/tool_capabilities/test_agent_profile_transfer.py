@@ -51,7 +51,7 @@ def test_export_is_a_versioned_document_of_validated_profiles(store):
                                   enabled_tools=["grep", "read_file"]),
                          _profile("Writer")]
     doc = agent_profile_transfer.export_profiles()
-    assert doc["format"] == "odysseus-agent-profiles"
+    assert doc["format"] == "agamemnon-agent-profiles"
     assert doc["version"] == 1
     assert doc["exported_at"].endswith("Z")
     assert [p["name"] for p in doc["profiles"]] == ["Reviewer", "Writer"]
@@ -220,7 +220,7 @@ async def test_tool_export_returns_the_document(tool_store):
     tool_store["profiles"] = [_profile("Reviewer"), _profile("Writer")]
     result = await manage_agent_loadout('{"action": "export", "names": ["Writer"]}', "c", owner="u")
     assert result["exit_code"] == 0
-    assert result["document"]["format"] == "odysseus-agent-profiles"
+    assert result["document"]["format"] == "agamemnon-agent-profiles"
     assert [p["name"] for p in result["document"]["profiles"]] == ["Writer"]
     missing = await manage_agent_loadout('{"action": "export", "names": ["Ghost"]}', "c", owner="u")
     assert missing["exit_code"] == 1
@@ -320,7 +320,7 @@ def test_export_route_downloads_json(client, store):
     store["profiles"] = [_profile("Reviewer"), _profile("Writer")]
     res = client.get("/api/agents/profiles/export?names=Reviewer")
     assert res.status_code == 200
-    assert res.headers["content-disposition"].startswith('attachment; filename="odysseus-agent-profiles-')
+    assert res.headers["content-disposition"].startswith('attachment; filename="agamemnon-agent-profiles-')
     assert [p["name"] for p in res.json()["profiles"]] == ["Reviewer"]
     assert client.get("/api/agents/profiles/export?names=Ghost").status_code == 404
 

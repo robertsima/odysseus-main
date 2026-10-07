@@ -74,9 +74,9 @@ def _stash_create_sync(path: Path, message=None):
             _fail("stash_too_large", "at most 1000 tracked paths can be stashed")
         try:
             oid = Stash(repo).push(
-                author=b"Odysseus Stash <odysseus@localhost>",
-                committer=b"Odysseus Stash <odysseus@localhost>",
-                message=(message or "Odysseus managed stash").strip().encode(),
+                author=b"Agamemnon Stash <odysseus@localhost>",
+                committer=b"Agamemnon Stash <odysseus@localhost>",
+                message=(message or "Agamemnon managed stash").strip().encode(),
                 config=repo.get_config(),
             )
         except Exception:

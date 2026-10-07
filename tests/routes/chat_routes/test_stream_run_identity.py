@@ -19,6 +19,7 @@ def test_the_stream_names_the_run_it_belongs_to(agent_turn):
 
     assert response.status_code == 200
     assert response.headers["X-Odysseus-Run-Id"]
+    assert response.headers["X-Agamemnon-Run-Id"] == response.headers["X-Odysseus-Run-Id"]
 
 
 def test_a_teacher_metrics_frame_keeps_its_marker(agent_turn):

@@ -64,6 +64,11 @@ VOICES = {
     "odysseus": "Composed and noble, a strategist's calm. Plain modern words.",
 }
 
+# Existing scheduled reminders retain their old id. New callers use the
+# canonical id; both resolve to the same voice without rewriting schedules.
+PERSONAS["agamemnon"] = PERSONAS["odysseus"]
+VOICES["agamemnon"] = VOICES["odysseus"]
+
 REMINDER_OPEN = "<<<REMINDER>>>"
 REMINDER_CLOSE = "<<<END>>>"
 

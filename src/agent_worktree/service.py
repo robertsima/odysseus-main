@@ -1603,8 +1603,8 @@ async def _snapshot_worktree(
     tmp_dir = os.path.join(cfg.state_dir, "tmp")
     os.makedirs(tmp_dir, exist_ok=True)
     index_file = os.path.join(tmp_dir, f"discard-{os.getpid()}-{time.time_ns()}.index")
-    ident = {"GIT_AUTHOR_NAME": "Odysseus", "GIT_AUTHOR_EMAIL": "odysseus@localhost",
-             "GIT_COMMITTER_NAME": "Odysseus", "GIT_COMMITTER_EMAIL": "odysseus@localhost"}
+    ident = {"GIT_AUTHOR_NAME": "Agamemnon", "GIT_AUTHOR_EMAIL": "agamemnon@localhost",
+             "GIT_COMMITTER_NAME": "Agamemnon", "GIT_COMMITTER_EMAIL": "agamemnon@localhost"}
     env = {"GIT_INDEX_FILE": index_file}
     try:
         head = await _head_sha(cfg, worktree)

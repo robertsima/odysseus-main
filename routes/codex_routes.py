@@ -246,9 +246,10 @@ def setup_codex_routes(
             for path in sorted(root.rglob("*")):
                 if path.is_dir() or "__pycache__" in path.parts or path.suffix == ".pyc":
                     continue
-                zf.write(path, Path("odysseus") / path.relative_to(root))
+                from src.client_bundle import add_client_member
+                add_client_member(zf, path, Path("odysseus") / path.relative_to(root))
         buf.seek(0)
-        headers = {"Content-Disposition": 'attachment; filename="odysseus-codex-plugin.zip"'}
+        headers = {"Content-Disposition": 'attachment; filename="agamemnon-codex-plugin.zip"'}
         return StreamingResponse(buf, media_type="application/zip", headers=headers)
 
     @router.get("/todos")
@@ -1031,9 +1032,10 @@ def setup_claude_routes() -> APIRouter:
             for path in sorted(skills_root.rglob("*")):
                 if path.is_dir() or "__pycache__" in path.parts or path.suffix == ".pyc":
                     continue
-                zf.write(path, path.relative_to(bundle_root))
+                from src.client_bundle import add_client_member
+                add_client_member(zf, path, path.relative_to(bundle_root))
         buf.seek(0)
-        headers = {"Content-Disposition": 'attachment; filename="odysseus-claude-skill.zip"'}
+        headers = {"Content-Disposition": 'attachment; filename="agamemnon-claude-skill.zip"'}
         return StreamingResponse(buf, media_type="application/zip", headers=headers)
 
     return router

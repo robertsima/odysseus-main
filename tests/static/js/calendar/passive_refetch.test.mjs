@@ -1,6 +1,6 @@
 // Calendar refetches nobody asked for in static/js/calendar.js: page boot, the
 // chat's calendar-refresh event, and the tab becoming visible again. They are
-// tagged X-Odysseus-Poll. Without the tag the server's foreground gate reads a
+// tagged X-Agamemnon-Poll. Without the tag the server's foreground gate reads a
 // background refetch as the person at the keyboard and cancels the scheduled
 // task that is running.
 import assert from 'node:assert/strict';
@@ -30,7 +30,7 @@ fake.route('GET', '/api/calendar/events', () => ({ events: [] }));
 
 await import('../../../../static/js/calendar.js');
 
-const poll = (fetches) => fetches.map((f) => f.headers['X-Odysseus-Poll']);
+const poll = (fetches) => fetches.map((f) => f.headers['X-Agamemnon-Poll']);
 
 test('the boot refetch of the current month is a poll', async () => {
   await waitFor(() => eventFetches.length >= 1, { what: 'the boot fetch' });

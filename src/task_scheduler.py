@@ -3288,6 +3288,9 @@ class TaskScheduler:
             msg["From"] = from_addr
             msg["To"] = to_addr
             msg["Subject"] = f"[Task] {task.name}"
+            msg["X-Agamemnon-Origin"] = "agamemnon-ui"
+            msg["X-Agamemnon-Kind"] = "task"
+            msg["X-Agamemnon-Ref"] = str(task.id)
             msg["X-Odysseus-Origin"] = "odysseus-ui"
             msg["X-Odysseus-Kind"] = "task"
             msg["X-Odysseus-Ref"] = str(task.id)
@@ -3766,6 +3769,9 @@ class TaskScheduler:
             "subject": f"[Task] {task.name}",
             "body": result,
             "headers": {
+                "X-Agamemnon-Origin": "agamemnon-ui",
+                "X-Agamemnon-Kind": "task",
+                "X-Agamemnon-Ref": str(task.id),
                 "X-Odysseus-Origin": "odysseus-ui",
                 "X-Odysseus-Kind": "task",
                 "X-Odysseus-Ref": str(task.id),

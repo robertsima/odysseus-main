@@ -1,13 +1,13 @@
 #Requires -Version 5.1
 <#
-  Build a portable Windows distribution for Odysseus.
+  Build a portable Windows distribution for Agamemnon.
 
   Output layout:
-    dist\Odysseus\Odysseus.exe
-    dist\Odysseus\static\...
-    dist\Odysseus\scripts\...
-    dist\Odysseus\mcp_servers\...
-    dist\Odysseus\services\hwfit\data\...
+    dist\Agamemnon\Agamemnon.exe
+    dist\Agamemnon\static\...
+    dist\Agamemnon\scripts\...
+    dist\Agamemnon\mcp_servers\...
+    dist\Agamemnon\services\hwfit\data\...
 
   The app then keeps using its normal filesystem layout when frozen.
 
@@ -63,10 +63,14 @@ $dataArgs = @(
     "--add-data", ".env.example;.env.example"
 )
 
-& $pyExe -m PyInstaller --noconfirm --clean --onedir --noconsole --icon=static/icon.ico --name Odysseus @dataArgs launcher.py
+& $pyExe -m PyInstaller --noconfirm --clean --onedir --noconsole --icon=static/icon.ico --name Agamemnon @dataArgs launcher.py
 if ($LASTEXITCODE -ne 0) { Fail "PyInstaller build failed." }
+
+# Existing shortcuts may keep the old executable name. Both names launch the
+# same program in the same portable directory; no data is moved by the build.
+Copy-Item "$PSScriptRoot\dist\Agamemnon\Agamemnon.exe" "$PSScriptRoot\dist\Agamemnon\Odysseus.exe"
 
 Write-Host ""
 Write-Host "Build complete." -ForegroundColor Green
-Write-Host "Portable app folder: $PSScriptRoot\dist\Odysseus" -ForegroundColor Green
+Write-Host "Portable app folder: $PSScriptRoot\dist\Agamemnon" -ForegroundColor Green
 Write-Host "Distribute the whole folder (or zip it) so static assets and scripts stay with the exe." -ForegroundColor Green
