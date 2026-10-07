@@ -252,6 +252,19 @@ def _caller_workspace(session_id: Optional[str]) -> Optional[str]:
 
 def _new_child_session(manager, parent_id: Optional[str], owner: Optional[str], message: str,
                        profile: Optional[Dict], workspace: Optional[str] = None) -> tuple:
+    from src.agent_lifecycle import unit_lock
+    from core.database import Session as DbSession, get_db_session
+    with unit_lock:
+        if parent_id:
+            with get_db_session() as db:
+                archived = db.query(DbSession.archived).filter(DbSession.id == parent_id).scalar()
+                if archived:
+                    return None, "Restore the parent chat before launching a worker"
+        return _create_child_session(manager, parent_id, owner, message, profile, workspace)
+
+
+def _create_child_session(manager, parent_id: Optional[str], owner: Optional[str], message: str,
+                          profile: Optional[Dict], workspace: Optional[str] = None) -> tuple:
     """Create a fresh chat for a delegated task. Returns ``(session, error)``.
 
     The child runs on the profile's model when it names one, else on the
@@ -681,7 +694,19 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
             # its agent turn is a child run, not a top-level chat's.
             from src.agent_control import child_run_scope
 
-            with agent_runs.track_external(target_sid, source="subagent", owner=owner), child_run_scope():
+            from contextlib import ExitStack
+            from src.agent_lifecycle import unit_lock
+            from core.database import Session as DbSession, get_db_session
+            with ExitStack() as running:
+                # Validation and busy registration are indivisible with archive.
+                # Release the lock before awaiting the model or external tools.
+                with unit_lock:
+                    with get_db_session() as db:
+                        archived = db.query(DbSession.archived).filter(DbSession.id == target_sid).scalar()
+                        if archived:
+                            raise ValueError("Restore the target chat before starting work")
+                    running.enter_context(agent_runs.track_external(target_sid, source="subagent", owner=owner))
+                    running.enter_context(child_run_scope())
                 if mode == "agent":
                     from src.headless_agent import run_headless
 

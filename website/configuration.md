@@ -1,6 +1,6 @@
 # Configuration: settings vs. environment
 
-Odysseus grew as a personal deployment on one NAS before this split existed, so
+Agamemnon grew as a personal deployment on one NAS before this split existed, so
 two configuration systems drifted apart: `data/settings.json` (94 keys, most
 with a UI control — see `src/settings.py` and `src/settings_schema.py`) and
 123 `ODYSSEUS_*` environment variables, only a handful of which have any UI at
@@ -65,7 +65,7 @@ right bar for these.
 
 No compose file in this repository uses `env_file`. `docker compose` reads
 `.env` for one purpose only: filling the `${...}` placeholders in the compose
-file. A variable reaches the Odysseus container **only if the odysseus
+file. A variable reaches the Agamemnon container **only if the odysseus
 service's `environment:` block names it**; anything else in `.env` is
 invisible to the app. Messages elsewhere in the app that say "add it to .env"
 are right for a native install and incomplete for Docker: there, the compose
@@ -214,9 +214,9 @@ Session cleanup is not configured through the environment.
 | `GITHUB_PERSONAL_ACCESS_TOKEN` | `src/github_credentials.py` | GitHub PAT shared by the permission-checked GitHub MCP and typed repository transport. Obvious non-GitHub tokens are rejected on GitHub.com. Secret. | PLACEMENT |
 | `GITHUB_HOST` | `src/github_credentials.py` | Optional GitHub Enterprise host. Leave unset for GitHub.com; typed repository transport is currently GitHub.com-only. | PLACEMENT |
 | `ODYSSEUS_GITHUB_MCP_WRITE` | `src/builtin_mcp.py:146` | Opt-in for the write-scoped GitHub MCP server and typed Git publish/remote-delete transport. Off by default and still bounded by each agent's `github_write` permission. | PLACEMENT |
-| `ODYSSEUS_API_TOKEN` | `src/agent_tools/claude_code_tools.py:385` | Auth token Odysseus mints and hands to a delegated Claude Code / Codex child process so it can call back into this Odysseus instance's API. Secret. | PLACEMENT |
-| `ODYSSEUS_URL` | `src/agent_tools/claude_code_tools.py:373` | Base URL of the running Odysseus instance, passed to the same delegated child process so it knows where to call back. | PLACEMENT |
-| `ODYSSEUS_INTERNAL_BASE` | `src/constants.py:126` | Explicit override for the internal base URL Odysseus uses to call its own API (e.g. behind a TLS-terminating proxy). | PLACEMENT |
+| `ODYSSEUS_API_TOKEN` | `src/agent_tools/claude_code_tools.py:385` | Auth token Agamemnon mints and hands to a delegated Claude Code / Codex child process so it can call back into this Agamemnon instance's API. Secret. | PLACEMENT |
+| `ODYSSEUS_URL` | `src/agent_tools/claude_code_tools.py:373` | Base URL of the running Agamemnon instance, passed to the same delegated child process so it knows where to call back. | PLACEMENT |
+| `ODYSSEUS_INTERNAL_BASE` | `src/constants.py:126` | Explicit override for the internal base URL Agamemnon uses to call its own API (e.g. behind a TLS-terminating proxy). | PLACEMENT |
 | `ODYSSEUS_INTERNAL_TOKEN` | `core/middleware.py:16` | Internal-only auth token for server-to-self calls; falls back to a random one generated at startup. Secret. | PLACEMENT |
 | `ODYSSEUS_TOOL_EXTRA_ROOTS` | `src/tool_execution.py:211` | Extra filesystem roots the agent's file tools may touch, beyond `DATA_DIR` and temp. Explicitly documented as "declared by the DEPLOYMENT rather than post-boot admin state" so a bind-mounted workspace arrives already permitted. | PLACEMENT |
 | `ODYSSEUS_TOOLCHAINS_DIR` | `src/toolchains.py` | Where the extra language toolchains for agent shells live (`node/<major>`, `java/<major>`, `maven`); the image puts them in `/opt/toolchains`, and the bash sandbox mounts that folder read-only. Override for a native install that keeps them elsewhere. | PLACEMENT |
@@ -318,8 +318,8 @@ CHOICE verdict:
    (`runner_lines.append("ODYSSEUS_SERVE_CMD='...'")`) and ship them to a local
    or remote host to run. The names inside those strings are local variables
    *of the generated shell script*, scoped to that one script's process. They
-   are never read via `os.environ` by Odysseus itself, and setting an actual
-   environment variable with the same name on the Odysseus host would do
+   are never read via `os.environ` by Agamemnon itself, and setting an actual
+   environment variable with the same name on the Agamemnon host would do
    nothing.
 2. **Output-parsing markers.** `src/agent_tools/subprocess_tools.py` builds a
    per-command marker string (`__ODYSSEUS_CMD_START_{stamp}__`) to find a
@@ -346,7 +346,7 @@ the 123-token count in the grep is fully accounted for.
 | `ODYSSEUS_HF_CLI` | `routes/cookbook_routes.py:1246` | Bash-script-local: resolved `hf`/`huggingface-cli` path in a generated download runner. |
 | `ODYSSEUS_INPAINT_BIN` | `routes/cookbook_routes.py:2610` | Bash-script-local: resolved inpaint binary path. |
 | `ODYSSEUS_INPAINT_DIR` | `routes/cookbook_routes.py:2612` | Bash-script-local: `dirname` of the above. |
-| `ODYSSEUS_MAIL_ORIGIN` | `routes/email_routes.py:70` | Hardcoded Python constant (`"odysseus-ui"`), not read from the environment. Used to tag outbound mail with `X-Odysseus-Origin`. |
+| `ODYSSEUS_MAIL_ORIGIN` | `routes/email_routes.py:70` | Hardcoded Python constant (`"odysseus-ui"`), not read from the environment. Used to tag outbound mail with the transitional `X-Odysseus-Origin` header. |
 | `ODYSSEUS_MLX_CMD_PY` | `routes/cookbook_routes.py:2428` | Bash-script-local: launch Python path in a generated MLX-LM serving runner. |
 | `ODYSSEUS_MLX_IMAGE_BIN_DIR` | `routes/cookbook_routes.py:2550` | Bash-script-local: bin directory derived from `ODYSSEUS_MLX_IMAGE_CMD_PY`. |
 | `ODYSSEUS_MLX_IMAGE_CMD_PY` | `routes/cookbook_routes.py:2539` | Bash-script-local: launch Python path for MLX image serving. |

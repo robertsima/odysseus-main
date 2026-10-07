@@ -377,7 +377,7 @@ def withheld_reason(tool: str, depth: Optional[int] = None, delegation_policy: O
     if tool in NESTABLE_LAUNCH_TOOLS:
         return ("it starts other workers, and a worker at this depth (or with delegation 'never') may not; "
                 f"agent_max_worker_depth is {limit}")
-    return ("it hands work to another chat or Odysseus agent, which a worker may never do; "
+    return ("it hands work to another chat or Agamemnon agent, which a worker may never do; "
             "do that part from the chat that starts the worker")
 
 

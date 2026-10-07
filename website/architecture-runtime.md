@@ -1,6 +1,6 @@
 # Architecture and runtime
 
-How Odysseus is assembled and what actually happens when a request arrives.
+How Agamemnon is assembled and what actually happens when a request arrives.
 This is the machine underneath the features, not the features themselves —
 for those, see the subsystem reference.
 
@@ -64,7 +64,7 @@ fire-and-forget task.
 | SearXNG | separate container | HTTP only; `SEARXNG_INSTANCE` |
 | ntfy | separate container | optional notification sink |
 
-MCP is the one place Odysseus spawns and supervises long-lived children.
+MCP is the one place Agamemnon spawns and supervises long-lived children.
 `src/builtin_mcp.py` registers built-in servers from `mcp_servers/` —
 `image_gen`, `memory`, `rag`, `email`, `todoist`, `lotus`, `pi_worker` — each
 launched as `sys.executable <script>` over stdio. Two more shapes exist beside
@@ -136,7 +136,7 @@ degrade rather than work.
 - **One uvicorn worker.** Nothing in the Dockerfile, the launchers or
   `app.py`'s `__main__` block passes `--workers`. The logging setup in
   `app.py` says so explicitly: `RotatingFileHandler` is not multi-process
-  safe, and "Odysseus is single-process by convention".
+  safe, and "Agamemnon is single-process by convention".
 - **Process-global singletons.** `SessionManager.sessions` is an in-memory
   dict of hydrated sessions; `agent_runs._RUNS` holds live streams;
   `chat_routes._active_streams` tracks in-flight saves. A second worker would

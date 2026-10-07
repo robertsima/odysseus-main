@@ -552,7 +552,7 @@ def apply_terminus_toolset(selected, *, query_matched, domains):
         if tool.startswith("mcp__") or tool in set(query_matched or set())
     }
     logger.info(
-        "[tool-rag] Workspace file/terminal request; using Odysseus Terminus "
+        "[tool-rag] Workspace file/terminal request; using Agamemnon Terminus "
         "toolset while preserving query-matched tools=%s",
         sorted(carried),
     )
@@ -603,7 +603,7 @@ def repair_starved_domains(relevant_tools, domains, disabled_tools,
       No re-selection can serve it, so it is returned to the caller, which
       tells the model plainly which capability is off.
 
-    Deliberate narrowing still wins: `allow_repair=False` for the Odysseus
+    Deliberate narrowing still wins: `allow_repair=False` for the Agamemnon
     fine-tune clamps (the small toolset IS the behaviour under test), and
     `protected` names domains pruned on purpose this turn (an open email draft
     drops the fetch tools so the agent edits the draft instead of re-reading
@@ -748,7 +748,7 @@ For LONG-running commands (package installs, pip/npm, ffmpeg, model downloads, t
 #!bg
 pip install openai-whisper
 ```
-SANDBOX LIMITS: stdin/stdout are pipes, so there is NO interactive terminal — `input()`, `curses`, `termios`, `pygame`, and `tkinter` will all fail. Don't try to RUN interactive terminal games or GUI apps here — verify syntax (`python -c "import py_compile; py_compile.compile('x.py')"`) and tell the user to run it themselves in their own terminal. For anything the USER should play/use interactively (games, UIs, demos), prefer a single self-contained HTML file with `<canvas>` + inline JS — save it via `create_document` with language="html" and tell the user to hit the Run / Preview button (▶) in the document editor toolbar; it renders inline in a sandboxed iframe so the game is playable right there. Works from any machine that can reach the Odysseus UI — no need to copy files out.
+SANDBOX LIMITS: stdin/stdout are pipes, so there is NO interactive terminal — `input()`, `curses`, `termios`, `pygame`, and `tkinter` will all fail. Don't try to RUN interactive terminal games or GUI apps here — verify syntax (`python -c "import py_compile; py_compile.compile('x.py')"`) and tell the user to run it themselves in their own terminal. For anything the USER should play/use interactively (games, UIs, demos), prefer a single self-contained HTML file with `<canvas>` + inline JS — save it via `create_document` with language="html" and tell the user to hit the Run / Preview button (▶) in the document editor toolbar; it renders inline in a sandboxed iframe so the game is playable right there. Works from any machine that can reach the Agamemnon UI — no need to copy files out.
 For multi-line Python use the `python` tool, not `python -c`.""",
 
     "python": """\
@@ -945,7 +945,7 @@ If the user asks for a reminder/alarm before the event, pass `reminder_minutes` 
 ```app_api
 {"action": "call", "method": "GET", "path": "/api/cookbook/gpus"}
 ```
-GENERIC LOOPBACK to allowed Odysseus internal endpoints. Use this whenever the user wants something the UI can do but there's NO named tool for it. Many UI buttons hit /api/* endpoints — you can hit allowed ones. Auth is handled automatically.
+GENERIC LOOPBACK to allowed Agamemnon internal endpoints. Use this whenever the user wants something the UI can do but there's NO named tool for it. Many UI buttons hit /api/* endpoints — you can hit allowed ones. Auth is handled automatically.
 
 **Discovery first.** If you're not sure of the path, call `{"action":"endpoints","filter":"<keyword>"}` (e.g. filter='calendar' or 'gallery' or 'theme') to list available endpoints with their methods + summaries. Then call with action='call'.
 
@@ -2354,7 +2354,7 @@ def _minimal_saved_memory_message(messages: List[Dict]) -> Optional[Dict]:
     return untrusted_context_message(
         "saved memory: minimal context",
         (
-            "Saved user memory facts from Odysseus Brain. These are the same "
+            "Saved user memory facts from Agamemnon Brain. These are the same "
             "user facts available in the normal prompt path. Use them when "
             "the user asks for personalization, identity, background, "
             "preferences, or anything about \"me\" or \"my\":\n"
@@ -2461,7 +2461,7 @@ def _minimal_recent_notes_tool_context_message(messages: List[Dict]) -> Optional
     return untrusted_context_message(
         "recent tool context",
         (
-            "Recent Odysseus tool context for follow-up references only. "
+            "Recent Agamemnon tool context for follow-up references only. "
             "Use concrete note ids, calendar event uids, and email UIDs from "
             "here when the user says that note/event/reminder/appointment/"
             "email/first one/that one/it:\n"
@@ -2492,13 +2492,13 @@ def _compact_email_draft_context(raw: str, *, max_own_chars: int = 1200, max_his
     if len(own) > max_own_chars:
         own = own[:max_own_chars].rstrip() + "\n...[draft body truncated]"
     if len(history) > max_history_chars:
-        history = history[:max_history_chars].rstrip() + "\n...[quoted history truncated; full history is preserved by Odysseus]"
+        history = history[:max_history_chars].rstrip() + "\n...[quoted history truncated; full history is preserved by Agamemnon]"
     if history:
         body_out = (
             f"{own}\n\n" if own else ""
         ) + (
             "QUOTED HISTORY EXCERPT FOR CONTEXT ONLY -- do not rewrite or include this excerpt in your tool output; "
-            "Odysseus preserves the full quoted thread below the reply automatically.\n"
+            "Agamemnon preserves the full quoted thread below the reply automatically.\n"
             f"{history}"
         )
     else:
@@ -2507,7 +2507,7 @@ def _compact_email_draft_context(raw: str, *, max_own_chars: int = 1200, max_his
 
 
 def _minimal_odysseus_doc_messages(messages: List[Dict], active_document, stream_create: bool = False) -> List[Dict]:
-    """Tiny prompt path for the Odysseus document LoRA.
+    """Tiny prompt path for the Agamemnon document LoRA.
 
     This model is trained on document tool behavior, so avoid the normal agent
     rule stack and send only the task plus the active document when editing.
@@ -2515,7 +2515,7 @@ def _minimal_odysseus_doc_messages(messages: List[Dict], active_document, stream
     latest = _extract_last_user_message(messages)
     if stream_create:
         system = (
-            "You are Odysseus. Create the requested document by streaming exactly one fenced block:\n"
+            "You are Agamemnon. Create the requested document by streaming exactly one fenced block:\n"
             "```document\n"
             "Title\n"
             "markdown\n"
@@ -2527,7 +2527,7 @@ def _minimal_odysseus_doc_messages(messages: List[Dict], active_document, stream
         )
     else:
         system = (
-            "You are Odysseus. Edit or suggest changes to the active document using exactly one fenced tool block when needed.\n"
+            "You are Agamemnon. Edit or suggest changes to the active document using exactly one fenced tool block when needed.\n"
             "The active document content is authoritative. Apply the user's request to that content; do not append the user's instruction as document text.\n"
             "Preserve the current title, language, structure, and existing meaning unless the user explicitly asks to change them.\n"
             "If the user asks for ALL CAPS/uppercase/lowercase, transform the existing document text itself.\n"
@@ -2559,7 +2559,7 @@ def _minimal_odysseus_doc_messages(messages: List[Dict], active_document, stream
             "Do not use native function-call JSON or <tool_calls> markup. "
             "FIND text must be copied exactly from the active document with no labels like content:, title:, or markdown. "
             "Use only the fenced tool blocks above. Do not write anything before the fenced block. "
-            "After the tool succeeds, Odysseus will answer Done."
+            "After the tool succeeds, Agamemnon will answer Done."
         )
     out = [{"role": "system", "content": system, "_agent_injected": "prompt"}]
     memory_message = _minimal_saved_memory_message(messages)
@@ -2614,14 +2614,14 @@ def _looks_like_notes_calendar_followup(text: str) -> bool:
 
 
 def _minimal_odysseus_notes_messages(messages: List[Dict]) -> List[Dict]:
-    """Tiny prompt path for Odysseus notes/calendar/tasks LoRAs.
+    """Tiny prompt path for Agamemnon notes/calendar/tasks LoRAs.
 
-    The finetune is trained to emit Odysseus notes/calendar/task tool calls
+    The finetune is trained to emit Agamemnon notes/calendar/task tool calls
     without receiving the full tool schema or saved-context wrapper stack.
     """
     latest = _extract_last_user_message(messages)
     system = (
-        "You are Odysseus. Handle notes, reminders, calendar events, and scheduled tasks.\n"
+        "You are Agamemnon. Handle notes, reminders, calendar events, and scheduled tasks.\n"
         "Use manage_notes for notes, todos, checklists, note searches, and one-off reminders. One-off reminders need due_date.\n"
         "Use manage_calendar for calendar events, meetings, appointments, event lists, and event reminders. For event reminders, use reminder_minutes and do not also create a note.\n"
         "Use manage_tasks for recurring/background automations like every morning, daily, weekly, or scheduled AI jobs.\n"
@@ -2656,11 +2656,11 @@ def _looks_like_memory_identity_turn(text: str) -> bool:
 
 
 def _minimal_odysseus_general_messages(messages: List[Dict], include_memory: bool = False) -> List[Dict]:
-    """Minimal fallback for Odysseus finetunes outside domain-specific paths."""
+    """Minimal fallback for Agamemnon finetunes outside domain-specific paths."""
     latest = _extract_last_user_message(messages)
     system = (
-        "You are Odysseus. Answer directly and briefly.\n"
-        "Use Odysseus tool-call format only when the user explicitly asks you to take an action.\n"
+        "You are Agamemnon. Answer directly and briefly.\n"
+        "Use Agamemnon tool-call format only when the user explicitly asks you to take an action.\n"
         "For explicit remember/forget/preference requests, use manage_memory.\n"
         "If the user asks for their email address, email account, or connected emails, call mcp__email__list_email_accounts.\n"
         "If the user asks to read/check/show their inbox or latest emails, call mcp__email__list_emails.\n"
@@ -2725,7 +2725,7 @@ _ODY_QWEN_TEXT_FIXES = (
 
 
 def _normalize_ody_qwen_text_artifacts(text: str) -> str:
-    """Repair common dropped-final-letter artifacts from small Odysseus LoRAs.
+    """Repair common dropped-final-letter artifacts from small Agamemnon LoRAs.
 
     This is intentionally scoped to the odysseus-qwen3 runtime path. It is not
     a general grammar corrector; it only fixes high-confidence standalone
@@ -3943,7 +3943,7 @@ def _build_system_prompt(
                 "In-Reply-To, References, X-Source-UID, X-Source-Folder, X-Attachments) and the `---` "
                 "separator exactly as they are, and replace only the new reply text above "
                 "`---------- Previous message ----------`. You may leave the quoted history out of your "
-                "tool output; Odysseus keeps everything from that separator down. Write in the saved "
+                "tool output; Agamemnon keeps everything from that separator down. Write in the saved "
                 "email writing style when present. The draft shown is the source of truth: skip "
                 "`read_email` and `list_emails`, and edit this draft rather than creating another "
                 "document. After a successful tool call, confirm briefly without pasting the email back."
@@ -4940,7 +4940,7 @@ def _compute_final_metrics(
         tps = backend_gen_tps
     else:
         tps = output_tokens / total_duration if total_duration > 0 else 0
-    # Context % should describe the prompt Odysseus assembled, not provider
+    # Context % should describe the prompt Agamemnon assembled, not provider
     # billing/usage counters. Some providers report only the final agent round
     # or cache-adjusted input, which made the displayed context jump from e.g.
     # 44% to 5% even when the session history had not meaningfully changed.
@@ -6328,7 +6328,7 @@ async def stream_agent_loop(
 
         def _direct_messages_for(candidate_is_qwen: bool) -> List[Dict]:
             if candidate_is_qwen:
-                # The Odysseus finetune is trained on its own fixed prompt; a
+                # The Agamemnon finetune is trained on its own fixed prompt; a
                 # persona would fight it, but the loadout's limits still apply.
                 out = _minimal_odysseus_general_messages(messages, include_memory=True)
             else:

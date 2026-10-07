@@ -46,12 +46,12 @@ if getattr(sys, 'frozen', False):
         global splash_root
         try:
             splash_root = tk.Tk()
-            splash_root.title("Odysseus")
+            splash_root.title("Agamemnon")
             splash_root.overrideredirect(True)
             splash_root.configure(bg="#1a1c23")
 
             # Accented borders
-            splash_root.config(highlightbackground="#e06c75", highlightcolor="#e06c75", highlightthickness=1)
+            splash_root.config(highlightbackground="#c7a76b", highlightcolor="#c7a76b", highlightthickness=1)
 
             w, h = 360, 160
             ws = splash_root.winfo_screenwidth()
@@ -60,7 +60,7 @@ if getattr(sys, 'frozen', False):
             y = (hs - h) // 2
             splash_root.geometry(f"{w}x{h}+{x}+{y}")
 
-            tk.Label(splash_root, text="⛵ Odysseus", font=("Segoe UI", 22, "bold"), bg="#1a1c23", fg="#e06c75").pack(pady=(22, 2))
+            tk.Label(splash_root, text="⛵ Agamemnon", font=("Segoe UI", 22, "bold"), bg="#1a1c23", fg="#c7a76b").pack(pady=(22, 2))
             tk.Label(splash_root, text="Launching background services...", font=("Segoe UI", 10), bg="#1a1c23", fg="#d1d4e0").pack(pady=2)
             tk.Label(splash_root, text="Please wait, this will take a few seconds.", font=("Segoe UI", 8, "italic"), bg="#1a1c23", fg="#5c6370").pack(pady=(12, 0))
 
@@ -74,7 +74,7 @@ if getattr(sys, 'frozen', False):
 
 
 def create_tray_image():
-    # Generate a beautiful 64x64 icon matching Odysseus brand red accent (#e06c75)
+    # Generate a beautiful 64x64 icon matching Agamemnon brand red accent (#c7a76b)
     from PIL import Image, ImageDraw
     image = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
     dc = ImageDraw.Draw(image)
@@ -102,13 +102,13 @@ def setup_system_tray(url):
         import pystray
         icon_img = create_tray_image()
         menu = (
-            pystray.MenuItem('Open Odysseus', lambda icon, item: on_open_browser(icon, item, url), default=True),
+            pystray.MenuItem('Open Agamemnon', lambda icon, item: on_open_browser(icon, item, url), default=True),
             pystray.MenuItem('Exit', on_exit)
         )
         tray_icon = pystray.Icon(
-            "Odysseus",
+            "Agamemnon",
             icon_img,
-            "Odysseus",
+            "Agamemnon",
             menu
         )
         tray_icon.run()

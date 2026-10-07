@@ -194,7 +194,7 @@ def _output_after_marker(capture: str, start_marker: str, end_marker: str) -> Tu
 
 def _clipped_output_note(output: str) -> str:
     kept = len(output.splitlines())
-    return (f"[Odysseus] The command printed more than the terminal keeps: its first lines are "
+    return (f"[Agamemnon] The command printed more than the terminal keeps: its first lines are "
             f"gone and the last {kept} are below. To see all of it, run it again with the output "
             f"sent to a file (`... > /tmp/out.log 2>&1`) and read or grep that file.\n")
 
@@ -647,7 +647,7 @@ def _with_remote_auth_hint(command: str, full_output: str, shown: str) -> str:
     from src.tool_execution import agent_cwd
 
     hint = remote_auth_hint(command, full_output, agent_cwd())
-    return f"{shown}\n\n[Odysseus] {hint}" if hint else shown
+    return f"{shown}\n\n[Agamemnon] {hint}" if hint else shown
 
 
 class PythonTool:

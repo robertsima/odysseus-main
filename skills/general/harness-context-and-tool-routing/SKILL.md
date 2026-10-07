@@ -17,7 +17,7 @@ Use the named tool for the request. A generic API call, shell or directory walk 
 - Stable personal fact or preference: memory.
 - "What did I write?" or vault knowledge: semantic document search.
 - Repository, source, logs or configuration: workspace file tools.
-- Running Odysseus failure: application-log reader, then the relevant named service or tool.
+- Running Agamemnon failure: application-log reader, then the relevant named service or tool.
 - Fixed appointment or reservation: Calendar.
 
 ## Path preflight

@@ -64,10 +64,11 @@ def github_api_base() -> str:
 
     github.com -> api.github.com; GitHub Enterprise Cloud with data residency
     (*.ghe.com) -> api.<host>; GitHub Enterprise Server -> <host>/api/v3. A
-    GITHUB_HOST that github_git_host() rejects falls back to github.com, where
-    no Enterprise credential is valid, so the mistake surfaces as a 401.
+    Invalid configuration is rejected before any credential can be sent.
     """
-    host = github_git_host() or "github.com"
+    host = github_git_host()
+    if host is None:
+        raise ValueError("Invalid GITHUB_HOST: use an HTTPS GitHub hostname without path or credentials")
     if host == "github.com":
         return "https://api.github.com"
     if host.endswith(".ghe.com"):

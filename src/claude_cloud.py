@@ -346,9 +346,9 @@ def _workflow_repo(record: Dict[str, Any]) -> str:
 async def _find_run(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     data = await _gh("GET", f"/repos/{_workflow_repo(record)}/actions/workflows/{workflow_file()}/runs",
                      params={"event": "workflow_dispatch", "per_page": 30})
-    wanted = f"Odysseus task {record['short_id']}"
+    wanted = {f"{brand} task {record['short_id']}" for brand in ("Agamemnon", "Odysseus")}
     for run in (data or {}).get("workflow_runs") or []:
-        if str(run.get("display_title") or run.get("name") or "").strip() == wanted:
+        if str(run.get("display_title") or run.get("name") or "").strip() in wanted:
             return run
     return None
 

@@ -2808,6 +2808,32 @@ def get_session_settings(session_id: str, *, strict: bool = False) -> dict:
         return {}
 
 
+def archive_session_unit(session_id: str, targets: set[str], owner: str) -> list[str]:
+    """Commit archive flags and restore markers together, or roll back.
+
+    Independently archived descendants keep their existing restore decision.
+    The caller holds agent_lifecycle.unit_lock through validation and commit.
+    """
+    with get_db_session() as db:
+        rows = db.query(Session).filter(Session.id.in_(targets)).all()
+        if {row.id for row in rows} != targets or any(row.owner != owner for row in rows):
+            raise ValueError("Archive unit changed ownership or disappeared")
+        workers = []
+        for row in rows:
+            if row.id != session_id and row.archived:
+                continue
+            settings = json.loads(row.settings_json or "{}")
+            if not isinstance(settings, dict):
+                raise ValueError("Invalid session settings")
+            if row.id != session_id:
+                settings["archived_with"] = session_id
+                workers.append(row.id)
+            row.settings_json = json.dumps(settings, ensure_ascii=False, sort_keys=True)
+            row.archived = True
+        db.flush()
+    return sorted(workers)
+
+
 def update_session_settings(session_id: str, patch: dict) -> Optional[dict]:
     """Merge ``patch`` into a chat's settings (a ``None`` value removes the key).
     Returns the merged dict, or None when the write failed."""

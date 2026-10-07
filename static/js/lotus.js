@@ -14,7 +14,7 @@ const MESSAGE_STYLES = [
   ['plain', 'Plain (no AI phrasing)'],
   ['spark', 'Spark — bright and playful'],
   ['razor', 'Razor — blunt and minimal'],
-  ['odysseus', 'Odysseus — composed and noble'],
+  ['odysseus', 'Agamemnon — composed and noble'], // persisted persona alias
   ['socrates', 'Socrates — only questions'],
   ['nietzsche', 'Nietzsche — aphoristic'],
 ];

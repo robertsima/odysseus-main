@@ -775,36 +775,38 @@ def setup_agents_routes(session_manager) -> APIRouter:
         workspace. It intentionally does not stop work; stopping remains an
         explicit action in the dashboard.
         """
+        from src.tool_approvals import tool_approval_store
         return sorted(sid for sid in unit
                       if agent_runs.is_busy(sid) or activity.has_active_run(sid)
-                      or agent_control.live_children(sid) > 0)
+                      or agent_control.live_children(sid) > 0
+                      or tool_approval_store.has_pending_for_session(sid))
 
     @router.post("/sessions/{session_id}/archive")
     async def archive_session(request: Request, session_id: str):
+        from src.agent_lifecycle import unit_lock
+        with unit_lock:
+            return _archive_session(request, session_id)
+
+    def _archive_session(request: Request, session_id: str):
         user, owned = _owned(request)
         sess = owned.get(session_id)
         if sess is None:
             raise HTTPException(404, "Session not found")
-        unit = _archive_unit(owned, session_id)
+        # Include archived intermediates after restart to discover live nested
+        # descendants. Their independent archive decisions remain untouched.
+        unit = _archive_unit({**_archived_owned(user), **owned}, session_id)
         active = _active_archive_targets(unit)
         if active:
             raise HTTPException(409, "Stop active work before archiving: " + ", ".join(active))
-        from core.database import update_session_settings
-        # Workers the user archived on their own earlier keep that decision:
-        # only the ones this archive takes are tagged to come back with it.
-        workers = sorted(sid for sid in unit - {session_id}
-                         if not getattr(owned.get(sid), "archived", False))
+        from core.database import archive_session_unit
         try:
-            for sid in [session_id, *workers]:
-                if hasattr(session_manager, "archive_session"):
-                    session_manager.archive_session(sid)
-                else:  # Small test/embedded managers still get recoverable semantics.
-                    owned[sid].archived = True
-                if sid != session_id:
-                    update_session_settings(sid, {"archived_with": session_id})
+            workers = archive_session_unit(session_id, unit, user)
         except Exception as exc:
             logger.warning("Could not archive agent session %s for %s: %s", session_id, user, exc)
             raise HTTPException(500, "Could not archive this chat")
+        for sid in [session_id, *workers]:
+            if sid in owned:
+                owned[sid].archived = True
         message = "Archived. Its chat and run history are preserved."
         if workers:
             message = (f"Archived with its {len(workers)} worker{'s' if len(workers) != 1 else ''}. "
@@ -828,6 +830,11 @@ def setup_agents_routes(session_manager) -> APIRouter:
 
     @router.post("/sessions/{session_id}/unarchive")
     async def unarchive_session(request: Request, session_id: str):
+        from src.agent_lifecycle import unit_lock
+        with unit_lock:
+            return _unarchive_session(request, session_id)
+
+    def _unarchive_session(request: Request, session_id: str):
         """Restore a chat with its unit: the archived parents it sits under
         and the workers that were archived along with them."""
         user, owned = _owned(request)

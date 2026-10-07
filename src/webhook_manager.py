@@ -419,11 +419,13 @@ class WebhookManager:
         headers = {
             "Content-Type": "application/json",
             "X-Odysseus-Event": event,
-            "User-Agent": "Odysseus-Webhook/1.0",
+            "X-Agamemnon-Event": event,
+            "User-Agent": "Agamemnon-Webhook/1.0",
         }
         if secret:
             sig = hmac.new(secret.encode(), body.encode(), hashlib.sha256).hexdigest()
             headers["X-Odysseus-Signature"] = sig
+            headers["X-Agamemnon-Signature"] = sig
 
         db = SessionLocal()
         try:
