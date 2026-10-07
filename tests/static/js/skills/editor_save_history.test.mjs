@@ -9,6 +9,12 @@ after(async () => { fake.restore(); await dom.restore(); });
 fake.route('GET', '/api/skills', () => ({ skills: [{ name: 'write-guide', status: 'draft' }] }));
 fake.route('GET', '/api/skills/catalog', () => ({ skills: [] }));
 fake.route('GET', '/api/skills/write-guide/markdown', () => ({ markdown: 'Original', version: 'v1' }));
+// The fake answers with the first matching route, so each test swaps the handler.
+let onSave = () => ({});
+fake.route('POST', '/api/skills/write-guide/markdown', call => onSave(call));
+fake.route('GET', '/api/skills/write-guide/test-status', () => ({ status: 'none' }));
+fake.route('POST', '/api/skills/write-guide/test', () => ({ ok: true }));
+fake.route('PUT', '/api/skills/write-guide', () => ({ ok: true }));
 document.body.innerHTML = '<div id="toast"></div><div class="admin-card"><div id="skills-list"></div></div>';
 const { loadSkills } = await import('../../../../static/js/skills.js');
 const input = (ta, value) => { ta.value = value; ta.dispatchEvent(new Event('input', { bubbles: true })); };
@@ -28,10 +34,10 @@ test('undo restores edits and a successful in-flight save preserves newer typing
   assert.equal(ta.value, 'First draft');
   let complete;
   const bodies = [];
-  fake.route('POST', '/api/skills/write-guide/markdown', ({body}) => {
+  onSave = ({body}) => {
     bodies.push(JSON.parse(body));
     return new Promise(resolve => { complete = resolve; });
-  });
+  };
   card.querySelector('.skill-md-save').click();
   await waitFor(() => complete, { what: 'save request' });
   assert.equal(card.querySelector('.skill-md-status').textContent, 'Saving…');
@@ -55,4 +61,45 @@ test('undo restores edits and a successful in-flight save preserves newer typing
   assert.equal(ta.value, 'Keep this after a conflict');
   assert.equal(card.querySelector('.skill-md-save').disabled, false);
   assert.equal(ta.dataset.original, 'Newer typing');
+});
+
+test('Test and Publish preserve a draft and cannot replace an editor during a save', async () => {
+  await loadSkills();
+  const card = document.querySelector('.skill-card');
+  card.querySelector('.skill-card-name').click();
+  await waitFor(() => card._mdLoaded, { what: 'markdown loaded' });
+  [...card.querySelectorAll('.doclib-card-action-btn')].find(b => b.textContent === 'Edit').click();
+  const ta = card.querySelector('.skill-md-editor');
+  const action = text => [...card.querySelectorAll('.doclib-card-action-btn')].find(b => b.textContent.trim() === text);
+  const settle = () => new Promise(resolve => setTimeout(resolve, 20));
+  const asked = [];
+  window.confirm = message => { asked.push(message); return false; };
+  const sent = () => fake.calls.filter(c => c.method === 'PUT' || c.url.pathname.endsWith('/test'));
+  input(ta, 'Do not discard this draft');
+  action('Test').click();
+  await settle();
+  assert.equal(card.querySelector('.skill-md-editor'), ta, 'Test keeps the editor');
+  action('Publish').click();
+  await settle();
+  assert.equal(document.querySelector('.skill-md-editor'), ta, 'Publish keeps the editor');
+  assert.equal(ta.value, 'Do not discard this draft');
+  assert.deepEqual(asked, ['Discard unsaved SKILL.md changes?', 'Discard unsaved SKILL.md changes?']);
+  assert.deepEqual(sent(), [], 'a declined discard runs neither action');
+  let complete;
+  onSave = () => new Promise(resolve => { complete = resolve; });
+  card.querySelector('.skill-md-save').click();
+  await waitFor(() => complete, { what: 'save request' });
+  window.confirm = message => { asked.push(message); return true; };
+  action('Test').click();
+  action('Publish').click();
+  await settle();
+  assert.equal(document.querySelector('.skill-md-editor'), ta, 'actions keep an in-flight editor');
+  assert.equal(asked.length, 2, 'an in-flight save is not offered for discard');
+  assert.deepEqual(sent(), []);
+  complete({ markdown: ta.value, version: 'v4' });
+  await waitFor(() => !card._mdSaving, { what: 'save completes' });
+  action('Test').click();
+  await waitFor(() => sent().some(c => c.url.pathname === '/api/skills/write-guide/test'), { what: 'test request after saved editor' });
+  assert.equal(asked.length, 2, 'a saved editor is replaced without asking');
+  assert.deepEqual(sent().map(c => c.url.pathname), ['/api/skills/write-guide/test']);
 });

@@ -11,7 +11,8 @@ def test_first_font_and_background_choices_persist_and_respect_reduced_motion(op
     page.evaluate("document.getElementById('theme-modal').classList.remove('hidden')")
     page.click('#theme-tabs [data-tab="theme-tab-customize"]')
     page.locator('#theme-font-select').select_option('editorial')
-    page.locator('#theme-bg-pattern-select').select_option('aurora')
+    # By its visible label, so the label stays tied to the control for screen readers.
+    page.get_by_label('Background effect', exact=True).select_option('aurora')
     saved = page.evaluate("JSON.parse(localStorage.getItem('odysseus-theme'))")
     assert saved['font'] == 'editorial' and saved['bgPattern'] == 'aurora'
     assert page.evaluate("getComputedStyle(document.body).animationName") == 'none'

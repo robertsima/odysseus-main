@@ -539,6 +539,7 @@ function _openSkillMenu(btn, card, sk, name, isPublished) {
   selItem.addEventListener('click', (e) => {
     e.stopPropagation();
     close();
+    if (!_mayReplaceSkillEditors(_allSkillCards())) return;
     if (!_selectMode) _enterSelectMode();
     _selectedNames.add(name);
     renderSkillsList();
@@ -1190,6 +1191,22 @@ function _hasUnsavedMarkdown(card) {
   const input = card.querySelector('.skill-md-editor');
   return !!input && input.value !== input.dataset.original;
 }
+// Test replaces a card's preview and Publish/Delete re-render every card, which
+// would drop an open editor. Refuse while a save is in flight; otherwise ask
+// before discarding a draft.
+function _mayReplaceSkillEditors(cards) {
+  const open = cards.filter(c => c && (c.querySelector('.skill-md-editor') || c.querySelector('.skill-package-editor textarea')));
+  if (open.some(c => c._mdSaving)) {
+    uiModule.showToast('Wait for SKILL.md to finish saving');
+    return false;
+  }
+  const dirtyFile = open.some(_hasUnsavedPackage);
+  const dirtyMarkdown = open.some(_hasUnsavedMarkdown);
+  if (!dirtyFile && !dirtyMarkdown) return true;
+  const what = dirtyFile && dirtyMarkdown ? 'resource and SKILL.md' : dirtyFile ? 'resource' : 'SKILL.md';
+  return window.confirm(`Discard unsaved ${what} changes?`);
+}
+const _allSkillCards = () => [...document.querySelectorAll('.skill-card')];
 // Modal chrome is owned by the host. Guard its common close paths while the
 // Skills tab contains a draft; prevent the host close handler in capture phase.
 function _guardSkillDraftClose(event) {
@@ -1465,6 +1482,7 @@ async function _saveSkillEdit(card, name) {
 }
 
 async function _deleteSkill(name, card = null) {
+  if (!_mayReplaceSkillEditors(_allSkillCards())) return;
   if (!(await uiModule.styledConfirm(`Delete skill "${name}"? This removes the SKILL.md.`, { confirmText: 'Delete', danger: true }))) return;
   // Locate the card if the caller didn't hand one over, so we can collapse it
   // away gracefully (same fade+shrink as the document library) instead of
@@ -1489,6 +1507,7 @@ async function _deleteSkill(name, card = null) {
 }
 
 async function _setSkillStatus(name, status) {
+  if (!_mayReplaceSkillEditors(_allSkillCards())) return;
   try {
     await fetch(`${API}/api/skills/${encodeURIComponent(name)}`, {
       method: 'PUT',
@@ -1587,7 +1606,9 @@ function _renderTestLog(logEl, verdictEl, job, card, name) {
 
 // `force` = start a fresh run even if a finished result already exists (Retry).
 async function _testSkill(card, name, force = false) {
+  // Expanding guards the other cards' drafts; the log replaces this card's editor.
   if (!card.classList.contains('doclib-card-expanded')) await _expandSkillCard(card, name);
+  if (!card.classList.contains('doclib-card-expanded') || !_mayReplaceSkillEditors([card])) return;
   const preview = card.querySelector('.skill-card-preview');
   if (!preview) return;
   preview.innerHTML =
