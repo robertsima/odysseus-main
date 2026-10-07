@@ -25,6 +25,12 @@ POLL_INTERVAL_S = 5
 _FOLLOWUP_MAX_ROUNDS = 12
 
 
+# Jobs whose deferral was already logged. The monitor retries every
+# POLL_INTERVAL_S while the chat is busy, and logging each retry wrote 824
+# identical lines in one 4-hour bundle (2026-10-07).
+_DEFERRAL_LOGGED: set = set()
+
+
 def _background_result_message(rec):
     inject = (
         f"[Background job {rec['id']} finished]\n\n"
@@ -33,6 +39,39 @@ def _background_result_message(rec):
         "If the task is now complete, give the user the final result."
     )
     return untrusted_context_message("background job output", inject)
+
+
+def _close_job_run(rec, title: str) -> None:
+    from src import agent_activity as activity
+
+    activity.run_finished(rec.get("session_id"), "bg_job", f"bg_job-{rec['id']}",
+                          f"Background job {rec['id']}: {title}",
+                          status="failed" if rec.get("status") == "failed" else "completed",
+                          data={"job_id": rec["id"], "command": str(rec.get("command") or "")[:200],
+                                "exit_code": rec.get("exit_code")})
+
+
+def deliver_to_live_turn(session_id) -> list:
+    """Result messages for the jobs this chat finished during its running turn.
+
+    The agent loop calls this between rounds. Before, a job that ended mid-turn
+    waited for the turn to end and then started a follow-up turn of its own:
+    on 2026-10-07 a worker's two test runs finished while it worked, and after
+    its hand-back each one re-ran the 100k-token chat and wrote the hand-back
+    again. Claimed jobs are marked followed up, so the monitor skips them.
+    """
+    if not session_id:
+        return []
+    messages = []
+    for rec in bg_jobs.take_finished(str(session_id)):
+        _DEFERRAL_LOGGED.discard(rec["id"])
+        messages.append(_background_result_message(rec))
+        try:
+            _close_job_run(rec, "read in the running turn")
+        except Exception:
+            logger.debug("bg job run close failed", exc_info=True)
+        logger.info("bg-followup: job %s delivered into the running turn of session %s", rec["id"], session_id)
+    return messages
 
 
 async def _drain_agent(sess, messages, *, run_id=None):
@@ -98,10 +137,14 @@ async def _run_followup(rec: dict) -> bool:
     try:
         from src import agent_runs
         if agent_runs.is_busy(sess.id):
-            logger.info("bg-followup: session %s busy (live turn) — deferring job %s", sess.id, rec.get("id"))
+            if rec.get("id") not in _DEFERRAL_LOGGED:
+                _DEFERRAL_LOGGED.add(rec.get("id"))
+                logger.info("bg-followup: session %s busy (live turn) — deferring job %s until the turn reads "
+                            "it or ends", sess.id, rec.get("id"))
             return False
     except Exception:
         pass
+    _DEFERRAL_LOGGED.discard(rec.get("id"))
 
     context = sess.get_context_messages()
     context.append(_background_result_message(rec))
@@ -158,6 +201,9 @@ async def _loop():
     while True:
         try:
             for rec in bg_jobs.pending_followups():
+                # A running turn may have claimed it since the list was read.
+                if bg_jobs.is_followed_up(rec["id"]):
+                    continue
                 try:
                     if await _run_followup(rec):
                         bg_jobs.mark_followed_up(rec["id"])

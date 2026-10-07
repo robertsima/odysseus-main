@@ -641,6 +641,7 @@ bounded — a guard that can fire indefinitely is a new way to burn the budget.
 | intent without action | the round announces an action and calls nothing | one sharp nudge to actually call it | `_MAX_INTENT_NUDGES` = 2 |
 | stopping short | a turn that ran tools ends on "Blocked…" / "I stopped before…" without naming a need | ask it to clear the blocker or name it (`Needs user:` / `Needs parent:`) | `_MAX_UNBLOCK_CHECKS` = 1 |
 | open checklist | the turn updated its task checklist and ends with steps open | ask it to carry on, tick or rewrite | `_MAX_CHECKLIST_NUDGES` = 2 |
+| one read per round | four rounds in a row each made one read-only call (`read_file`, `grep`, `glob`, a `sed -n`/`rg`/`git diff` shell command) | ask it to batch the reads it already knows it needs | `_MAX_BATCH_NUDGES` = 3 |
 | runaway call | the same call signature very many times | stop the turn | fixed |
 | stall | repeated identical rounds with no answer text | stop the turn | fixed |
 | round cap | budget spent with work outstanding | emit `rounds_exhausted` with partial work | — |
@@ -863,6 +864,19 @@ policy, read through the one definition in
 `session_settings.stored_disabled_tools` so the allowlist shape is resolved the
 same way the live chat route resolves it. Either kind runs under the approval
 mode of the chat it happens in.
+
+A background job that finishes while its chat's turn is still running does not
+wait for the turn to end. The loop reads it between rounds
+(`bg_monitor.deliver_to_live_turn`), and so does a `manage_bg_jobs` output read
+of a finished job. Either way the job is marked followed up, so the monitor
+starts no second turn for it. A follow-up turn runs only when the job finishes
+after the turn has ended. On 2026-10-07 two test runs finished mid-turn; each
+later started its own follow-up turn, and the worker wrote its hand-back three
+times.
+
+Headless runs add their tokens to the chat's totals and the usage ledger
+(`headless_agent._record_usage`), as the chat route does for foreground turns.
+Before that, worker chats showed 0 tokens.
 
 **Nesting.** A worker may start workers of its own (a lead engineer starting
 implementors) down to `agent_max_worker_depth` hops below the chat a person

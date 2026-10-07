@@ -2130,6 +2130,17 @@ async def _run_claude(
     return _annotate_outdated(result) if isinstance(result, dict) else result
 
 
+_OAUTH_RACE_RETRY_S = 20
+
+
+def _is_oauth_refresh_race(result) -> bool:
+    """The CLI exited before its first turn because another process was
+    refreshing the shared OAuth token. Nothing in the checkout changed."""
+    if not isinstance(result, dict) or result.get("changes") or result.get("commits"):
+        return False
+    return "another Claude Code process is refreshing" in str(result.get("error") or "")
+
+
 async def _run_with_auto_update(repository: Path, prompt: str, timeout: int, tools: list[str], **kwargs) -> dict:
     """``_run_claude``, plus one update-and-retry when the CLI is too old for
     the model and the ``claude_code_auto_update`` setting is on.
@@ -2139,6 +2150,13 @@ async def _run_with_auto_update(repository: Path, prompt: str, timeout: int, too
     comes before Claude's first turn, so it normally does).
     """
     result = await _run_claude(repository, prompt, timeout, tools, **kwargs)
+    if _is_oauth_refresh_race(result):
+        # Another Claude Code process held the token refresh. The CLI calls this
+        # transient; on 2026-10-07 the worker spent a model round and a retry
+        # launch of its own on it. Wait it out once here instead.
+        logger.info("claude_code: OAuth refresh race; retrying in %ss", _OAUTH_RACE_RETRY_S)
+        await asyncio.sleep(_OAUTH_RACE_RETRY_S)
+        result = await _run_claude(repository, prompt, timeout, tools, **kwargs)
     if not isinstance(result, dict) or result.get("error_kind") != OUTDATED_ERROR_KIND or not _auto_update_enabled():
         return result
     if result.get("changes") or result.get("commits"):

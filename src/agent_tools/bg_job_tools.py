@@ -90,6 +90,16 @@ class ManageBgJobsTool:
                 return {"output": f"Killed background job `{job_id}` ({(killed or {}).get('command', '').splitlines()[0][:80]}).", "exit_code": 0}
 
             out = rec.get("output") or "(no output yet)"
+            if rec.get("status") in ("done", "failed") and not rec.get("followed_up"):
+                # The agent has the finished output now; a follow-up turn would
+                # only hand it the same output again.
+                bg_jobs.mark_followed_up(job_id)
+                try:
+                    from src.bg_monitor import _close_job_run
+
+                    _close_job_run(rec, "output read by the agent")
+                except Exception:
+                    pass
             return {
                 "output": f"Job `{job_id}` [{_status_label(rec)}, {_age(rec)}]\nCommand: {rec.get('command')}\n\nOutput:\n{out}",
                 "exit_code": 0,

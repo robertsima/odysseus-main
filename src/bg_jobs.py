@@ -271,6 +271,30 @@ def mark_followed_up(job_id: str) -> None:
         _save(jobs)
 
 
+def take_finished(session_id: str) -> List[Dict[str, Any]]:
+    """Claim this chat's finished, not yet followed-up jobs for its live turn.
+
+    Each claimed job is marked followed_up in the same save, so the monitor
+    does not also start a follow-up turn for it. Returns copies of the records.
+    """
+    if not session_id:
+        return []
+    jobs = refresh()
+    taken = [rec for rec in jobs.values()
+             if rec.get("session_id") == session_id
+             and rec.get("status") in ("done", "failed") and not rec.get("followed_up")]
+    if not taken:
+        return []
+    for rec in taken:
+        rec["followed_up"] = True
+    _save(jobs)
+    return [dict(rec) for rec in taken]
+
+
+def is_followed_up(job_id: str) -> bool:
+    return bool((_load().get(job_id) or {}).get("followed_up"))
+
+
 def get(job_id: str) -> Optional[Dict[str, Any]]:
     refresh()  # reconcile against disk so status/exit_code are current
     rec = _load().get(job_id)

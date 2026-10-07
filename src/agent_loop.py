@@ -724,6 +724,7 @@ _DELEGATION_RULES = """\
 - A worker starts with only the brief you write; it has not seen this chat. Give it the goal and why, the done-when check, starting points (repository, branch or worktree, files, what you found or ruled out), and what to report back.
 - Carry the person's whole request into the brief unchanged. If you think a limit is needed, tell the person why before adding it.
 - Give one worker the whole user-visible outcome, a feature end to end. Split only along independent parts, with one writer per repository or worktree.
+- When the request also asks for investigation the implementation does not wait on (a sweep, an audit, an inventory of problems), give that part to read-only workers running beside the implementer, and pass their findings to it with `send_to_session`. Every round re-sends a worker's whole chat, so a worker that carries every part pays for all of them on every round, and parts that could run at once run one after another.
 - Write done-when as what the person would check; for UI work, the rendered result next to their reference.
 - For a review of rendered UI, give the reviewer fresh screenshots of the commit under review (in the worktree's untracked `.visual-check/`) and name that commit; checked-in evidence images go stale.
 - While a worker runs, wait (`manage_agent_loadout` status with `wait_seconds`) or do separate work; the worker owns its files and worktree.
@@ -5265,6 +5266,53 @@ def _detect_runaway_call(call_freq, threshold=15):
     return sig.split(":", 1)[0] if sig else None
 
 
+# ── Batching nudge ──
+# 2026-10-07 bundle: 307 of 343 rounds (90%) made exactly one call, mostly one
+# `read_file`, `grep` or `sed -n` range at a time on 100-160k prompts, although
+# the "Batch." rule and `parallel_tool_calls` were both in place. A round costs
+# ~7 s of model latency at any prompt size (the prefix is cached), so the round
+# count sets the turn's speed. After a streak of single read-only rounds the
+# loop says so at the tail of the conversation, which keeps the cached prefix.
+_BATCH_NUDGE_STREAK = 4
+_MAX_BATCH_NUDGES = 3
+_READ_ONLY_TOOLS = frozenset({"read_file", "grep", "glob", "ls", "recall_tool_output", "search_documents"})
+_READ_ONLY_SHELL_RE = re.compile(
+    r"^\s*(?:cd\s+\S+\s*(?:&&|;)\s*)?"
+    r"(?:sed\s+-n|cat|head|tail|nl|wc|ls|find|rg|grep|git\s+(?:diff|show|log|status|grep|blame))\b"
+)
+# A `>` that is not part of `2>` or `&>`: the command writes a file.
+_SHELL_WRITE_RE = re.compile(r"(?<![0-9&])>")
+
+
+def _is_single_read_round(tool_blocks) -> bool:
+    """True when the round made one call and that call only read."""
+    if len(tool_blocks) != 1:
+        return False
+    block = tool_blocks[0]
+    if block.tool_type in _READ_ONLY_TOOLS:
+        return True
+    if block.tool_type != "bash":
+        return False
+    command = (block.content or "").strip()
+    if command.startswith("{"):
+        try:
+            command = str((json.loads(command) or {}).get("command") or "")
+        except (ValueError, TypeError, AttributeError):
+            return False
+    if command.startswith("#!bg") or _SHELL_WRITE_RE.search(command):
+        return False
+    return bool(_READ_ONLY_SHELL_RE.match(command))
+
+
+def _batch_nudge_text(streak: int) -> str:
+    return (
+        f"The last {streak} rounds each made one read-only call, and every round re-sends the "
+        "whole conversation. Gather what you already know you need in one round: several "
+        "`read_file`, `grep` or `glob` calls side by side, or one shell command that prints every "
+        "range you need. Hold back only the calls that depend on output you have not seen yet."
+    )
+
+
 # ── Duplicate-call guard ──
 # A call that repeats an earlier one in the same turn — same tool name AND the
 # same arguments — cannot return anything the model has not already been shown,
@@ -7819,6 +7867,8 @@ async def stream_agent_loop(
     # signatures + consecutive no-text tool rounds to bail early.
     _recent_call_sigs = collections.deque(maxlen=6)
     _stuck_rounds = 0
+    _single_read_streak = 0
+    _batch_nudges = 0
     # Result digest of each call's last run, so a repeated call that returned
     # something new (a polled job's fresh activity) counts as progress.
     _last_call_digest: Dict[str, str] = {}
@@ -10195,6 +10245,22 @@ async def stream_agent_loop(
         if _dup_pending_directive:
             messages.append(_harness_directive(_dup_pending_directive))
             _dup_pending_directive = None
+
+        _single_read_streak = _single_read_streak + 1 if _is_single_read_round(tool_blocks) else 0
+        if _single_read_streak >= _BATCH_NUDGE_STREAK and _batch_nudges < _MAX_BATCH_NUDGES:
+            messages.append(_harness_directive(_batch_nudge_text(_single_read_streak)))
+            logger.info("[agent-pacing] round=%s batching nudge after %d single read-only rounds (%d/%d)",
+                        round_num, _single_read_streak, _batch_nudges + 1, _MAX_BATCH_NUDGES)
+            _batch_nudges += 1
+            _single_read_streak = 0
+
+        # Background jobs this chat started that finished while the turn ran.
+        try:
+            from src.bg_monitor import deliver_to_live_turn
+
+            messages.extend(deliver_to_live_turn(session_id))
+        except Exception:
+            logger.warning("[agent] background job delivery skipped", exc_info=True)
 
         # Emit agent_step event
         yield (

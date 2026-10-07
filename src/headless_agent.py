@@ -608,6 +608,7 @@ async def run_headless(
                 session_runs.discard(run_id)
                 if not session_runs:
                     _STEER_RUNS.pop(str(getattr(sess, "id", "")), None)
+        _record_usage(sess, state, effective_owner)
     full = state["full"]
     stopped_by = _STOP_SOURCES.pop(run_id, _DEFAULT_STOP_SOURCE) if run_id else _DEFAULT_STOP_SOURCE
     if outcome is not None and outcome.get("stopped"):
@@ -642,6 +643,33 @@ async def run_headless(
         # finished run whose text says what is left, not a cut-off one.
         outcome["round_budget_reached"] = int(state["round_budget"])
     return full, state["tool_events"]
+
+
+def _record_usage(sess, state: Dict[str, Any], owner: Optional[str]) -> None:
+    """Add this run's tokens to its chat's totals and the usage ledger.
+
+    The chat route does this for foreground turns. Worker, background-job and
+    continuation turns run here instead and were never counted: on 2026-10-07
+    a worker that read 28M input tokens showed 0 on its chat.
+    """
+    metrics = dict(state.get("metrics") or {})
+    if not metrics.get("input_tokens") and not metrics.get("output_tokens"):
+        # Stopped or failed before the loop's final metrics frame: fall back to
+        # the live per-round counters.
+        progress = state.get("progress") or {}
+        metrics = {"input_tokens": progress.get("input_tokens", 0),
+                   "output_tokens": progress.get("output_tokens", 0),
+                   "cached_input_tokens": progress.get("cached_tokens", 0),
+                   "agent_rounds": progress.get("round", 0),
+                   "model": getattr(sess, "model", "")}
+    metrics.setdefault("model", getattr(sess, "model", ""))
+    try:
+        from routes.chat_helpers import accumulate_token_usage
+
+        accumulate_token_usage(str(getattr(sess, "id", "")), metrics, owner=owner,
+                               incognito=bool(getattr(sess, "incognito", False)))
+    except Exception:
+        logger.debug("headless usage accounting failed", exc_info=True)
 
 
 # Loop frames that move a run's live counters (see ``_track_progress``).
@@ -746,6 +774,8 @@ async def _drain(sess, messages, state: Dict[str, Any], *, max_rounds: int, owne
                 logger.debug("headless agent listener failed", exc_info=True)
         if run_id:
             _track_progress(run_id, d, state)
+        if d.get("type") == "metrics" and isinstance(d.get("data"), dict):
+            state["metrics"] = d["data"]
         if "delta" in d:
             delta = d.get("delta")
             if isinstance(delta, str) and not d.get("thinking"):
