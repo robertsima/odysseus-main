@@ -54,7 +54,9 @@ Focused resume checks:
 - New archive write-fault test injects SQLAlchemy flush failure and verifies flags, markers and cache unchanged; concurrent launch waits for archive and then refuses the archived parent.
 - Canonical Compose forwarding, invalid GitHub URL rejection, saved Public URL provider metadata tested locally without external credentials.
 
-Historical full lane on `4666ad9d` was 11,076 Python passed, 4 skipped, 3 xfailed; Node 520 passed, 2 TODO. It is **not** evidence for the resumed changes or final HEAD. The final resumed full-lane output/result is in `resume-full.log`/`resume-full.exit` and the handoff. Failed attempts and corrected test setup are retained; successful claims are based on actual outputs, not delegation claims.
+The first resumed full lane failed: 58 failed, 11,030 passed, 4 skipped, 3 xfailed. Most failures were in-memory workflow tests exercising a missing persisted row; launch now rejects a durably archived row while leaving existing manager/ownership validation intact. The unit test for the new transaction boundary and the README guard were updated, and the bundled-skill history was regenerated so existing installs can upgrade unchanged skill bodies. The repaired workflow/database/skill group had 129 passes with one README markup expectation subsequently corrected. The final rerun is separate and must be read before accepting the commit.
+
+Historical full lane on `4666ad9d` was 11,076 Python passed, 4 skipped, 3 xfailed; Node 520 passed, 2 TODO. It is **not** evidence for the resumed changes or final HEAD. The final resumed full-lane output/result is in `resume-full-final.log`/`resume-full-final.exit` and the handoff. Failed attempts and corrected test setup are retained; successful claims are based on actual outputs, not delegation claims.
 
 ## Blockers and remaining release work
 

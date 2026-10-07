@@ -1,4 +1,4 @@
-# Todoist in Odysseus
+# Todoist in Agamemnon
 
 Call the built-in MCP function `mcp__todoist__todoist` (not a separate `td` MCP server). The wrapper runs `td <args...>` without a shell.
 

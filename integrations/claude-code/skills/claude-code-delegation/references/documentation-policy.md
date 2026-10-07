@@ -1,10 +1,10 @@
 # Delegation log policy (Claude Code delegation)
 
-Same rules as the local Pi delegation policy, applied to work Claude Code did. They apply only when the owner keeps a delegation log, a folder of the knowledge base (the owner's setup uses `AI Mind`). If `search_documents` finds no such folder or note, skip the record and do not create the folder.
+Same rules as the local Pi delegation policy, applied to work Claude Code did. They apply only when the owner keeps a delegation log, an explicitly configured knowledge-base folder. If `search_documents` finds no such folder or note, skip the record and do not create the folder.
 
 ## Boundary
 
-Write accepted delegation records only to that folder. Other vault content (for example `Vault Mind` and `Journal`) is never written, moved or deleted.
+Write accepted delegation records only to that folder. Unrelated vault content is never written, moved or deleted.
 
 The folder sits inside the personal-documents tree that `search_documents` indexes. It is not a bound workspace and not under `/app/workspace`. Take its real path from a `search_documents` result (every hit carries the source file's absolute path) or from the path a refused `write_file` or `ls` call suggests. The folder name alone is never the path. When a file tool refuses a path, do not write the note through the shell: that puts the record outside the vault where the index never sees it.
 

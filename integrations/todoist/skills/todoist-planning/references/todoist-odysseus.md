@@ -1,4 +1,4 @@
-# Todoist in Odysseus
+# Todoist in Agamemnon
 
 Call the built-in MCP function `mcp__todoist__todoist` (not a separate `td` MCP server). The wrapper runs `td <args...>` without a shell.
 
@@ -26,8 +26,8 @@ CLI and API facts:
 - Priority values are 1-4. In CLI shorthand `p1` is most urgent and maps to API priority 4.
 - Full-day due dates use `YYYY-MM-DD`, floating due datetimes `YYYY-MM-DDTHH:MM:SS` (local), fixed due datetimes UTC with `Z`. Deadlines are date-only.
 
-Odysseus calendar:
-- Todoist tasks with due dates or deadlines appear in Odysseus Calendar after Todoist calendar sync. Tasks without due dates do not appear.
+Agamemnon calendar:
+- Todoist tasks with due dates or deadlines appear in Agamemnon Calendar after Todoist calendar sync. Tasks without due dates do not appear.
 - Todoist is the source of truth. Sync is pull-only, so editing a Todoist-derived calendar event does not write back.
 
 Safety:

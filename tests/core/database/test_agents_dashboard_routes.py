@@ -53,6 +53,9 @@ def env(tmp_path, monkeypatch):
     import core.database as db
     monkeypatch.setattr(db, "get_session_settings", lambda sid, **kwargs: {})
     monkeypatch.setattr(db, "update_session_settings", lambda sid, patch: patch)
+    # This file uses an in-memory manager; transactional persistence is tested
+    # against the real database in routes/agents_routes/test_unit_archive_atomic.
+    monkeypatch.setattr(db, "archive_session_unit", lambda root, targets, owner: sorted(targets - {root}))
     # Fake endpoints must not perform a real context-window probe while a
     # worker/parent handoff is under its deterministic five-second test limit.
     import src.model_context as model_context

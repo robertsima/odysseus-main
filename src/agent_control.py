@@ -947,7 +947,7 @@ async def _launch_worker(*, owner: Optional[str], task: str, profile_name: Optio
         from core.database import Session as DbSession, get_db_session
         with get_db_session() as db:
             archived = db.query(DbSession.archived).filter(DbSession.id == parent_session).scalar()
-            if archived is None or archived:
+            if archived:
                 raise ValueError("Restore the parent chat before launching a worker")
     manager = get_session_manager()
     if manager is None:
