@@ -45,5 +45,35 @@ def test_editor_controls_fit_and_text_can_scale_and_resize(open_app, width):
     assert ta.evaluate("e => getComputedStyle(e).fontSize") == '18px'
     assert ta.evaluate("e => getComputedStyle(e).resize") == 'vertical'
     assert ta.bounding_box()['height'] >= 160
+    # Actions now follow the text instead of floating over it.
+    page.locator('.skill-md-save').scroll_into_view_if_needed()
     assert_usable(page, '.skill-md-save')
     assert_no_sideways_scroll(page, '.memory-modal-content')
+
+
+@pytest.mark.parametrize('width', [1440, 700, 390])
+def test_editor_footer_never_covers_resized_text(open_app, width):
+    """The action row must scroll after, not over, a tall editing surface."""
+    page = open_app(width)
+    open_editor(page)
+    if width == 700:
+        page.locator('.memory-modal-content').evaluate("e => e.style.width = '620px'")
+    ta = page.locator('.skill-md-editor')
+    ta.fill('\n'.join(f'Line {i}: keep this draft readable.' for i in range(80)))
+    ta.evaluate("e => e.style.height = '900px'")
+    preview = page.locator('.skill-card-preview')
+    footer = preview.locator('.doclib-card-expanded-actions')
+    for fraction in [0, 0.5, 1]:
+        preview.evaluate('(e, f) => e.scrollTop = (e.scrollHeight - e.clientHeight) * f', fraction)
+        geometry = preview.evaluate("""e => {
+            const text = e.querySelector('.skill-md-editor').getBoundingClientRect();
+            const actions = e.querySelector('.doclib-card-expanded-actions').getBoundingClientRect();
+            return {textBottom: text.bottom, actionsTop: actions.top};
+        }""")
+        assert geometry['actionsTop'] >= geometry['textBottom'], 'Footer covers skill text'
+    footer.scroll_into_view_if_needed()
+    assert_usable(page, '.skill-md-save')
+    ta.focus()
+    page.keyboard.press('Control+End')
+    page.keyboard.type('\nFinal visible draft line')
+    assert ta.input_value().endswith('Final visible draft line')
