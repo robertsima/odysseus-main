@@ -27,6 +27,7 @@ from dulwich.client import get_transport_and_path_from_url
 from dulwich.diff_tree import tree_changes
 from dulwich.ignore import IgnoreFilterManager
 from dulwich.index import (
+    RESERVED_WINDOWS_DEVICE_NAMES,
     update_working_tree,
     validate_path_element_default,
     validate_path_element_hfs,
@@ -1144,6 +1145,8 @@ def _validate_raw_parts(raw_parts) -> None:
         # the portable filename rule here instead of relying on dulwich's
         # version-dependent platform validators.
         or b":" in part
+        # dulwich 1.2.10+ rejects device names (CON, aux.txt) only on Windows.
+        or part.lower().split(b".", 1)[0].rstrip(b" ") in RESERVED_WINDOWS_DEVICE_NAMES
         or not validate_path_element_default(part)
         or not validate_path_element_hfs(part)
         or not validate_path_element_ntfs(part)

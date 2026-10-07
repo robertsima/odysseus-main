@@ -206,6 +206,7 @@ def test_existing_tracked_hardlink_is_rejected_before_status_reads_it(
         b"dir/.git /owned",
         b"file:stream",
         b"CON",
+        b"dir/Aux .txt",
         b"trailing. ",
     ],
 )
