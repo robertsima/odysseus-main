@@ -108,24 +108,51 @@ def _skill_test_task(skill: dict) -> str:
     on and stalls asking for input. So the task has it invent a small sample
     input and keep it inline.
 
-    The sample stays in the reply, never in a created document. 2026-10-02:
-    the old wording said to create a document first; the skill text rides in as
-    untrusted context, so ``create_document`` then needed a person's approval
-    that a session-less test cannot get, and nearly every nightly test ended
-    "inconclusive" after a full model round.
+    The sample stays in the answer: a test runs read-only and can save
+    nothing. The wording names no tool area of its own. "a short document",
+    "a note", "in your reply" and "show" each pulled a tool group into the run
+    (2026-10-06: an audit test got 14 email tools); the skill's own context is
+    what should choose tools.
     """
     if not isinstance(skill, dict):
         skill = {}
     ctx = (skill.get("when_to_use") or skill.get("description") or skill.get("name") or "").strip()
     return (
-        "Test this skill end-to-end. FIRST, write a small realistic scenario it "
-        "applies to, with the sample input it needs (a short document, a note, "
-        "sample data) typed out inline in your reply. Work on that inline "
-        "sample; do not create documents, files or other saved items for it, "
-        "and do not ask the user for input. THEN apply the skill fully to the "
-        "sample and show the result. Context for when this skill is used: "
+        "Test this skill end-to-end. FIRST, make up a small realistic scenario it "
+        "applies to, including the sample input it needs (sample text or data) "
+        "written out in your answer. Work only on that sample: save nothing, and "
+        "do not ask the user for input. THEN apply the skill fully to the sample "
+        "and give the outcome. Context for when this skill is used: "
         + (ctx or "(general)")
     )
+
+
+def _skill_test_tools(md: str) -> set:
+    """The tools a skill test starts with, chosen from the skill itself.
+
+    The skill's declared toolsets, the keyword hints its description and
+    when-to-use text match, the tools every turn has, and manage_skills. No
+    embedding call: the test's own wording used to drive retrieval.
+    """
+    from src.tool_index import ALWAYS_AVAILABLE, ToolIndex
+
+    tools = set(ALWAYS_AVAILABLE) | {"manage_skills"}
+    try:
+        from services.memory.skill_format import Skill
+        from src.skill_toolsets import skill_declared_tools
+
+        skill = Skill.from_markdown(md or "").to_dict()
+        declared, _unknown = skill_declared_tools([skill], set())
+        tools |= declared
+        text = " ".join(
+            str(skill.get(k) or "") for k in ("name", "description", "when_to_use")
+        ).casefold()
+        for keywords, hinted in ToolIndex._KEYWORD_HINTS.items():
+            if any(kw in text for kw in keywords):
+                tools |= set(hinted)
+    except Exception:
+        logger.debug("skill test tool selection fell back to the defaults", exc_info=True)
+    return tools
 
 
 def _skill_test_messages(md: str, task: str) -> list[dict]:
@@ -496,8 +523,11 @@ async def _run_skill_test_job(
             temperature=0.3, max_tokens=0, max_rounds=8, owner=owner,
             exact_approval=exact_approval,
             # The manual tester has no chat session, but its own polling UI and
-            # /test-approval route answer the card, so the gate may raise one.
+            # /test-approval route answer the card, so the gate may raise one
+            # for a read (a web fetch). Writes never get one: read_only.
             approval_surface=True,
+            read_only=True,
+            relevant_tools=_skill_test_tools(md),
         ):
             if not chunk.startswith("data: ") or chunk.strip() == "data: [DONE]":
                 continue
@@ -803,7 +833,8 @@ async def _run_skill_test_once(md: str, task: str, url, model, headers, owner) -
         # preset's max_tokens) worked. 4096 matches the chat default.
         async for chunk in stream_agent_loop(url, model, messages, headers=headers,
                                              temperature=0.3, max_tokens=4096, max_rounds=8, owner=owner,
-                                             approval_surface=False):
+                                             approval_surface=False, read_only=True,
+                                             relevant_tools=_skill_test_tools(md)):
             if not chunk.startswith("data: ") or chunk.strip() == "data: [DONE]":
                 continue
             try:

@@ -663,10 +663,27 @@ POST_EXTERNAL_BLOCKED_EFFECTS = frozenset(
 )
 
 
+# What a read-only run (the skill tester) may never do, approved or not: each
+# of these can leave something behind or change something outside the run.
+READ_ONLY_RUN_BLOCKED_EFFECTS = frozenset(
+    {
+        ToolEffect.WRITE_WORKSPACE,
+        ToolEffect.WRITE_PRIVATE,
+        ToolEffect.EXECUTE_CODE,
+        ToolEffect.EXTERNAL_SIDE_EFFECT,
+        ToolEffect.UI_SIDE_EFFECT,
+        ToolEffect.ADMIN_CHANGE,
+        ToolEffect.DESTRUCTIVE,
+    }
+)
+
+
 @dataclass(frozen=True)
 class ToolGateDecision:
     allowed: bool
     reason: str | None = None
+    # A final refusal has no approval card: no approval can lift it.
+    final: bool = False
 
 
 _EXTERNAL_MESSAGE_SOURCES = frozenset(
@@ -736,6 +753,12 @@ class ToolRunSecurityContext:
     # with a tool error instead of creating a record that can only expire
     # (2026-10-02: every nightly skill test ended "inconclusive" that way).
     approval_surface: bool = True
+    # A run that must leave nothing behind (the skill tester). Writes are
+    # refused finally, before any bypass or approval, and skill reads pass the
+    # untrusted-context gate: the skill under test is untrusted and armed it,
+    # and the gate then refused the `manage_skills view` the skills index asks
+    # for (2026-10-06).
+    read_only: bool = False
 
     def observe_messages(self, messages: Iterable[dict]) -> None:
         """Apply server-owned chat scope and promote untrusted prompt context."""
@@ -760,6 +783,22 @@ class ToolRunSecurityContext:
         if messages_contain_external_untrusted_context(message_list):
             self.external_untrusted_context_seen = True
 
+    def read_only_refusal(self, tool_name: Any, content: Any = None) -> ToolGateDecision | None:
+        """The final refusal a read-only run gives a call that writes, else None."""
+        if not self.read_only:
+            return None
+        capabilities = capabilities_for_action(tool_name, content)
+        writes = capabilities.effects & READ_ONLY_RUN_BLOCKED_EFFECTS
+        if not writes and capabilities.known:
+            return None
+        effects = ", ".join(sorted(e.value for e in writes)) or "unknown effects"
+        return ToolGateDecision(
+            False,
+            f"This run is read-only and must leave nothing behind; '{tool_name}' "
+            f"can cause {effects}. Work inline in your answer instead.",
+            final=True,
+        )
+
     def decision_for(self, tool_name: Any, content: Any = None) -> ToolGateDecision:
         # Checked before the bypasses below, because neither may lift it, and
         # kept independent of external_untrusted_context_seen so it holds on a
@@ -772,6 +811,12 @@ class ToolRunSecurityContext:
                     "It requires an interactive session."
                 ),
             )
+        if self.read_only:
+            refusal = self.read_only_refusal(tool_name, content)
+            if refusal is not None:
+                return refusal
+            if tool_name == "manage_skills":
+                return ToolGateDecision(True)
         if self.approval_gate_bypassed:
             return ToolGateDecision(True)
         if self.approval_mode is not None:

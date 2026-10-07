@@ -5883,6 +5883,10 @@ async def stream_agent_loop(
     # audit, manual skill test) has no card to render, so the gate refuses the
     # call at once instead of parking an approval nobody can see.
     approval_surface: Optional[bool] = None,
+    # A run that must leave nothing behind (the skill tester): only read tools
+    # are offered, every write is refused with no approval card, and skills
+    # stay readable after untrusted context. See ToolRunSecurityContext.
+    read_only: bool = False,
 ) -> AsyncGenerator[str, None]:
     """Streaming agent loop generator.
 
@@ -5914,6 +5918,7 @@ async def stream_agent_loop(
         approval_surface=(
             bool(session_id) if approval_surface is None else bool(approval_surface)
         ),
+        read_only=bool(read_only),
     )
     mcp_mgr = get_mcp_manager()
     prep_timings: Dict[str, float] = {}
@@ -6049,6 +6054,10 @@ async def stream_agent_loop(
         # the loop is safe regardless of caller. MCP stays available but is
         # filtered to read-only tools below (after the disabled map is loaded).
         disabled_tools.update(plan_mode_disabled_tools())
+    if read_only:
+        # Plan mode's list of tools that change things, minus manage_skills:
+        # the run reads skills, and the security context refuses its writes.
+        disabled_tools.update(plan_mode_disabled_tools() - {"manage_skills"})
 
     # The same chat's prompt must start the same way whichever caller runs the
     # turn: a worker follow-up or a background-job continuation used to arrive
@@ -6577,7 +6586,7 @@ async def stream_agent_loop(
         yield "data: [DONE]\n\n"
         return
 
-    if plan_mode and mcp_mgr:
+    if (plan_mode or read_only) and mcp_mgr:
         # Allow read-only MCP tools to investigate, block write/unknown ones:
         # hide them from the schemas AND reject them at runtime by qualified name.
         _mcp_block_map, _mcp_block_q = mcp_mgr.plan_mode_blocked_mcp()
@@ -9419,6 +9428,15 @@ async def stream_agent_loop(
                     "[agent-intent] stale-objective check refused %s on round %d latest=%r",
                     block.tool_type, round_num, _last_user[:80],
                 )
+            elif not security_decision.allowed and security_decision.final:
+                desc = f"{block.tool_type}: BLOCKED"
+                result = {
+                    "error": security_decision.reason or f"{block.tool_type} is not allowed in this run",
+                    "exit_code": 1,
+                    "blocked": True,
+                    "policy": "read_only_run",
+                }
+                logger.info("Read-only run refused: %s", block.tool_type)
             elif not security_decision.allowed:
                 # Seal the document the call will actually act on: the one its
                 # explicit document_id names, else this chat's active document.

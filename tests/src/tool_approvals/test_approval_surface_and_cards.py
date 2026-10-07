@@ -105,8 +105,8 @@ def test_skill_test_task_keeps_its_fixture_inline():
     task = _skill_test_task({"name": "tidy", "when_to_use": "after editing notes"})
 
     assert "create_document" not in task
-    assert "inline" in task
-    assert "do not create documents" in task
+    assert "written out in your answer" in task
+    assert "save nothing" in task
     assert "after editing notes" in task
 
 

@@ -1643,6 +1643,14 @@ async def execute_tool_block(
                 },
             )
 
+    if isinstance(security_context, ToolRunSecurityContext) and approval_claimed:
+        # An approval never lifts a read-only run's refusal of a write.
+        refusal = security_context.read_only_refusal(
+            getattr(block, "tool_type", None),
+            getattr(block, "content", None),
+        )
+        if refusal is not None:
+            return blocked_tool_result(getattr(block, "tool_type", None), refusal.reason or "")
     if isinstance(security_context, ToolRunSecurityContext) and not approval_claimed:
         decision = security_context.decision_for(
             getattr(block, "tool_type", None),
