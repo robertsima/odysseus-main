@@ -18363,7 +18363,9 @@ body:not(.email-doc-split-active) #email-lib-modal.email-lib-fullscreen:not(.mod
 .skill-md-status[data-state="error"] { color: var(--color-error, #e77); }
 .skill-md-undo:disabled, .skill-md-save:disabled { opacity: 0.45; cursor: default; }
 #memory-modal .skill-card-preview:has(.skill-md-label) .doclib-card-expanded-actions {
-  position: sticky; bottom: 0; background: var(--panel); padding: 12px 0; flex: 0 0 auto;
+  /* Keep actions after the editor in the scroll flow. A sticky bottom row
+     covers the text when the textarea is taller than the preview viewport. */
+  position: static; background: var(--panel); padding: 12px 0; flex: 0 0 auto;
 }
 @container skills-window (max-width: 600px) {
   #memory-modal .skill-card-right { flex-wrap: wrap; max-width: 45%; }
