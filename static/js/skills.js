@@ -1456,7 +1456,7 @@ async function _saveSkillEdit(card, name) {
       throw new Error(typeof detail === 'string' ? detail : (detail?.error || `HTTP ${res.status}`));
     }
     // Only the server's stored text is cached on the card; editor text stays in
-    // the editor and <pre>. Without it, drop the cache so the next open refetches.
+    // the editor and <pre>. Without it, drop the cache so a fresh render refetches.
     const data = await res.json();
     const stored = typeof data.markdown === 'string' ? data.markdown : snapshot;
     if (typeof data.markdown === 'string') {
