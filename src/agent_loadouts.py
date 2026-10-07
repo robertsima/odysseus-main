@@ -745,10 +745,18 @@ def clamp(requested: Dict[str, Any], policy: Dict[str, Any]) -> Tuple[Dict[str, 
 
     prof["memory_access"] = _rank_down(prof["memory_access"], policy["memory_access"],
                                        _MEMORY_RANK, "memory_access", notes)
+    asked_all_skills = prof["skill_access"] == "all"
     prof["skill_access"] = _rank_down(prof["skill_access"], policy["skill_access"],
                                       _SELECTION_RANK, "skill_access", notes)
     if policy["skill_access"] == "none":
         prof["skill_names"] = []
+    elif policy["skill_access"] == "selected" and asked_all_skills:
+        # "All" cut to a caller's selection is that whole selection. Keeping
+        # only the names the profile listed (none, for "all") left every
+        # nameless worker of a Lead Engineer with no skills (2026-10-06).
+        prof["skill_names"] = sorted(policy["skill_names"])
+        if not prof["skill_names"]:
+            prof["skill_access"] = "none"
     elif policy["skill_access"] == "selected":
         kept = sorted(set(prof.get("skill_names") or []) & policy["skill_names"])
         if len(kept) != len(prof.get("skill_names") or []):

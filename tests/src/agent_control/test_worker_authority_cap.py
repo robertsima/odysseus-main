@@ -134,6 +134,25 @@ def test_mcp_servers_are_cut_to_the_starters(world):
     assert capped["allowed_mcp_servers"] == ["email"]
 
 
+def test_a_nameless_child_gets_the_starters_selected_skills(world):
+    # 2026-10-06: a Lead Engineer (18 selected skills) started two read-only
+    # reviewers; both came up with skill_access "none", so neither could load
+    # diagnosing-bugs or codebase-design. "all" cut to a starter's "selected"
+    # means the starter's skills, not none of them.
+    lead = caller(skill_access="selected", skill_names={"diagnosing-bugs", "codebase-design"})
+    capped, _ = agent_loadouts.cap_to_starter(None, "person", "u", read_only=True, policy=lead)
+    assert capped["skill_access"] == "selected"
+    assert set(capped["skill_names"]) == {"diagnosing-bugs", "codebase-design"}
+
+
+def test_a_loadout_naming_its_own_skills_keeps_only_those_the_starter_has(world):
+    lead = caller(skill_access="selected", skill_names={"diagnosing-bugs", "codebase-design"})
+    capped, _ = agent_loadouts.cap_to_starter(
+        {"name": "Reviewer", "skill_access": "selected", "skill_names": ["diagnosing-bugs", "triage"]},
+        "worker", "u", policy=lead)
+    assert capped["skill_names"] == ["diagnosing-bugs"]
+
+
 async def test_a_persons_chat_keeps_its_named_loadouts_but_caps_a_nameless_child(world):
     """A named loadout is the person's own choice; a nameless child has no
     loadout to stand on, so it gets the chat's limits instead of "all"."""
