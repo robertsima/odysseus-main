@@ -233,6 +233,29 @@ body.bg-pattern-petals,
 body.bg-pattern-sparkles {
   /* canvas-only backgrounds */
 }
+body:is(.bg-pattern-grid, .bg-pattern-diagonal, .bg-pattern-rings, .bg-pattern-aurora) {
+  --pattern-ink: color-mix(in srgb, var(--bg-effect-color, var(--fg)) calc(12% * var(--bg-effect-intensity, 1)), transparent);
+  background-attachment: fixed;
+}
+body.bg-pattern-grid {
+  background-image: linear-gradient(var(--pattern-ink) 1px, transparent 1px), linear-gradient(90deg, var(--pattern-ink) 1px, transparent 1px);
+  background-size: calc(24px * var(--bg-effect-size, 1)) calc(24px * var(--bg-effect-size, 1));
+}
+body.bg-pattern-diagonal {
+  background-image: repeating-linear-gradient(135deg, var(--pattern-ink) 0 1px, transparent 1px 16px);
+  background-size: calc(48px * var(--bg-effect-size, 1)) calc(48px * var(--bg-effect-size, 1));
+}
+body.bg-pattern-rings {
+  background-image: repeating-radial-gradient(circle at 50% 50%, transparent 0 28px, var(--pattern-ink) 29px 30px);
+  background-size: calc(320px * var(--bg-effect-size, 1)) calc(320px * var(--bg-effect-size, 1));
+}
+body.bg-pattern-aurora {
+  background-image: radial-gradient(ellipse at 20% 30%, var(--pattern-ink), transparent 60%), radial-gradient(ellipse at 80% 70%, var(--pattern-ink), transparent 60%);
+  background-size: calc(130% * var(--bg-effect-size, 1)) calc(130% * var(--bg-effect-size, 1));
+  animation: theme-aurora-drift 24s ease-in-out infinite alternate;
+}
+@keyframes theme-aurora-drift { from { background-position: 0% 0%; } to { background-position: 100% 100%; } }
+@media (prefers-reduced-motion: reduce) { body.bg-pattern-aurora { animation: none; } }
 
 
 /* ── Layout ── */
@@ -18308,6 +18331,52 @@ body:not(.email-doc-split-active) #email-lib-modal.email-lib-fullscreen:not(.mod
 .skill-package-editor label { display: block; grid-column: 1 / -1; overflow-wrap: anywhere; }
 .skill-md-label { display: flex; flex-direction: column; min-height: 0; flex: 1 1 auto; gap: 4px; overflow-wrap: anywhere; }
 .skill-md-label .skill-md-editor { flex: 1 1 auto; min-height: 120px; }
+/* Use the actual tool-window width, including a half-screen dock. */
+#memory-modal .memory-modal-content:has(.memory-tab-panel[data-memory-panel="skills"]:not(.hidden)) {
+  width: min(1100px, calc(100vw - 48px));
+  max-width: calc(100vw - 24px);
+  height: min(86dvh, 960px);
+  max-height: 92dvh;
+  container: skills-window / inline-size;
+}
+#memory-modal .memory-tab-panel[data-memory-panel="skills"] > .admin-card:has(#skills-list) {
+  flex: 1 1 auto; min-height: 0;
+}
+#memory-modal .skill-card.doclib-card-expanded:has(.skill-md-editor) {
+  flex: 1 1 auto !important; height: 100%; min-height: 0;
+}
+#memory-modal .skill-card-preview:has(.skill-md-label) {
+  display: flex; flex-direction: column; flex: 1 1 auto !important;
+  max-height: none !important; min-height: 0; overflow-y: auto;
+  padding: 16px; gap: 14px;
+}
+#memory-modal .skill-md-label { flex: 1 0 auto; gap: 12px; min-width: 0; }
+#memory-modal .skill-md-label .skill-md-editor {
+  flex: 1 0 auto !important; height: clamp(220px, 45dvh, 600px);
+  min-height: 160px; max-height: none !important; resize: vertical;
+}
+.skill-md-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.skill-md-toolbar select { background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 8px; }
+.skill-md-toolbar button, .skill-md-toolbar select, .skill-md-save, .skill-md-cancel { min-height: 40px; }
+.skill-md-status { margin-left: auto; font-size: 12px; overflow-wrap: anywhere; }
+.skill-md-status[data-state="dirty"] { color: var(--red); }
+.skill-md-status[data-state="error"] { color: var(--color-error, #e77); }
+.skill-md-undo:disabled, .skill-md-save:disabled { opacity: 0.45; cursor: default; }
+#memory-modal .skill-card-preview:has(.skill-md-label) .doclib-card-expanded-actions {
+  position: sticky; bottom: 0; background: var(--panel); padding: 12px 0; flex: 0 0 auto;
+}
+@container skills-window (max-width: 600px) {
+  #memory-modal .skill-card-right { flex-wrap: wrap; max-width: 45%; }
+  #memory-modal .skill-stats, #memory-modal .skill-model-pill { display: none; }
+  #memory-modal .skill-card-preview:has(.skill-md-label) { padding: 10px; }
+  .skill-md-status { flex-basis: 100%; margin-left: 0; }
+  #memory-modal .doclib-action-btn-row { flex-wrap: wrap; gap: 8px; }
+}
+@media (max-width: 480px) {
+  #memory-modal .memory-modal-content:has(.memory-tab-panel[data-memory-panel="skills"]:not(.hidden)) {
+    width: 100%; max-width: 100%; height: 100dvh; max-height: 100dvh;
+  }
+}
 .skill-package-actions {
   position: sticky; bottom: 0; grid-column: 1 / -1;
   display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
@@ -18442,11 +18511,11 @@ body:not(.email-doc-split-active) #email-lib-modal.email-lib-fullscreen:not(.mod
   min-height: 0;
   width: 100%;
   box-sizing: border-box;
-  resize: none;
+  resize: vertical;
   font-family: ui-monospace, 'SF Mono', 'Fira Code', monospace;
-  font-size: 11.5px;
+  font-size: 15px;
   line-height: 1.5;
-  padding: 8px;
+  padding: 16px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--bg);

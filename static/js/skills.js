@@ -539,6 +539,7 @@ function _openSkillMenu(btn, card, sk, name, isPublished) {
   selItem.addEventListener('click', (e) => {
     e.stopPropagation();
     close();
+    if (!_mayReplaceSkillEditors(_allSkillCards())) return;
     if (!_selectMode) _enterSelectMode();
     _selectedNames.add(name);
     renderSkillsList();
@@ -925,7 +926,8 @@ function renderSkillsList() {
     // the footer too so it's not buried under the "⋯" menu.
     const testBtn = document.createElement('button');
     testBtn.className = 'doclib-card-text-btn doclib-card-action-btn';
-    testBtn.innerHTML = _svg(_ICON.test, { size: 11 }) + 'Test';
+    const testButtonHTML = _svg(_ICON.test, { size: 11 }) + 'Test';
+    testBtn.innerHTML = testButtonHTML;
     testBtn.title = 'Test this skill — run it + AI judge';
     testBtn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -936,7 +938,6 @@ function renderSkillsList() {
       if (testBtn.dataset.busy === '1') return;  // also dedupe rapid double-tap
       testBtn.dataset.busy = '1';
       testBtn.disabled = true;
-      const _origHTML = testBtn.innerHTML;
       testBtn.innerHTML = _svg(_ICON.test, { size: 11 }) + 'Starting…';
       Promise.resolve(_testSkill(card, name)).finally(() => {
         // The preview gets overwritten by _testSkill, which removes the
@@ -945,7 +946,7 @@ function renderSkillsList() {
         if (document.body.contains(testBtn)) {
           testBtn.disabled = false;
           testBtn.dataset.busy = '';
-          testBtn.innerHTML = _origHTML;
+          testBtn.innerHTML = testButtonHTML;
         }
       });
     });
@@ -1070,6 +1071,7 @@ function _collapseSkillCardEl(c) {
 
 async function _expandSkillCard(card, name) {
   const grid = card.closest('.doclib-grid');
+  if (card._mdSaving || (grid && [...grid.querySelectorAll('.skill-card')].some(c => c._mdSaving))) return;
   const adminCard = card.closest('.admin-card');
   // Toggle collapse if already open.
   if (card.classList.contains('doclib-card-expanded')) {
@@ -1115,7 +1117,7 @@ async function _expandSkillCard(card, name) {
     // where Firefox won't propagate a definite height). On desktop the card
     // expands via normal flex/flow — pinning measured heights there just
     // under-sizes it. So bail on desktop and let the CSS handle it.
-    if (!window.matchMedia('(max-width: 768px)').matches) return;
+    if (card.querySelector('.skill-md-editor') || !window.matchMedia('(max-width: 768px)').matches) return;
 
     const cardH = card.getBoundingClientRect().height;
     if (cardH <= 0) return;
@@ -1190,6 +1192,22 @@ function _hasUnsavedMarkdown(card) {
   const input = card.querySelector('.skill-md-editor');
   return !!input && input.value !== input.dataset.original;
 }
+// Test replaces a card's preview and Publish/Delete re-render every card, which
+// would drop an open editor. Refuse while a save is in flight; otherwise ask
+// before discarding a draft.
+function _mayReplaceSkillEditors(cards) {
+  const open = cards.filter(c => c && (c.querySelector('.skill-md-editor') || c.querySelector('.skill-package-editor textarea')));
+  if (open.some(c => c._mdSaving)) {
+    uiModule.showToast('Wait for SKILL.md to finish saving');
+    return false;
+  }
+  const dirtyFile = open.some(_hasUnsavedPackage);
+  const dirtyMarkdown = open.some(_hasUnsavedMarkdown);
+  if (!dirtyFile && !dirtyMarkdown) return true;
+  const what = dirtyFile && dirtyMarkdown ? 'resource and SKILL.md' : dirtyFile ? 'resource' : 'SKILL.md';
+  return window.confirm(`Discard unsaved ${what} changes?`);
+}
+const _allSkillCards = () => [...document.querySelectorAll('.skill-card')];
 // Modal chrome is owned by the host. Guard its common close paths while the
 // Skills tab contains a draft; prevent the host close handler in capture phase.
 function _guardSkillDraftClose(event) {
@@ -1344,14 +1362,55 @@ function _toggleSkillEdit(card, name) {
     return;
   }
   const pre = preview.querySelector('.skill-md-pre');
-  const label = document.createElement('label');
+  const label = document.createElement('div');
   label.className = 'skill-md-label';
-  label.textContent = `Edit SKILL.md for ${name}`;
+  const fieldLabel = document.createElement('label');
+  fieldLabel.textContent = `Edit SKILL.md for ${name}`;
+  label.appendChild(fieldLabel);
   const ta = document.createElement('textarea');
   ta.className = 'skill-md-editor';
+  ta.id = 'skill-md-editor-' + name;
+  fieldLabel.htmlFor = ta.id;
   ta.spellcheck = false;
   ta.value = (card._md != null ? card._md : (pre ? pre.textContent : '')) || '';
   ta.dataset.original = ta.value;
+  const history = [ta.value];
+  let historyIndex = 0;
+  const toolbar = document.createElement('div');
+  toolbar.className = 'skill-md-toolbar';
+  const undo = document.createElement('button');
+  undo.type = 'button'; undo.className = 'doclib-card-text-btn skill-md-undo';
+  undo.textContent = 'Undo'; undo.disabled = true;
+  const status = document.createElement('span');
+  status.className = 'skill-md-status'; status.setAttribute('role', 'status');
+  const size = document.createElement('select');
+  size.setAttribute('aria-label', 'Editor text size');
+  for (const [value, text] of [['13', 'Small text'], ['15', 'Medium text'], ['18', 'Large text']]) {
+    const option = document.createElement('option'); option.value = value; option.textContent = text; size.appendChild(option);
+  }
+  size.value = '15';
+  size.addEventListener('change', () => { ta.style.fontSize = size.value + 'px'; });
+  const sync = () => {
+    undo.disabled = historyIndex === 0;
+    const save = preview.querySelector('.skill-md-save');
+    if (save) save.disabled = !!card._mdSaving || ta.value === ta.dataset.original;
+    status.textContent = card._mdSaving ? 'Saving…' : (ta.value === ta.dataset.original ? 'Saved' : 'Unsaved changes');
+    status.dataset.state = card._mdSaving ? 'saving' : (ta.value === ta.dataset.original ? 'saved' : 'dirty');
+  };
+  ta._sync = sync;
+  ta.addEventListener('input', () => {
+    history.splice(historyIndex + 1); history.push(ta.value);
+    if (history.length > 100) history.shift();
+    historyIndex = history.length - 1; sync();
+  });
+  const undoEdit = () => { if (historyIndex > 0) { ta.value = history[--historyIndex]; sync(); ta.focus(); } };
+  undo.addEventListener('click', undoEdit);
+  ta.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); _saveSkillEdit(card, name); }
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'z') { e.preventDefault(); undoEdit(); }
+  });
+  toolbar.append(undo, size, status);
+  label.appendChild(toolbar);
   ta.addEventListener('click', (e) => e.stopPropagation());
   if (pre) pre.style.display = 'none';
   label.appendChild(ta);
@@ -1360,17 +1419,19 @@ function _toggleSkillEdit(card, name) {
   cancel.type = 'button'; cancel.className = 'doclib-card-text-btn doclib-card-action-btn skill-md-cancel';
   cancel.textContent = 'Cancel';
   cancel.addEventListener('click', () => {
+    if (card._mdSaving) return;
     if (_hasUnsavedMarkdown(card) && !window.confirm('Discard unsaved SKILL.md changes?')) return;
     label.remove(); cancel.remove();
     if (pre) pre.style.display = '';
     const edit = preview.querySelector('.skill-md-save');
-    if (edit) { edit.textContent = 'Edit'; edit.classList.remove('skill-md-save'); edit.focus(); }
+    if (edit) { edit.textContent = 'Edit'; edit.disabled = false; edit.classList.remove('skill-md-save'); edit.focus(); }
     card._fillH?.();
   });
   preview.querySelector('.doclib-action-btn-row').appendChild(cancel);
   ta.focus();
   const editBtn = [...preview.querySelectorAll('.doclib-card-action-btn')].find(b => /Edit|Save/.test(b.textContent));
   if (editBtn) { editBtn.textContent = 'Save'; editBtn.classList.add('skill-md-save'); }
+  sync();
   card._fillH?.();
 }
 
@@ -1380,30 +1441,55 @@ async function _saveSkillEdit(card, name) {
   if (!ta) return;
   const save = preview.querySelector('.skill-md-save');
   if (save?.disabled) return;
-  if (save) save.disabled = true;
+  const snapshot = ta.value;
+  card._mdSaving = true;
+  const cancel = preview.querySelector('.skill-md-cancel');
+  if (cancel) cancel.disabled = true;
+  ta._sync?.();
   try {
     const res = await fetch(`${API}/api/skills/${encodeURIComponent(name)}/markdown`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ markdown: ta.value, version: _mdVersions.get(name) }),
+      body: JSON.stringify({ markdown: snapshot, version: _mdVersions.get(name) }),
     });
     if (!res.ok) {
       const detail = (await res.json().catch(() => ({}))).detail;
-      throw new Error(detail || `HTTP ${res.status}`);
+      throw new Error(typeof detail === 'string' ? detail : (detail?.error || `HTTP ${res.status}`));
     }
-    // Refresh the cached markdown so the preload/expand show the new text.
-    _mdCache.set(name, ta.value);
-    _mdVersions.delete(name);
+    // Only the server's stored text is cached on the card; editor text stays in
+    // the editor and <pre>. Without it, drop the cache so a fresh render refetches.
+    const data = await res.json();
+    const stored = typeof data.markdown === 'string' ? data.markdown : snapshot;
+    if (typeof data.markdown === 'string') {
+      _mdCache.set(name, data.markdown);
+      card._md = data.markdown;
+    } else {
+      _mdCache.delete(name);
+      delete card._md;
+    }
+    ta.dataset.original = stored;
+    if (ta.value === snapshot) ta.value = stored;
+    const pre = preview.querySelector('.skill-md-pre');
+    if (pre) pre.textContent = stored;
+    if (data.version) _mdVersions.set(name, data.version); else _mdVersions.delete(name);
     uiModule.showToast('Saved');
-    await loadSkills();  // re-render (frontmatter changes like name/status may have changed)
   } catch (e) {
     uiModule.showError('Save failed: ' + e.message);
+    ta._saveError = e.message;
   } finally {
-    if (save) save.disabled = false;
+    card._mdSaving = false;
+    if (cancel) cancel.disabled = false;
+    ta._sync?.();
+    if (ta._saveError) {
+      const status = preview.querySelector('.skill-md-status');
+      status.textContent = 'Save failed: ' + ta._saveError + '. Your edits are kept. Retry Save.';
+      status.dataset.state = 'error'; delete ta._saveError;
+    }
   }
 }
 
 async function _deleteSkill(name, card = null) {
+  if (!_mayReplaceSkillEditors(_allSkillCards())) return;
   if (!(await uiModule.styledConfirm(`Delete skill "${name}"? This removes the SKILL.md.`, { confirmText: 'Delete', danger: true }))) return;
   // Locate the card if the caller didn't hand one over, so we can collapse it
   // away gracefully (same fade+shrink as the document library) instead of
@@ -1428,6 +1514,7 @@ async function _deleteSkill(name, card = null) {
 }
 
 async function _setSkillStatus(name, status) {
+  if (!_mayReplaceSkillEditors(_allSkillCards())) return;
   try {
     await fetch(`${API}/api/skills/${encodeURIComponent(name)}`, {
       method: 'PUT',
@@ -1526,7 +1613,9 @@ function _renderTestLog(logEl, verdictEl, job, card, name) {
 
 // `force` = start a fresh run even if a finished result already exists (Retry).
 async function _testSkill(card, name, force = false) {
+  // Expanding guards the other cards' drafts; the log replaces this card's editor.
   if (!card.classList.contains('doclib-card-expanded')) await _expandSkillCard(card, name);
+  if (!card.classList.contains('doclib-card-expanded') || !_mayReplaceSkillEditors([card])) return;
   const preview = card.querySelector('.skill-card-preview');
   if (!preview) return;
   preview.innerHTML =

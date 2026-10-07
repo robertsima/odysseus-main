@@ -135,7 +135,10 @@ async def test_save_skill_markdown_route_passes_owner_to_manager(tmp_path):
         "caveman-mode",
     )
 
-    assert result == {"ok": True, "name": "caveman-mode"}
+    assert result["ok"] is True and result["name"] == "caveman-mode"
+    assert "owner: alice" in result["markdown"]
+    assert "after" in result["markdown"]
+    assert len(result["version"]) == 64
     saved = skill_path.read_text(encoding="utf-8")
     assert "description: after" in saved
     assert "status: published" in saved

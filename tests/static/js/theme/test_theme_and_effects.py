@@ -135,11 +135,7 @@ def test_rain_shows_through_the_chat_but_not_through_work_windows(open_app, widt
 
 @pytest.mark.parametrize("theme", [
     ODYSSEUS_THEME,
-    # The old CDP test "reloaded" by navigating to its own URL with a
-    # fragment, which does not reload, so it never saw this.
-    pytest.param(None, marks=pytest.mark.xfail(strict=True, reason=(
-        "static/js/theme.js saves the effect only when a colourway is already stored, "
-        "so on a fresh profile the choice is lost on reload"))),
+    None,
 ], ids=["stored-colourway", "fresh-profile"])
 def test_background_effect_survives_a_reload(open_app, theme):
     page = open_app(1440, theme=theme)
