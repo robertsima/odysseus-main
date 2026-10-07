@@ -925,7 +925,8 @@ function renderSkillsList() {
     // the footer too so it's not buried under the "⋯" menu.
     const testBtn = document.createElement('button');
     testBtn.className = 'doclib-card-text-btn doclib-card-action-btn';
-    testBtn.innerHTML = _svg(_ICON.test, { size: 11 }) + 'Test';
+    const testButtonHTML = _svg(_ICON.test, { size: 11 }) + 'Test';
+    testBtn.innerHTML = testButtonHTML;
     testBtn.title = 'Test this skill — run it + AI judge';
     testBtn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -936,7 +937,6 @@ function renderSkillsList() {
       if (testBtn.dataset.busy === '1') return;  // also dedupe rapid double-tap
       testBtn.dataset.busy = '1';
       testBtn.disabled = true;
-      const _origHTML = testBtn.innerHTML;
       testBtn.innerHTML = _svg(_ICON.test, { size: 11 }) + 'Starting…';
       Promise.resolve(_testSkill(card, name)).finally(() => {
         // The preview gets overwritten by _testSkill, which removes the
@@ -945,7 +945,7 @@ function renderSkillsList() {
         if (document.body.contains(testBtn)) {
           testBtn.disabled = false;
           testBtn.dataset.busy = '';
-          testBtn.innerHTML = _origHTML;
+          testBtn.innerHTML = testButtonHTML;
         }
       });
     });

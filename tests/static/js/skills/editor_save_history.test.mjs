@@ -103,3 +103,24 @@ test('Test and Publish preserve a draft and cannot replace an editor during a sa
   assert.equal(asked.length, 2, 'a saved editor is replaced without asking');
   assert.deepEqual(sent().map(c => c.url.pathname), ['/api/skills/write-guide/test']);
 });
+
+test('a canceled Test restores its trusted label rather than reparsing modified DOM', async () => {
+  await loadSkills();
+  const card = document.querySelector('.skill-card');
+  card.querySelector('.skill-card-name').click();
+  await waitFor(() => card._mdLoaded, { what: 'markdown loaded' });
+  const buttons = [...card.querySelectorAll('.doclib-card-action-btn')];
+  const testButton = buttons.find(button => button.textContent.trim() === 'Test');
+  buttons.find(button => button.textContent.trim() === 'Edit').click();
+  input(card.querySelector('.skill-md-editor'), 'Keep my draft');
+  window.confirm = () => false;
+  const injected = document.createElement('img');
+  injected.setAttribute('data-injected', 'true');
+  injected.setAttribute('onerror', 'alert(1)');
+  testButton.appendChild(injected);
+  testButton.click();
+  await waitFor(() => !testButton.disabled, { what: 'Test cancellation cleanup' });
+  assert.equal(testButton.textContent.trim(), 'Test');
+  assert.equal(testButton.querySelector('[data-injected]'), null, 'cleanup uses the trusted label');
+  assert.equal(card.querySelector('.skill-md-editor').value, 'Keep my draft');
+});
