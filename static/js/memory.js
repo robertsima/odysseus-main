@@ -193,6 +193,7 @@ async function syncToggles() {
   await syncPrefToggle('auto-memory-toggle', 'auto_memory', 'Auto-extract memories enabled', 'Auto-extract memories disabled', false);
   await syncPrefToggle('auto-skills-toggle', 'auto_skills', 'Auto-extract skills enabled', 'Auto-extract skills disabled', false);
   await syncPrefToggle('auto-approve-skills-toggle', 'auto_approve_skills', 'Auto-approve skills enabled', 'Auto-approve skills disabled', false);
+  await syncPrefToggle('publish-learned-skills-toggle', 'auto_publish_learned_skills', 'Learned skills are published', 'Learned skills stay drafts', false, false);
   await syncPrefSlider('skill-confidence-slider', 'skill_min_confidence', 'skill-confidence-label', 0.85);
   await syncPrefNumber('skill-max-input', 'skill_max_injected', 3);
 
@@ -328,14 +329,15 @@ async function syncPrefNumber(elementId, prefKey, defaultVal) {
   }
 }
 
-async function syncPrefToggle(elementId, prefKey, onMsg, offMsg, dimBelow = true) {
+export async function syncPrefToggle(elementId, prefKey, onMsg, offMsg, dimBelow = true, defaultOn = true) {
   const toggle = document.getElementById(elementId);
   if (!toggle) return;
   try {
     const res = await fetch(`${window.location.origin}/api/prefs/${prefKey}`);
     if (res.ok) {
       const data = await res.json();
-      toggle.checked = data.value !== false;
+      // An unset pref reads as null and shows the pref's default.
+      toggle.checked = data.value == null ? defaultOn : data.value !== false;
     }
   } catch (e) {
     console.error(`Failed to load ${prefKey} pref:`, e);

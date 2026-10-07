@@ -365,16 +365,16 @@ async def maybe_extract_skill(
             logger.debug("[skill-extract] '%s' already exists — dropped as duplicate", title)
             return None
 
-        # Auto-publish gate: if the user has `auto_approve_skills` on, the
-        # newly-extracted skill is created `published` immediately rather
-        # than waiting for the next audit batch. The audit still runs later
-        # and can demote it back to `draft` (or delete) on failure. Default
-        # ON matches the UI label "Auto-approve skills".
+        # A learned skill is a draft unless `auto_publish_learned_skills` is
+        # on (default off). It used to follow `auto_approve_skills` (default
+        # on), which published one-task records such as "Skills Editor and
+        # Theme Improvements" into every unscoped chat (2026-10-06). An audit
+        # can still publish a draft that passes.
         _initial_status = "draft"
         try:
             from routes.prefs_routes import _load_for_user as _load_prefs
             _prefs = _load_prefs(owner) or {}
-            if _prefs.get("auto_approve_skills", True):
+            if _prefs.get("auto_publish_learned_skills", False):
                 _initial_status = "published"
         except Exception:
             pass
