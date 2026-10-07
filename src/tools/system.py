@@ -105,6 +105,8 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
     if name and action == "view":
         requested_names.extend(n.strip() for n in re.split(r"[,\n]+", name) if n.strip())
     requested_names = list(dict.fromkeys(requested_names))
+    logger.info("[skills] manage_skills action=%s names=%s owner=%s",
+                action, requested_names or ([name] if name else []), owner)
 
     # A skill whose integration is not connected is not offered by the index or
     # the keyword match, so list and search leave it out too. Toolsets are not
@@ -149,6 +151,10 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
                 missing.append(skill_name)
             else:
                 found.append((skill_name, md))
+                try:
+                    sm.record_view(skill_name, owner=owner)
+                except Exception:
+                    logger.debug("skill view count failed for %s", skill_name, exc_info=True)
         if not found:
             label = ", ".join(repr(n) for n in missing)
             return {"error": f"Skill {label} not found. Use action='list' for exact names.", "exit_code": 1}

@@ -808,6 +808,7 @@ function renderSkillsList() {
     }
     const conf = Math.round((sk.confidence || 0) * 100);
     const uses = sk.uses || 0;
+    const views = sk.views || 0;
     const isPublished = (sk.status === 'published');
     const confColor = _confColor(conf);
 
@@ -839,7 +840,7 @@ function renderSkillsList() {
         ${_auditModelPills(sk)}
         ${_necessityPill(sk)}
         ${_duplicatePriorityPill(sk)}
-        <span class="skill-stats">${_auditMarks(sk)}<span class="skill-conf" style="color:${confColor};">${conf}%</span> · ${uses}u</span>
+        <span class="skill-stats">${_auditMarks(sk)}<span class="skill-conf" style="color:${confColor};">${conf}%</span> · <span title="Shown to an agent ${uses} times; read in full ${views} times">${uses}u · ${views}r</span></span>
         <span class="skill-chevron-up" title="Collapse"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg></span>
         <button class="skill-kebab-btn" title="Actions" aria-label="Actions"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="12" cy="19" r="1.6"/></svg></button>
       </div>

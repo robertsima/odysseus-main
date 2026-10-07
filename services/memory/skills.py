@@ -333,6 +333,8 @@ class SkillsManager:
             u = self._usage_entry(usage, sk.name, sk.owner)
             d["uses"] = int(u.get("uses", 0))
             d["last_used"] = u.get("last_used")
+            d["views"] = int(u.get("views", 0))
+            d["last_viewed"] = u.get("last_viewed")
             d["audit_verdict"] = u.get("audit_verdict")
             d["audit_by_teacher"] = bool(u.get("audit_by_teacher"))
             d["audit_worker_model"] = u.get("audit_worker_model")
@@ -725,6 +727,15 @@ class SkillsManager:
         entry = usage.setdefault(key, {"uses": 0, "last_used": None})
         entry["uses"] = int(entry.get("uses", 0)) + 1
         entry["last_used"] = int(time.time())
+        self._save_usage(usage)
+
+    def record_view(self, skill_id: str, owner: Optional[str] = None) -> None:
+        """Count an agent reading the full skill. `uses` counts showing it."""
+        usage = self._load_usage()
+        key = self._usage_key(skill_id, self._usage_owner(skill_id, owner))
+        entry = usage.setdefault(key, {"uses": 0, "last_used": None})
+        entry["views"] = int(entry.get("views", 0)) + 1
+        entry["last_viewed"] = int(time.time())
         self._save_usage(usage)
 
     # ----------------------------------------------------------------------
