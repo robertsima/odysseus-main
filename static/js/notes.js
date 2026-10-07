@@ -107,7 +107,9 @@ function _showNotesFirstOpenHint(pane) {
     <div class="tour-hint-text"><b>Notes</b> manages todos and reminders. Use <b>Vault files</b> to browse, create, edit and delete every Markdown note in your mounted vault.</div>
     <button type="button" class="tour-hint-dismiss">OK</button>
   `;
-  document.body.appendChild(hint);
+  // Keep first-use help within its owning window's stacking context. A
+  // different foreground panel must cover it rather than inherit its overlay.
+  pane.appendChild(hint);
 
   const place = () => {
     const r = pane.getBoundingClientRect();

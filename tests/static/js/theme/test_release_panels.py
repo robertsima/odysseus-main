@@ -48,6 +48,17 @@ def test_onboarding_hint_is_removed_when_its_panel_closes(live_app, live_page):
     expect(page.locator('.tour-hint')).to_have_count(0)
 
 
+def test_notes_help_belongs_to_notes_not_next_foreground_panel(live_app, live_page):
+    page = live_page(1440)
+    page.locator('#tool-notes-btn').evaluate('el => el.click()')
+    hint = page.locator('#notes-first-open-hint')
+    expect(hint).to_be_visible()
+    assert hint.evaluate("el => !!el.closest('#notes-pane')")
+    page.locator('#tool-memory-btn').evaluate('el => el.click()')
+    expect(page.locator('#memory-modal')).to_be_visible()
+    assert hint.evaluate("el => {const r=el.getBoundingClientRect(); return !document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)?.closest('#notes-first-open-hint')}")
+
+
 @pytest.mark.parametrize('width', [1440, 390])
 def test_attachment_previews_can_be_added_and_removed(live_app, live_page, width):
     page = live_page(width)

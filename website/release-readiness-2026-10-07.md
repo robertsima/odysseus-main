@@ -50,7 +50,8 @@ Focused resume checks:
 - 331 Python tests passed across archive, worker launch, send-to-session, OAuth/GitHub configuration and upload ownership.
 - 113 middleware/webhook/foreground-gate tests passed.
 - 8 Chromium login/chat/settings/font tests passed, 1 strict known xfail (nested Markdown fence).
-- 5 new Chromium panels/Skills/keyboard/onboarding/attachment tests passed.
+- 6 new Chromium panels/Skills/keyboard/onboarding/attachment tests passed. Final capture inspection found a second Notes-specific first-use overlay outside tourHints; it now belongs to the Notes pane stacking context, with an elementFromPoint regression proving Brain covers it.
+- Repaired full lane: 11,088 Python passed, 4 skipped, 3 xfailed; Node 520 passed, 2 TODO; exit 0. This precedes only the final Notes hint containment change, which has six Chromium passes and JS syntax checks. No claim is made that the full lane was run on that final hint change.
 - New archive write-fault test injects SQLAlchemy flush failure and verifies flags, markers and cache unchanged; concurrent launch waits for archive and then refuses the archived parent.
 - Canonical Compose forwarding, invalid GitHub URL rejection, saved Public URL provider metadata tested locally without external credentials.
 
