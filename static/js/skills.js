@@ -1455,11 +1455,17 @@ async function _saveSkillEdit(card, name) {
       const detail = (await res.json().catch(() => ({}))).detail;
       throw new Error(typeof detail === 'string' ? detail : (detail?.error || `HTTP ${res.status}`));
     }
-    // Refresh the cached markdown so the preload/expand show the new text.
+    // Only the server's stored text is cached on the card; editor text stays in
+    // the editor and <pre>. Without it, drop the cache so the next open refetches.
     const data = await res.json();
     const stored = typeof data.markdown === 'string' ? data.markdown : snapshot;
-    _mdCache.set(name, stored);
-    card._md = stored;
+    if (typeof data.markdown === 'string') {
+      _mdCache.set(name, data.markdown);
+      card._md = data.markdown;
+    } else {
+      _mdCache.delete(name);
+      delete card._md;
+    }
     ta.dataset.original = stored;
     if (ta.value === snapshot) ta.value = stored;
     const pre = preview.querySelector('.skill-md-pre');

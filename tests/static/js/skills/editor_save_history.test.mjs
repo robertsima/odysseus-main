@@ -8,7 +8,8 @@ const fake = installFetchFake();
 after(async () => { fake.restore(); await dom.restore(); });
 fake.route('GET', '/api/skills', () => ({ skills: [{ name: 'write-guide', status: 'draft' }] }));
 fake.route('GET', '/api/skills/catalog', () => ({ skills: [] }));
-fake.route('GET', '/api/skills/write-guide/markdown', () => ({ markdown: 'Original', version: 'v1' }));
+let serverMarkdown = 'Original';
+fake.route('GET', '/api/skills/write-guide/markdown', () => ({ markdown: serverMarkdown, version: 'v1' }));
 // The fake answers with the first matching route, so each test swaps the handler.
 let onSave = () => ({});
 fake.route('POST', '/api/skills/write-guide/markdown', call => onSave(call));
@@ -123,4 +124,25 @@ test('a canceled Test restores its trusted label rather than reparsing modified 
   assert.equal(testButton.textContent.trim(), 'Test');
   assert.equal(testButton.querySelector('[data-injected]'), null, 'cleanup uses the trusted label');
   assert.equal(card.querySelector('.skill-md-editor').value, 'Keep my draft');
+});
+
+test('a save reply without the stored text makes the next render load SKILL.md from the server, not the editor', async () => {
+  await loadSkills();
+  const card = document.querySelector('.skill-card');
+  card.querySelector('.skill-card-name').click();
+  await waitFor(() => card._mdLoaded, { what: 'markdown loaded' });
+  [...card.querySelectorAll('.doclib-card-action-btn')].find(b => b.textContent === 'Edit').click();
+  const typed = 'Typed <img src=x onerror=alert(1)>';
+  input(card.querySelector('.skill-md-editor'), typed);
+  serverMarkdown = 'Server normalized';
+  onSave = () => ({ ok: true, version: 'v9' });
+  card.querySelector('.skill-md-save').click();
+  await waitFor(() => card.querySelector('.skill-md-status').textContent === 'Saved', { what: 'saved editor' });
+  assert.equal(card.querySelector('.skill-md-editor').value, typed, 'the open editor keeps what was typed');
+
+  await loadSkills();
+  const fresh = document.querySelector('.skill-card');
+  fresh.querySelector('.skill-card-name').click();
+  await waitFor(() => fresh._mdLoaded, { what: 'markdown reloaded' });
+  assert.equal(fresh.querySelector('.skill-md-pre').textContent, 'Server normalized');
 });
