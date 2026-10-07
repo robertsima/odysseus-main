@@ -1157,7 +1157,7 @@ async def build_bundle(*, minutes: Any = DEFAULT_MINUTES, max_lines: Any = DEFAU
         "errors": bundle.errors,
     }
     readme = "\n".join(
-        ["Odysseus diagnostics bundle", "=" * 27, "",
+        ["Agamemnon diagnostics bundle", "=" * 28, "",
          f"Generated {manifest['generated_at']} covering the last {minutes_v:g} minutes.", "",
          privacy["message_content"], "", privacy["skills"], "", REDACTION_NOTICE, "", "How to read this:"]
         + [f"- {line}" for line in HOW_TO_READ]

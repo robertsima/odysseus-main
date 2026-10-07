@@ -77,7 +77,7 @@ async def _run() -> None:
         if not owner:
             payload = {
                 "error": "owner_required",
-                "message": "Lotus requires an authenticated Odysseus owner.",
+                "message": "Lotus requires an authenticated Agamemnon owner.",
             }
         else:
             context = contexts.get(owner)

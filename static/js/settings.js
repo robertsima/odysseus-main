@@ -1499,7 +1499,7 @@ function initBuiltinIntegrations() {
           if (it.status === 'error') {
             return row(it.name, it.description, 'Error', 'bad', it.error || 'Failed to start; see System › Logs.');
           }
-          return row(it.name, it.description, 'Stopped', 'bad', 'Not running. Restart Odysseus; if it stays stopped, check System › Logs.');
+          return row(it.name, it.description, 'Stopped', 'bad', 'Not running. Restart Agamemnon; if it stays stopped, check System › Logs.');
         }).join('');
       }
     } catch (e) {
@@ -2209,7 +2209,7 @@ async function initSttSettingsV2() {
     var selected = providers.find(function(item) { return item.id === provider; });
     var privacy = selected ? selected.privacy : (provider === 'local' ? 'local' : 'browser-service');
     privacyHint.textContent = privacy === 'local'
-      ? 'Private: audio stays on this Odysseus instance.'
+      ? 'Private: audio stays on this Agamemnon instance.'
       : privacy === 'hosted'
         ? 'Hosted: recorded audio will be sent to the selected provider.'
         : 'Browser recognition may use your browser vendor\'s remote speech service.';
@@ -2227,7 +2227,7 @@ async function initSttSettingsV2() {
   if (window.isSecureContext || loopback) {
     httpHint.textContent = 'No HTTPS change required: browsers permit microphone capture on localhost.';
   } else {
-    httpHint.textContent = 'Remote HTTP detected. Odysseus can remain HTTP, but this browser may require localhost or a browser-side trusted-origin exception for microphone access.';
+    httpHint.textContent = 'Remote HTTP detected. Agamemnon can remain HTTP, but this browser may require localhost or a browser-side trusted-origin exception for microphone access.';
     httpHint.style.color = 'var(--warn, #d9a441)';
   }
 
@@ -2924,7 +2924,7 @@ function initClaudeCodeLogin(onSignedIn) {
         render(data);
       } catch (e) {
         payload = null;
-        render(Object.assign({}, s, { error: 'Could not reach Odysseus: ' + (e.message || e) }));
+        render(Object.assign({}, s, { error: 'Could not reach Agamemnon: ' + (e.message || e) }));
       }
     }
     submit.addEventListener('click', send);
@@ -3371,7 +3371,7 @@ async function initReminderSettings() {
   // regardless of channel). The hint should make that clear so
   // users don't think they have to choose between channels.
   const CHANNEL_HINTS = {
-    browser: 'Reminders appear as browser notifications inside Odysseus.',
+    browser: 'Reminders appear as browser notifications inside Agamemnon.',
     email: 'Reminders are emailed and shown as a browser notification.',
     ntfy: 'Reminders are pushed via ntfy AND shown as a browser notification.',
     webhook: 'Reminders are POSTed to the selected integration AND shown as a browser notification. Use {{title}} and {{message}} in the payload template.',
@@ -4142,7 +4142,7 @@ async function initUnifiedIntegrations() {
       if (ntfyHint) {
         ntfyHint.style.display = isNtfy ? 'block' : 'none';
         if (isNtfy) {
-          ntfyHint.innerHTML = 'Enter the ntfy server URL Odysseus can reach. Examples: <code>http://127.0.0.1:8091</code>, <code>http://100.x.y.z:8091</code>, or <code>https://ntfy.example.com</code>.';
+          ntfyHint.innerHTML = 'Enter the ntfy server URL Agamemnon can reach. Examples: <code>http://127.0.0.1:8091</code>, <code>http://100.x.y.z:8091</code>, or <code>https://ntfy.example.com</code>.';
         }
       }
       if (url) {
@@ -4809,7 +4809,7 @@ async function initUnifiedIntegrations() {
       },
       outlook: {
         title: 'Outlook / Office 365 needs OAuth',
-        body: 'Microsoft disables normal password login for IMAP/SMTP in most Outlook and Microsoft 365 accounts. Odysseus does not support Microsoft OAuth/Graph mail yet, so this preset is only a placeholder for future support.',
+        body: 'Microsoft disables normal password login for IMAP/SMTP in most Outlook and Microsoft 365 accounts. Agamemnon does not support Microsoft OAuth/Graph mail yet, so this preset is only a placeholder for future support.',
         url: 'https://learn.microsoft.com/exchange/clients-and-mobile-in-exchange-online/disable-basic-authentication-in-exchange-online',
         linkLabel: 'Read Microsoft note',
       },
@@ -5278,7 +5278,7 @@ async function initUnifiedIntegrations() {
             </div>
             <details class="uf-mcp-conn"${srv.status === 'connected' ? '' : ' open'}>
               <summary>Connection settings</summary>
-              <div class="uf-mcp-conn-sub">How Odysseus starts or reaches this server. Saving reconnects it with the new settings; your tool choices below are kept.</div>
+              <div class="uf-mcp-conn-sub">How Agamemnon starts or reaches this server. Saving reconnects it with the new settings; your tool choices below are kept.</div>
               <div class="settings-row"><label class="settings-label">Name</label><input id="uf-mcp-edit-name" class="settings-input" value="${escAttr(srv.name)}"></div>
               <div class="settings-row"><label class="settings-label">Transport</label><select id="uf-mcp-edit-transport" class="settings-input">
                 <option value="stdio"${srv.transport === 'stdio' ? ' selected' : ''}>stdio (runs a local command)</option>
@@ -5493,7 +5493,7 @@ async function initUnifiedIntegrations() {
       { key: 'calendar:write', label: 'Calendar write', detail: 'Create and update calendar events' },
       { key: 'memory:read', label: 'Memory', detail: 'Read memory when enabled' },
       { key: 'memory:write', label: 'Memory write', detail: 'Write memory when enabled' },
-      { key: 'vault:read', label: 'Vault', detail: 'Search and read the Markdown vault (Vault Mind, AI Mind) \u2014 the same notes chat retrieves from' },
+      { key: 'vault:read', label: 'Vault', detail: 'Search and read the Markdown vault folders you declared \u2014 the same notes chat retrieves from' },
       { key: 'vault:read_private', label: 'Vault private', defaultOff: true, detail: 'Also reach directories marked private, such as Journal. An agent session sends what it retrieves to a hosted provider' },
       { key: 'cookbook:read', label: 'Cookbook', detail: 'List cookbook tasks + tail their tmux output (debug a model serve from outside the UI)' },
       { key: 'cookbook:launch', label: 'Cookbook launch', detail: 'Launch and stop cookbook serve tasks. Powerful: runs SSH commands on your configured servers, bounded by the same allowlist the UI uses (vllm/python3/sglang/llama-server/...)' },
@@ -5597,7 +5597,7 @@ async function initUnifiedIntegrations() {
               </button>
             </div>
             <div id="uf-codex-config-body" style="display:none;">
-              <div style="font-size:11px;opacity:0.62;margin:4px 0 6px;">Toggle which Odysseus tools this agent can use. New agents start with chat only.</div>
+              <div style="font-size:11px;opacity:0.62;margin:4px 0 6px;">Toggle which Agamemnon tools this agent can use. New agents start with chat only.</div>
               <div id="uf-codex-inline-scopes"></div>
             </div>
           </div>

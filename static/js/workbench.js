@@ -38,7 +38,7 @@ const PREFS_KEY = 'odysseus-workbench-prefs';
 const MAX_EVENTS = 1500;
 const CHAT_CARD_SOURCES = new Set(['claude_code', 'session', 'pipeline', 'bg_job', 'worktree']);
 const SOURCE_LABEL = {
-  odysseus: 'Odysseus', claude_code: 'Claude Code', session: 'Sub-agent', pipeline: 'Pipeline',
+  odysseus: 'Agamemnon', claude_code: 'Claude Code', session: 'Sub-agent', pipeline: 'Pipeline',
   bg_job: 'Background job', worktree: 'Worktree', system: 'System',
 };
 const KIND_ICON = {
@@ -407,7 +407,7 @@ async function refreshAgentRuns({ force = false } = {}) {
         stripWarn('denied', `this account cannot list runs (${e.status} ${e.message}); the strip stays hidden`);
       } else if (e && e.name === 'AbortError') {
         stripWarn('timeout', `/api/workbench/runs did not answer within ${AGENT_RUNS_TIMEOUT_MS / 1000}s -- ` +
-          'the browser may be out of connections to this host (too many open Odysseus tabs?); will keep retrying');
+          'the browser may be out of connections to this host (too many open Agamemnon tabs?); will keep retrying');
       } else {
         stripWarn(`err:${e && e.message}`, `/api/workbench/runs failed: ${e && e.message}; will keep retrying`);
       }
@@ -1102,7 +1102,7 @@ function prPaneHtml() {
             <button type="button" class="bad" data-wb-act="pr-review" data-event="REQUEST_CHANGES">Request changes</button>
           </span>
         </div>
-        <button type="button" class="wb-btn wb-btn-ghost wb-btn-block" data-wb-act="pr-to-agent" title="Draft a request in the chat composer">Ask Odysseus to address this PR</button>
+        <button type="button" class="wb-btn wb-btn-ghost wb-btn-block" data-wb-act="pr-to-agent" title="Draft a request in the chat composer">Ask Agamemnon to address this PR</button>
       </div>
     </div></div>`;
 }

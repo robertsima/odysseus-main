@@ -120,7 +120,7 @@ export function startRecording(onFileCreated, showToast, showError) {
   const host = window.location.hostname;
   const loopback = host === 'localhost' || host === '127.0.0.1' || host === '::1';
   if (!window.isSecureContext && !loopback) {
-    showError?.('Your browser blocks microphones on remote HTTP pages. Odysseus can stay HTTP; open it through localhost or trust this origin in your browser.');
+    showError?.('Your browser blocks microphones on remote HTTP pages. Agamemnon can stay HTTP; open it through localhost or trust this origin in your browser.');
     resetRecordingUI();
     return;
   }

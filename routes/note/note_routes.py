@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from core.middleware import INTERNAL_TOOL_USER
 from src.auth_helpers import require_user
-from src.constants import DATA_DIR
+from src.constants import DATA_DIR, REMINDER_SUBJECT_PREFIX
 from src.upload_handler import reserve_upload_references
 from src.notes_markdown import NoteItem, NoteRecord
 from src.notes_store import STORE
@@ -407,7 +407,7 @@ async def dispatch_reminder(
                 msg["To"] = recipient
                 _t = title or 'Note'
                 _t = _t[len('Reminder:'):].strip() if _t.lower().startswith('reminder:') else _t
-                msg["Subject"] = f"Reminder (Odysseus): {_t}"
+                msg["Subject"] = f"{REMINDER_SUBJECT_PREFIX} {_t}"
                 msg["Date"] = _dt.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
                 msg["X-Odysseus-Origin"] = "odysseus-ui"
                 msg["X-Odysseus-Kind"] = "reminder"

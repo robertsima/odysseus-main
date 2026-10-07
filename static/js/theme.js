@@ -51,8 +51,15 @@ const CUSTOM_THEMES_PREF = 'custom-themes';
 // so its write time is kept beside it rather than inside it.
 const CUSTOM_THEMES_STAMP_KEY = 'odysseus-custom-themes-updated';
 
+// `auto` (the default) sets no --font-family, so the page style's typeface
+// applies everywhere: Space Grotesk for Agamemnon, Fira Code for Classic
+// (--theme-font in style.css). An explicit choice overrides it everywhere.
+// Before `auto`, the Agamemnon stylesheet pinned Space Grotesk on the body,
+// so picking a font changed only the few rules that read --font-family.
 const FONT_MAP = {
+  auto: null,
   mono: "'Fira Code', monospace",
+  grotesk: "'Space Grotesk', system-ui, sans-serif",
   sans: "system-ui, -apple-system, 'Segoe UI', sans-serif",
   serif: "Georgia, 'Times New Roman', serif",
   humanist: "'Trebuchet MS', 'Segoe UI', sans-serif",
@@ -62,7 +69,7 @@ const FONT_MAP = {
   rounded: "ui-rounded, 'Arial Rounded MT Bold', system-ui, sans-serif",
   opendyslexic: "'OpenDyslexic', sans-serif",
 };
-const DEFAULT_FONT = 'mono';
+const DEFAULT_FONT = 'auto';
 const DEFAULT_DENSITY = 'comfortable';
 const MAX_CUSTOM_THEMES = 8;
 
@@ -202,7 +209,7 @@ const ADV_KEYS = [
   { key: 'aiBubbleBg',         css: '--ai-bubble-bg',      label: 'AI Chat Bubble',   group: 'Chat Bubbles' },
   { key: 'bubbleBorder',       css: '--bubble-border',     label: 'Border Chat Bubble', group: 'Chat Bubbles' },
   { key: 'sidebarBg',          css: '--sidebar-bg',        label: 'Sidebar Bg',       group: 'Sidebar' },
-  { key: 'brandColor',         css: '--brand-color',       label: 'Odysseus Logo',    group: 'Sidebar' },
+  { key: 'brandColor',         css: '--brand-color',       label: 'Agamemnon Logo',    group: 'Sidebar' },
   { key: 'brandMixTo',         css: '--brand-mix-to',      label: 'Logo Gradient End', group: 'Sidebar' },
   { key: 'hamburgerColor',     css: '--hamburger-color',   label: 'Hamburger Menu',   group: 'Sidebar' },
   { key: 'inputBg',            css: '--input-bg',          label: 'Input Bg',         group: 'Chat Input / Prompt Area' },
@@ -451,9 +458,13 @@ export function applyFontDensity(font, density) {
     // It's a custom font from the local folder
     _injectFontFace(f, _customFonts[f]);
     family = "'" + f + "', sans-serif";
+  } else if (!family && !(f in FONT_MAP)) {
+    // A custom font before /api/fonts/custom has answered: keep the family
+    // index.html painted; initThemeUI re-applies it once the face is known.
+    family = "'" + String(f).replace(/'/g, '') + "', sans-serif";
   }
-  if (!family) family = FONT_MAP[DEFAULT_FONT];
-  document.documentElement.style.setProperty('--font-family', family);
+  if (family) document.documentElement.style.setProperty('--font-family', family);
+  else document.documentElement.style.removeProperty('--font-family');
   document.documentElement.classList.remove('density-compact', 'density-spacious');
   if (d !== 'comfortable') document.documentElement.classList.add('density-' + d);
 }
@@ -1232,6 +1243,7 @@ export function initThemeUI() {
         }
         // Restore saved value after options are populated
         nf.value = _initFont;
+        if (_customFonts[_initFont]) applyFontDensity(_initFont, document.getElementById('theme-density-select')?.value);
       })
       .catch(e => console.warn('Custom fonts fetch failed:', e));
   }

@@ -3714,6 +3714,6 @@ def test_direct_low_signal_keeps_the_persona_and_loadout_instructions(monkeypatc
         assert "Your name is Socrates" in text
         assert "Always sign off as Scout." in text
         assert "untrusted context policy" not in text
-        assert "You are Odysseus" not in text  # the persona's name is not contradicted
+        assert "You are Agamemnon" not in text  # the persona's name is not contradicted
         assert request[-1] == {"role": "user", "content": "hi"}
         assert all("_persona" not in m for m in request)

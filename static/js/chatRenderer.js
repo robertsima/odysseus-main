@@ -2276,7 +2276,7 @@ export function displayMetrics(messageElement, metrics) {
           compactMsg.className = 'msg msg-ai';
           const compactRole = document.createElement('div');
           compactRole.className = 'role';
-          compactRole.textContent = 'Odysseus';
+          compactRole.textContent = 'Agamemnon';
           const compactBody = document.createElement('div');
           compactBody.className = 'body';
           compactBody.innerHTML = 'Compacting context <span class="compact-wave">▁▂▃▅▂▁</span>';
@@ -2956,7 +2956,7 @@ export function addMessage(role, content, modelName, metadata) {
     const agentFrom = isAgentMsg ? String(metadata.from_session_name || metadata.from_session || 'another chat') : '';
     var _roleText = role === 'user'
       ? (isAgentMsg ? (isWorkerMsg ? 'Worker · ' : 'Agent · ') + agentFrom : 'You')
-      : (isSlash || isCompacted) ? 'Odysseus' : modelRouteLabel(
+      : (isSlash || isCompacted) ? 'Agamemnon' : modelRouteLabel(
         replyModels.requestedModel,
         resolvedModel,
         replyModels.requestedEndpointLabel,

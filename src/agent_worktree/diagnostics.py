@@ -119,7 +119,7 @@ def _check_config(cfg: WorktreeConfig) -> List[Check]:
         checks.append(
             Check(
                 "repository", FAIL, f"{raw_repo!r} is not a valid owner/name slug",
-                hint="Use owner/name with no URL, no .git suffix, e.g. robertsima/odysseus-main.",
+                hint="Use owner/name with no URL, no .git suffix, e.g. your-org/your-repo.",
             )
         )
     else:

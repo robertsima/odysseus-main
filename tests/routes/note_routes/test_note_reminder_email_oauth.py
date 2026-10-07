@@ -47,5 +47,5 @@ def test_dispatch_reminder_sends_with_google_oauth_without_smtp_password():
     assert actual_cfg is cfg
     assert sender == "alice@example.edu"
     assert recipients == ["alice@example.edu"]
-    assert "Subject: Reminder (Odysseus): Submit report" in message
+    assert "Subject: Reminder (Agamemnon): Submit report" in message
 

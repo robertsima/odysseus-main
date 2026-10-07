@@ -68,7 +68,7 @@ _HF_TOKEN_STATUS_SNIPPET = (
     'echo "[odysseus] HF token: applied"; '
     'else '
     'echo "[odysseus] HF token: NOT SET — gated/private models will be denied. '
-    'Add one in Odysseus Cookbook -> Settings -> HuggingFace Token."; '
+    'Add one in Agamemnon Cookbook -> Settings -> HuggingFace Token."; '
     'fi'
 )
 
@@ -104,7 +104,7 @@ def _append_mlx_image_server_script(runner_lines: list[str]) -> None:
         script = script_path.read_text(encoding="utf-8")
     except Exception as e:
         logger.warning("Failed to read mlx_image_server.py: %s", e)
-        runner_lines.append('echo "ERROR: Odysseus could not prepare the MLX image server helper."')
+        runner_lines.append('echo "ERROR: Agamemnon could not prepare the MLX image server helper."')
         runner_lines.append('ODYSSEUS_PREFLIGHT_EXIT=127')
         return
     runner_lines.append('mkdir -p scripts')
@@ -543,7 +543,7 @@ def setup_cookbook_routes() -> APIRouter:
                 "MLX-LM tried to quantize an already-quantized DeepSeek switch layer.",
                 [
                     {"label": "relaunch from the cached local Hugging Face snapshot path on this Mac", "op": "manual"},
-                    {"label": "Odysseus now rewrites MLX repo-id launches to a cached snapshot when one exists", "op": "manual"},
+                    {"label": "Agamemnon now rewrites MLX repo-id launches to a cached snapshot when one exists", "op": "manual"},
                 ],
             ),
             # System build deps come BEFORE the generic llama.cpp catch-all
@@ -2324,7 +2324,7 @@ def setup_cookbook_routes() -> APIRouter:
                 runner_lines.append('fi')
                 runner_lines.append('ODYSSEUS_OLLAMA_URL="http://${ODYSSEUS_OLLAMA_HOST}:${ODYSSEUS_OLLAMA_PORT}"')
                 if remote and _ollama_host in ("0.0.0.0", "::"):
-                    runner_lines.append('echo "[odysseus] WARNING: remote Ollama will bind to ${ODYSSEUS_OLLAMA_HOST}:${ODYSSEUS_OLLAMA_PORT} so Odysseus can reach it from this host."')
+                    runner_lines.append('echo "[odysseus] WARNING: remote Ollama will bind to ${ODYSSEUS_OLLAMA_HOST}:${ODYSSEUS_OLLAMA_PORT} so Agamemnon can reach it from this host."')
                     runner_lines.append('echo "[odysseus] Ollama has no built-in authentication; expose this only on a trusted LAN/VPN or provide an explicit OLLAMA_HOST with your own access controls."')
                 runner_lines.append('echo "Starting ollama server on ${ODYSSEUS_OLLAMA_HOST}:${ODYSSEUS_OLLAMA_PORT}..."')
                 runner_lines.append('OLLAMA_HOST="${ODYSSEUS_OLLAMA_HOST}:${ODYSSEUS_OLLAMA_PORT}" ollama serve')
@@ -2621,7 +2621,7 @@ def setup_cookbook_routes() -> APIRouter:
                 runner_lines.append('    ODYSSEUS_PREFLIGHT_EXIT=127')
                 runner_lines.append('  fi')
                 runner_lines.append('  if ! command -v odysseus-mlx-colorize >/dev/null 2>&1 && ! command -v mlx-ddcolor-serve >/dev/null 2>&1; then')
-                runner_lines.append('    echo "ERROR: DDColor MLX serving requires the Odysseus mlx-ddcolor-swift bridge on PATH: odysseus-mlx-colorize or mlx-ddcolor-serve."')
+                runner_lines.append('    echo "ERROR: DDColor MLX serving requires the Agamemnon mlx-ddcolor-swift bridge on PATH: odysseus-mlx-colorize or mlx-ddcolor-serve."')
                 runner_lines.append('    echo "Build it from swift/odysseus-mlx-image-bridge in Cookbook Dependencies."')
                 runner_lines.append('    ODYSSEUS_PREFLIGHT_EXIT=127')
                 runner_lines.append('  fi')
@@ -2641,7 +2641,7 @@ def setup_cookbook_routes() -> APIRouter:
                 runner_lines.append('    ODYSSEUS_PREFLIGHT_EXIT=127')
                 runner_lines.append('  fi')
                 runner_lines.append('  if ! command -v odysseus-mlx-inpaint >/dev/null 2>&1 && ! command -v mlx-lama-serve >/dev/null 2>&1; then')
-                runner_lines.append('    echo "ERROR: LaMa / MI-GAN MLX serving requires the Odysseus mlx-lama-swift bridge on PATH: odysseus-mlx-inpaint or mlx-lama-serve."')
+                runner_lines.append('    echo "ERROR: LaMa / MI-GAN MLX serving requires the Agamemnon mlx-lama-swift bridge on PATH: odysseus-mlx-inpaint or mlx-lama-serve."')
                 runner_lines.append('    echo "Build it from swift/odysseus-mlx-image-bridge in Cookbook Dependencies."')
                 runner_lines.append('    ODYSSEUS_PREFLIGHT_EXIT=127')
                 runner_lines.append('  fi')

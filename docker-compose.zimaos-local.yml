@@ -77,14 +77,16 @@ services:
       # ---- optional: Windows Pi worker over SSH ----
       ODYSSEUS_PI_WORKER_HOST: ${ODYSSEUS_PI_WORKER_HOST:-}
       ODYSSEUS_PI_WORKER_IDENTITY_FILE: ${ODYSSEUS_PI_WORKER_IDENTITY_FILE:-}
-      # No value on purpose: passed only when .env sets it. An EMPTY
-      # script/root is rejected as an invalid path instead of meaning "default".
+      # No value on purpose: passed only when .env sets it. The worker
+      # assumes no script or root and names whichever one is missing.
       ODYSSEUS_PI_WORKER_SCRIPT:
       ODYSSEUS_PI_WORKER_ROOT:
 
       # ---- optional: Google OAuth (Gmail/Workspace mail, Google Calendar) ----
-      # Behind HTTPS or a proxy also set GOOGLE_OAUTH_REDIRECT_URI and
-      # GOOGLE_CALENDAR_OAUTH_REDIRECT_URI; plain LAN HTTP infers them.
+      # Behind HTTPS or a proxy set APP_PUBLIC_URL (e.g. the tailnet HTTPS
+      # name); both Google redirects are built from it. Plain LAN HTTP infers
+      # them from the browser's address.
+      APP_PUBLIC_URL: ${APP_PUBLIC_URL:-}
       GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
       GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:-}
     extra_hosts:

@@ -138,7 +138,7 @@ DEFAULT_SETTINGS = {
     "penpot_public_url": "",
     "agent_approval_ttl_seconds": 900,
     "tool_approval_ttl_seconds": 600,
-    "agent_base_branch": "dev",
+    "agent_base_branch": "",
     "search_provider": "searxng",
     # Providers tried when the primary fails or rate-limits. Empty means the
     # built-in default chain (DuckDuckGo: free, no API key, safe to ship on for

@@ -419,8 +419,28 @@ async def _resolve_base(cfg: WorktreeConfig, base: str) -> Dict[str, str]:
     return {"ref": text, "sha": sha, "pr_base": normalize_branch(pr_base)}
 
 
+async def _checked_out_branch(cfg: WorktreeConfig) -> str:
+    res = await _git(cfg, ["symbolic-ref", "--quiet", "--short", "HEAD"],
+                     cwd=cfg.source_repo, check=False)
+    return normalize_branch(res.stdout.strip()) if res.ok else ""
+
+
 async def _default_base(cfg: WorktreeConfig) -> Dict[str, str]:
     """The base used when none is given."""
+    if not cfg.repository_key and not cfg.base_branch:
+        # No base branch configured: the repository's own default (origin/HEAD),
+        # or for a checkout with no remote default, the branch it has checked
+        # out. The built-in default used to be this project's `dev`.
+        default = await _origin_default_branch(cfg)
+        if default:
+            return await _resolve_base(cfg, f"origin/{default}")
+        local = await _checked_out_branch(cfg)
+        if local:
+            return await _resolve_base(cfg, local)
+        raise WorktreeError(
+            f"{cfg.source_repo} has no origin/HEAD or checked-out branch to default to; set "
+            "Settings > Agents > Default target branch or pass base explicitly", code="BASE_REQUIRED",
+        )
     if not cfg.repository_key:
         # The configured source repository keeps its configured base branch.
         for candidate in (f"origin/{cfg.base_branch}", cfg.base_branch):
@@ -1324,7 +1344,7 @@ async def request_publish(
             + "; ".join(f"`{d['command']}` in {d['folder']}" for d in deps) + ")."
         )
     view["next_step"] = (
-        "A person must approve it: in the Odysseus UI (this chat shows the publish request "
+        "A person must approve it: in the Agamemnon UI (this chat shows the publish request "
         "with Review; approving there also publishes), or on the host with "
         f"scripts/odysseus-agent-worktree approve {record['id']}"
         + (" --allow-sensitive" if summary["sensitive"] else "")

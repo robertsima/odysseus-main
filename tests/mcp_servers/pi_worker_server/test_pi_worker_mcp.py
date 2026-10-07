@@ -53,28 +53,30 @@ def test_project_path_is_confined_to_development(monkeypatch):
     assert worker._validate_project_path(r"D:\Development\repo") == "D:/Development/repo"
 
     with pytest.raises(ValueError, match="must stay under"):
-        worker._validate_project_path(r"C:\Users\rober")
+        worker._validate_project_path(r"C:\Users\someone")
 
     with pytest.raises(ValueError):
         worker._validate_project_path(r"D:\Development\..\Windows")
 
 
 def test_ssh_command_uses_rpc_worker_without_task_in_command(monkeypatch):
-    monkeypatch.setenv(worker.HOST_ENV, "rober@192.168.1.132")
+    monkeypatch.setenv(worker.HOST_ENV, "dev@192.0.2.10")
+    monkeypatch.setenv(worker.SCRIPT_ENV, "D:/Development/Start-Pi-Worker.ps1")
     monkeypatch.setattr(worker.shutil, "which", lambda name: "/usr/bin/ssh")
 
     argv = worker._ssh_argv("D:/Development/example project", "high", True)
 
     assert argv[0] == "/usr/bin/ssh"
-    assert argv[-2] == "rober@192.168.1.132"
+    assert argv[-2] == "dev@192.0.2.10"
     assert "Start-Pi-Worker.ps1" in argv[-1]
     assert '"D:/Development/example project"' in argv[-1]
     assert "-Rpc" in argv[-1]
     assert "-NoSession" in argv[-1]
 
 
-def test_append_acceptance_record_writes_only_configured_ai_mind(monkeypatch, tmp_path):
-    ai_mind = tmp_path / "AI Mind"
+def test_append_acceptance_record_writes_only_the_configured_log(monkeypatch, tmp_path):
+    # Any folder name: the log used to be accepted only in a folder called "AI Mind".
+    ai_mind = tmp_path / "Delegation log"
     monkeypatch.setenv(worker.DOC_ROOT_ENV, str(ai_mind))
     monkeypatch.setenv(worker.ROOT_ENV, "D:/Development")
 
@@ -94,9 +96,15 @@ def test_append_acceptance_record_writes_only_configured_ai_mind(monkeypatch, tm
     assert "pytest tests/test_parser.py -q passed" in note
 
 
-def test_acceptance_record_rejects_non_ai_mind_root(monkeypatch, tmp_path):
-    monkeypatch.setenv(worker.DOC_ROOT_ENV, str(tmp_path / "Vault Mind"))
-    with pytest.raises(ValueError, match="must point to the AI Mind"):
+def test_nothing_is_assumed_about_an_unconfigured_worker(monkeypatch):
+    """No default drive, script or vault folder: each names its variable instead."""
+    for name in (worker.ROOT_ENV, worker.SCRIPT_ENV, worker.DOC_ROOT_ENV):
+        monkeypatch.delenv(name, raising=False)
+    with pytest.raises(ValueError, match=worker.ROOT_ENV):
+        worker._validate_project_path("D:/Development/repo")
+    with pytest.raises(ValueError, match=worker.SCRIPT_ENV):
+        worker._remote_command("D:/Development/repo", "low", True)
+    with pytest.raises(ValueError, match=worker.DOC_ROOT_ENV):
         worker._documentation_path()
 
 
@@ -108,8 +116,9 @@ async def test_tool_list_exposes_delegation_and_acceptance_record():
 
 @pytest.mark.asyncio
 async def test_run_pi_task_returns_final_rpc_text(monkeypatch):
-    monkeypatch.setenv(worker.HOST_ENV, "rober@192.168.1.132")
+    monkeypatch.setenv(worker.HOST_ENV, "dev@192.0.2.10")
     monkeypatch.setenv(worker.ROOT_ENV, "D:/Development")
+    monkeypatch.setenv(worker.SCRIPT_ENV, "D:/Development/Start-Pi-Worker.ps1")
     monkeypatch.setattr(worker.shutil, "which", lambda name: "/usr/bin/ssh")
 
     process = _FakeProcess([

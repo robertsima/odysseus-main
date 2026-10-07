@@ -2,9 +2,20 @@
 """Application-wide constants and configuration values."""
 import os
 
+from src import env_aliases
 from src.runtime_paths import get_app_root, get_default_data_dir
 
+# Entry points other than app.py (launcher, scripts) reach configuration
+# through this module first; AGAMEMNON_* names must be in place before it reads.
+env_aliases.apply()
+
 APP_VERSION = "1.0.3"
+APP_NAME = "Agamemnon"
+
+# Subject prefix of reminder emails. Reminders sent before the rename carry the
+# legacy prefix; mailbox filters and Clear match both.
+REMINDER_SUBJECT_PREFIX = f"Reminder ({APP_NAME}):"
+LEGACY_REMINDER_SUBJECT_PREFIX = "Reminder (Odysseus):"
 
 # Base paths
 BASE_DIR = os.path.join(get_app_root(), "")

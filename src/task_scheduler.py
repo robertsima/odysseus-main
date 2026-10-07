@@ -1335,7 +1335,7 @@ class TaskScheduler:
         for task, was_due_at, pushed_to in deferred:
             _note_scheduler_event(
                 task,
-                title=f"Task '{task.name}' did not run — Odysseus was active",
+                title=f"Task '{task.name}' did not run — Agamemnon was active",
                 reason="foreground_active",
                 data={
                     "event": "deferred",
@@ -1481,7 +1481,7 @@ class TaskScheduler:
         try:
             waiting = db.query(TaskRun).filter(TaskRun.id == run_id).first()
             if waiting and waiting.status == "queued":
-                waiting.result = "Queued — waiting for Odysseus to be idle…"
+                waiting.result = "Queued — waiting for Agamemnon to be idle…"
                 db.commit()
         except Exception:
             logger.debug("Failed to mark run %s as waiting for idle", run_id, exc_info=True)
@@ -1632,7 +1632,7 @@ class TaskScheduler:
             lines.insert(0, f"- ({omitted} earlier call(s) not shown)")
         return (
             "[Scheduler note] An earlier attempt of this run was interrupted because "
-            "Odysseus became active, after it had already made these tool calls:\n"
+            "Agamemnon became active, after it had already made these tool calls:\n"
             + "\n".join(lines)
             + "\nTheir effects may already be in place. Check the current state before "
             "repeating any change, and do not redo work that is already done."
@@ -1642,12 +1642,13 @@ class TaskScheduler:
     def _foreground_pause_message(cls, reason: str | None = None) -> str:
         """Activity text for a preempted run.
 
-        Keeps the "Odysseus became active" phrase: runtime_introspection maps
-        it to the ``foreground_interrupt`` abort cause.
+        Keeps the "Agamemnon became active" phrase: runtime_introspection maps
+        it (and the pre-rename "Odysseus became active") to the
+        ``foreground_interrupt`` abort cause.
         """
         minutes = int(cls._FOREGROUND_PREEMPT_RETRY.total_seconds() // 60)
         detail = f" ({reason})" if reason and "became active" not in reason else ""
-        return f"Paused because Odysseus became active{detail}; retrying in {minutes} min"
+        return f"Paused because Agamemnon became active{detail}; retrying in {minutes} min"
 
     #: Backoff for re-running a task whose failure looked like a transient
     #: upstream outage. Capped: once these are used up the run takes the normal
@@ -1905,7 +1906,7 @@ class TaskScheduler:
                 task_view = _orm_scalar_snapshot(task)
                 waiting = db.query(TaskRun).filter(TaskRun.id == run_id).first()
                 if waiting and waiting.status == "queued":
-                    waiting.result = "Queued — waiting for Odysseus to be idle…"
+                    waiting.result = "Queued — waiting for Agamemnon to be idle…"
                     db.commit()
                 # The quiet gate can wait indefinitely.  A Session does not
                 # check a connection out until the first query, but once it
@@ -2014,7 +2015,7 @@ class TaskScheduler:
                             if self._foreground_preemption_exempt(task_id):
                                 continue
                             foreground_cancel["hit"] = True
-                            logger.info("Task '%s' interrupted because Odysseus became active", task.name)
+                            logger.info("Task '%s' interrupted because Agamemnon became active", task.name)
                             if current_task:
                                 current_task.cancel()
                             return
@@ -3857,7 +3858,7 @@ class TaskScheduler:
         stopped = self._mark_run_aborted(task_id) or stopped
         return stopped
 
-    async def stop_background_tasks_for_foreground(self, *, reason: str = "Odysseus became active") -> int:
+    async def stop_background_tasks_for_foreground(self, *, reason: str = "Agamemnon became active") -> int:
         """Cancel all in-process scheduler tasks because the user is active.
 
         This is intentionally blunt for scheduled/background work: when the

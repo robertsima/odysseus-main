@@ -1376,12 +1376,12 @@ def _diagnose_serve_output(text: str) -> dict | None:
         ),
         (
             r"mlx-lama-swift|odysseus-mlx-inpaint|mlx-lama-serve|LaMa / MI-GAN MLX inpainting models require",
-            "LaMa / MI-GAN MLX inpainting requires an Odysseus-compatible mlx-lama-swift bridge on this Apple Silicon server.",
+            "LaMa / MI-GAN MLX inpainting requires an Agamemnon-compatible mlx-lama-swift bridge on this Apple Silicon server.",
             [{"label": "build mlx-lama-swift bridge and put odysseus-mlx-inpaint or mlx-lama-serve on PATH", "op": "dependency", "package": "mlx_lama_swift"}],
         ),
         (
             r"mlx-ddcolor-swift|odysseus-mlx-colorize|mlx-ddcolor-serve|DDColor MLX models require",
-            "DDColor MLX colorization requires an Odysseus-compatible mlx-ddcolor-swift bridge on this Apple Silicon server.",
+            "DDColor MLX colorization requires an Agamemnon-compatible mlx-ddcolor-swift bridge on this Apple Silicon server.",
             [{"label": "build mlx-ddcolor-swift bridge and put odysseus-mlx-colorize or mlx-ddcolor-serve on PATH", "op": "dependency", "package": "mlx_ddcolor_swift"}],
         ),
         (
@@ -1389,7 +1389,7 @@ def _diagnose_serve_output(text: str) -> dict | None:
             "MLX-LM tried to quantize an already-quantized DeepSeek switch layer.",
             [
                 {"label": "relaunch from the cached local Hugging Face snapshot path on this Mac", "op": "manual"},
-                {"label": "Odysseus now rewrites MLX repo-id launches to a cached snapshot when one exists", "op": "manual"},
+                {"label": "Agamemnon now rewrites MLX repo-id launches to a cached snapshot when one exists", "op": "manual"},
             ],
         ),
         # System build deps come BEFORE the generic llama.cpp catch-all so

@@ -201,7 +201,7 @@ def github_mcp_servers() -> dict[str, dict]:
         logger.error(
             "%s is set but is not a plausible GitHub credential; GitHub MCP servers "
             "were not registered. Use a GitHub PAT (normally ghp_ or github_pat_), not "
-            "an Odysseus API token.",
+            "an Agamemnon API token.",
             GITHUB_MCP_TOKEN_ENV,
         )
         return {}
@@ -396,9 +396,9 @@ async def register_builtin_servers(mcp_manager):
                     f"  Reason: npm package {pkg_spec!r} is not installed in the npx cache.\n"
                     f"  Impact: tools provided by this MCP server will be unavailable.\n"
                     f"  Fix:    {os.path.basename(npx_path)} -y {pkg_spec} --version\n"
-                    f"          (run once, then restart Odysseus)\n"
+                    f"          (run once, then restart Agamemnon)\n"
                     f"  Notes:  ODYSSEUS_BROWSER_MCP_REQUIRE_CACHE=1 is set, "
-                    f"so Odysseus will not install browser automation on startup."
+                    f"so Agamemnon will not install browser automation on startup."
                 )
                 continue
 

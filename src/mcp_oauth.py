@@ -165,7 +165,7 @@ def build_provider(server_id: str, url: str, on_redirect=None):
     from mcp.shared.auth import OAuthClientMetadata
 
     client_metadata = OAuthClientMetadata(
-        client_name="Odysseus",
+        client_name="Agamemnon",
         redirect_uris=[REDIRECT_URI],
         grant_types=["authorization_code", "refresh_token"],
         response_types=["code"],

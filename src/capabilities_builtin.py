@@ -92,7 +92,7 @@ register(Capability(
                 "Install a coding-agent CLI and set its path in Settings › Agents, "
                 "or configure a connected coding-agent MCP tool. Claude "
                 "subscriptions remain available through the unmodified Claude Code CLI; "
-                "Odysseus does not collect Claude account tokens. No API key is required "
+                "Agamemnon does not collect Claude account tokens. No API key is required "
                 "for a subscription-authenticated CLI or MCP server."
             ),
         ),
@@ -184,7 +184,7 @@ register(Capability(
     name="host_docker",
     title="Host Docker access",
     summary=(
-        "Lets Odysseus drive the host's Docker daemon. High trust: this is "
+        "Lets Agamemnon drive the host's Docker daemon. High trust: this is "
         "effectively root on the host, so it is opt-in per deployment."
     ),
     requirements=(
@@ -210,7 +210,7 @@ register(Capability(
         Requirement(
             name="git",
             check=binary_on_path("git"),
-            hint="Install git on the machine running Odysseus.",
+            hint="Install git on the machine running Agamemnon.",
         ),
     ),
     # On by default, and deliberately NOT gating the whole tool behind

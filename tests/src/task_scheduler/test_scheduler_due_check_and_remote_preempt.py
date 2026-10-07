@@ -299,7 +299,7 @@ def test_started_local_run_is_still_preempted(make_test_db, monkeypatch, endpoin
     assert counts == [1]
     runs, task = _load(maker, ScheduledTask, TaskRun)
     assert runs[0].status == "aborted"
-    assert "Odysseus became active" in runs[0].error
+    assert "Agamemnon became active" in runs[0].error
     assert task.next_run > _utcnow() + timedelta(minutes=14)
 
 

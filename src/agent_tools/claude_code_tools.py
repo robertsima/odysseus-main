@@ -537,10 +537,18 @@ def _worker_scope(action: str, args: dict, session_id: Optional[str], tool_name:
 
 
 def _callback_config() -> dict:
-    """Odysseus callback settings for the child, without the token itself."""
-    url = str(_setting("claude_code_odysseus_url", os.environ.get("CLAUDE_CODE_ODYSSEUS_URL", "")) or "").strip()
+    """Callback settings for the child, without the token itself.
+
+    The token file is the opt-in. A local child runs beside the app, so the
+    URL defaults to this instance's own loopback address; set one only when
+    the child reaches the app some other way.
+    """
     token_file = str(_setting("claude_code_odysseus_token_file",
                               os.environ.get("CLAUDE_CODE_ODYSSEUS_TOKEN_FILE", "")) or "").strip()
+    url = str(_setting("claude_code_odysseus_url", os.environ.get("CLAUDE_CODE_ODYSSEUS_URL", "")) or "").strip()
+    if token_file and not url:
+        from src.constants import internal_api_base
+        url = internal_api_base()
     return {"url": url, "token_file": token_file, "enabled": bool(url and token_file)}
 
 
@@ -750,14 +758,14 @@ def _claude_environment() -> dict[str, str]:
             info = path.stat()
             if not path.is_file() or (os.name != "nt" and info.st_mode & 0o077):
                 raise ValueError(
-                    "Claude Code Odysseus token file must be a private regular "
+                    "Claude Code Agamemnon token file must be a private regular "
                     "file (mode 0600 on POSIX; restricted ACL on Windows)"
                 )
             token = path.read_text(encoding="utf-8").strip()
         except OSError as exc:
-            raise ValueError(f"Claude Code Odysseus token file is unavailable: {exc}") from exc
+            raise ValueError(f"Claude Code Agamemnon token file is unavailable: {exc}") from exc
         if not token:
-            raise ValueError("Claude Code Odysseus token file is empty")
+            raise ValueError("Claude Code Agamemnon token file is empty")
         env["ODYSSEUS_API_TOKEN"] = token
     return env
 
@@ -1617,7 +1625,7 @@ async def update_binary(target: Optional[str] = None, *, timeout: int = UPDATE_T
         result["other_installs"] = others
         stale = [f"{o['path']} ({o['version'] or 'no version'})" for o in others if o["stale"]]
         if stale:
-            hints.append(f"Left in place: {', '.join(stale)} — an older Claude Code install Odysseus no longer "
+            hints.append(f"Left in place: {', '.join(stale)} — an older Claude Code install Agamemnon no longer "
                          f"runs (it runs {binary}). Nothing was deleted; remove it by hand once nothing else "
                          "points at it.")
     if required_v:
@@ -1628,7 +1636,7 @@ async def update_binary(target: Optional[str] = None, *, timeout: int = UPDATE_T
         result["error"] = _tool_error(f"update command exited {code}: {tail or 'no output'}")
         if "EACCES" in text or "permission denied" in text.lower():
             hints.append(f"The install at {method.get('prefix') or method['resolved']} is not writable by the "
-                         "Odysseus process; chown it to the container's PUID:PGID and retry.")
+                         "Agamemnon process; chown it to the container's PUID:PGID and retry.")
         if "DISABLE_UPDATES" in text:
             hints.append("Updates are disabled by DISABLE_UPDATES in Claude Code's settings; remove it to update.")
     elif required_v and not satisfies:
@@ -1711,10 +1719,10 @@ async def status_report() -> dict:
                 # Typically created with `docker exec` (root) while the app
                 # runs as PUID/PGID — the classic ZimaOS case.
                 if process_uid is not None and process_gid is not None:
-                    token_problem = (f"it is owned by uid {st.st_uid} but Odysseus runs as uid {process_uid}; "
+                    token_problem = (f"it is owned by uid {st.st_uid} but Agamemnon runs as uid {process_uid}; "
                                      f"chown it to {process_uid}:{process_gid}")
                 else:
-                    token_problem = "it is not readable by the Odysseus process"
+                    token_problem = "it is not readable by the Agamemnon process"
             callback_status["token_file_ok"] = not token_problem
             callback_status["token_file_owner"] = st.st_uid
             callback_status["process_uid"] = process_uid
@@ -1748,7 +1756,7 @@ async def status_report() -> dict:
         hints.append(
             f"The callback token file {callback_status.get('token_file')} blocks delegation: {token_problem}. "
             "It must be a regular file, mode 0600 on POSIX (or protected by a "
-            "restricted ACL on Windows), owned by the Odysseus process user "
+            "restricted ACL on Windows), owned by the Agamemnon process user "
             "(Settings › Claude Code › Advanced › Callback token file / CLAUDE_CODE_ODYSSEUS_TOKEN_FILE). "
             "Fix it, or clear the callback URL and token file to delegate without the callback."
         )

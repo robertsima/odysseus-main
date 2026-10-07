@@ -59,6 +59,22 @@ def github_git_host() -> str | None:
     return host
 
 
+def github_api_base() -> str:
+    """The REST API root for the host GITHUB_HOST names.
+
+    github.com -> api.github.com; GitHub Enterprise Cloud with data residency
+    (*.ghe.com) -> api.<host>; GitHub Enterprise Server -> <host>/api/v3. A
+    GITHUB_HOST that github_git_host() rejects falls back to github.com, where
+    no Enterprise credential is valid, so the mistake surfaces as a 401.
+    """
+    host = github_git_host() or "github.com"
+    if host == "github.com":
+        return "https://api.github.com"
+    if host.endswith(".ghe.com"):
+        return f"https://api.{host}"
+    return f"https://{host}/api/v3"
+
+
 def token_for_git_host(host: str | None, token: str | None) -> str | None:
     """`token` only when `host` is the one the shared credential was issued for.
 

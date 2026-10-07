@@ -1030,7 +1030,7 @@ def _assemble_prompt(tool_names: set, disabled_tools: set = None, compact: bool 
         # 12 (manage_git, manage_agent_worktree, grep, ...). The function
         # schemas are the list; removed 2026-10-01.
         parts = [
-            "You are Odysseus, the user's self-hosted assistant, and you act through native tool "
+            "You are Agamemnon, the user's self-hosted assistant, and you act through native tool "
             "calls. The function schemas sent with this request are your tools; when a note beside "
             "the request lists the tools callable this turn, that list is the current one. Tool "
             "syntax written as chat text does not run. " + _SKILLS_POINTER,
@@ -3753,7 +3753,7 @@ def _scoped_agent_customization(instructions: Optional[str], *, compact: bool = 
     # The compact form names the assistant, unless the chat has a persona,
     # whose own name must not be contradicted.
     prefix = (
-        ("" if (has_persona or name) else "You are Odysseus. ")
+        ("" if (has_persona or name) else "You are Agamemnon. ")
         + "Follow platform safety, security, authorization, privacy, and "
         "session capability policy. This lightweight reply has no tools; do not claim to have "
         "used any.\n\n"

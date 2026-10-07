@@ -179,7 +179,7 @@ class PenpotClient:
         except httpx.HTTPError as exc:
             raise PenpotError(
                 f"cannot reach Penpot at {self.cfg.base_url} ({type(exc).__name__}: {exc}). "
-                "Inside the Odysseus container this must be the NAS LAN address, not localhost.") from exc
+                "Inside the Agamemnon container this must be the host's LAN address, not localhost.") from exc
         if resp.status_code == 401:
             raise PenpotError("Penpot rejected the access token (401). Make a new one under Penpot > "
                               "Your account > Access tokens and update the Penpot MCP server.")
@@ -1282,12 +1282,12 @@ async def render_board(client: PenpotClient, file_id: str, page_id: str,
             if os.path.exists(out_png):
                 os.remove(out_png)
             mismatch = (f" The viewer was opened at {origin} (penpotPublicURI / PENPOT_PUBLIC_URL) "
-                        f"while Odysseus reaches Penpot at {client.cfg.base_url}."
+                        f"while Agamemnon reaches Penpot at {client.cfg.base_url}."
                         if origin != client.cfg.base_url else "")
             raise PenpotError(
                 f"Penpot's viewer could not load the board; it showed its error page ({bad!r}).{mismatch} "
                 "Usually the browser cannot reach the host the Penpot frontend calls (set PENPOT_PUBLIC_URL "
-                "to an address reachable from Odysseus) or the file/share link is gone. "
+                "to an address reachable from Agamemnon) or the file/share link is gone. "
                 "No screenshot was returned; use inspect_design for the shape data meanwhile.")
         if not os.path.isfile(out_png) or os.path.getsize(out_png) < 1000:
             raise PenpotError("the browser produced no screenshot: " + (err or b"").decode("utf-8", "replace")[-300:])
