@@ -2,7 +2,7 @@
 layout: default
 ---
 
-# Odysseus Setup Guide
+# Agamemnon Setup Guide
 
 This page keeps the detailed install, deployment, troubleshooting, and configuration notes out of the front README.
 
@@ -14,7 +14,7 @@ Defaults work out of the box: clone, run, then configure models/search/email
 inside **Settings**. Only edit `.env` for deployment-level overrides like
 `APP_BIND`, `APP_PORT`, `AUTH_ENABLED`, `DATABASE_URL`, or a pre-seeded admin password.
 
-On first setup, Odysseus creates an admin account (`admin` unless
+On first setup, Agamemnon creates an admin account (`admin` unless
 `ODYSSEUS_ADMIN_USER` is set) and prints a temporary password in the terminal.
 For Docker installs, the same line is in `docker compose logs odysseus`.
 Use that for the first login, then change it in **Settings**.
@@ -72,7 +72,7 @@ connect to API or remote model servers instead. Use `--host 0.0.0.0` only when y
 
 ### Apple Silicon
 Docker on macOS cannot use the Metal GPU. For GPU-accelerated Cookbook on an
-M-series Mac, run Odysseus natively:
+M-series Mac, run Agamemnon natively:
 
 ```bash
 git clone https://github.com/odysseus-dev/odysseus.git
@@ -100,8 +100,8 @@ expose this port directly to the public internet. To build a clickable app wrapp
 <details>
 <summary>Cookbook, GPU, Ollama, and troubleshooting notes</summary>
 
-**Docker bundled services.** Compose starts Odysseus, ChromaDB, SearXNG, and
-ntfy. Odysseus and the bundled service ports bind to `127.0.0.1` by default, so
+**Docker bundled services.** Compose starts Agamemnon, ChromaDB, SearXNG, and
+ntfy. Agamemnon and the bundled service ports bind to `127.0.0.1` by default, so
 they are reachable from the host but not exposed to your LAN/public internet
 unless you opt in.
 
@@ -111,7 +111,7 @@ serve engines live in `./data/local` (`~/.local` in the container), so they
 survive container recreation.
 
 **Remote servers.** In **Cookbook -> Settings -> Servers**, generate the
-Odysseus SSH key and add the public key to the remote server's
+Agamemnon SSH key and add the public key to the remote server's
 `~/.ssh/authorized_keys`. From the host you can also run:
 
 ```bash
@@ -119,7 +119,7 @@ ssh-copy-id -i data/ssh/id_ed25519.pub user@server
 ```
 
 **Host Docker access (explicit opt-in).** Default Docker Compose intentionally
-does not mount `/var/run/docker.sock`. You can still connect Odysseus to
+does not mount `/var/run/docker.sock`. You can still connect Agamemnon to
 existing Ollama, vLLM, and other OpenAI-compatible endpoints without Docker
 socket access.
 
@@ -171,7 +171,7 @@ scripts/check-docker-gpu.sh --install-nvidia-toolkit --enable-nvidia-overlay
 ```
 #### Arch Linux NVIDIA Docker notes
 
-On Arch Linux, verify the host NVIDIA driver and Docker GPU passthrough before enabling the Odysseus NVIDIA overlay.
+On Arch Linux, verify the host NVIDIA driver and Docker GPU passthrough before enabling the Agamemnon NVIDIA overlay.
 
 Install the required packages:
 
@@ -200,13 +200,13 @@ Verify Docker GPU passthrough:
 docker run --rm --gpus all nvidia/cuda:12.9.0-base-ubuntu22.04 nvidia-smi
 ```
 
-Then enable the Odysseus NVIDIA compose overlay:
+Then enable the Agamemnon NVIDIA compose overlay:
 
 ```env
 COMPOSE_FILE=docker-compose.yml:docker/gpu.nvidia.yml
 ```
 
-Rebuild and verify the GPU inside the Odysseus container:
+Rebuild and verify the GPU inside the Agamemnon container:
 
 ```bash
 docker compose up -d --build
@@ -308,7 +308,7 @@ docker compose exec odysseus sh -lc 'test -e /dev/kfd && test -d /dev/dri && ls 
 > The same split applies to AMD/ROCm: seeing `/dev/kfd` and `/dev/dri` inside
 > the container confirms device passthrough, not ROCm userspace or a
 > ROCm-enabled vLLM/llama.cpp build. `rocm-smi` and `rocminfo` are not expected
-> inside the slim Odysseus image.
+> inside the slim Agamemnon image.
 
 **Ollama with Docker.** If Ollama runs on the host, add this endpoint in
 Settings:
@@ -323,11 +323,11 @@ Ollama must listen outside its own loopback interface:
 OLLAMA_HOST=0.0.0.0:11434 ollama serve
 ```
 
-This connects Odysseus in Docker to an Ollama server that is already running on
+This connects Agamemnon in Docker to an Ollama server that is already running on
 your host machine; it does not start Ollama inside the container.
 `host.docker.internal` is Docker's hostname for the host machine from inside the
 container. Cookbook **Serve** is a separate workflow for serving downloaded
-models through Odysseus/llama.cpp, so Windows users with an existing Ollama
+models through Agamemnon/llama.cpp, so Windows users with an existing Ollama
 install usually only need to add the endpoint in Settings.
 
 **Tool calls not firing on a manually-added Ollama `/v1` endpoint.** By
@@ -367,7 +367,7 @@ docker compose logs odysseus | grep -E 'ChromaDB|MemoryVectorStore|DEGRADED'
 **macOS details.** `start-macos.sh` installs Homebrew deps, creates the venv,
 runs setup, and starts uvicorn on port `7860` because AirPlay often holds
 `7000`. It uses llama.cpp/Ollama for Metal. vLLM/SGLang are CUDA/ROCm-only and
-do not run on macOS. MLX-only models are not served by Odysseus.
+do not run on macOS. MLX-only models are not served by Agamemnon.
 
 </details>
 
@@ -415,7 +415,7 @@ email, calendar, deep research) runs fully native. For full **Cookbook** backgro
 model downloads and the agent shell tool, also install
 [Git for Windows](https://git-scm.com/download/win) (provides `bash.exe`).
 Local GPU *serving* of vLLM/SGLang needs Linux/WSL2; for a local model on Windows,
-[Ollama](https://ollama.com/download) is the easiest path — point Odysseus at
+[Ollama](https://ollama.com/download) is the easiest path — point Agamemnon at
 `http://localhost:11434/v1` in Settings.
 
 Open `http://localhost:7000`, log in with the generated admin password,
@@ -424,7 +424,7 @@ and configure everything else inside **Settings**.
 ## Troubleshooting & Advanced Setup
 
 ### `chromadb-client` conflicts with embedded ChromaDB
-If `chromadb-client` (the lightweight HTTP-only package) is installed alongside the full `chromadb` package, Odysseus starts but ChromaDB silently falls back to HTTP-only mode and fails.
+If `chromadb-client` (the lightweight HTTP-only package) is installed alongside the full `chromadb` package, Agamemnon starts but ChromaDB silently falls back to HTTP-only mode and fails.
 
 **Fix:** uninstall `chromadb-client` and force-reinstall the full package:
 ```bash
@@ -433,7 +433,7 @@ If `chromadb-client` (the lightweight HTTP-only package) is installed alongside 
 ```
 
 ### HTTPS + LAN/Tailscale exposure
-To expose Odysseus on a local network or Tailscale with HTTPS:
+To expose Agamemnon on a local network or Tailscale with HTTPS:
 1. Change the bind address to `0.0.0.0` in `.env` (`APP_BIND=0.0.0.0` or `ODYSSEUS_HOST=0.0.0.0`).
 2. Generate a locally-trusted cert for your LAN/Tailscale IPs using [mkcert](https://github.com/FiloSottile/mkcert):
    ```bash
@@ -444,22 +444,22 @@ To expose Odysseus on a local network or Tailscale with HTTPS:
    ```bash
    python -m uvicorn app:app --host 0.0.0.0 --port 7000 --ssl-certfile=cert.pem --ssl-keyfile=key.pem
    ```
-4. Install the `mkcert` CA on any other device you want to access Odysseus from (e.g., for iOS, email the `rootCA.pem` to yourself, install the profile, and trust it in Certificate Trust Settings).
+4. Install the `mkcert` CA on any other device you want to access Agamemnon from (e.g., for iOS, email the `rootCA.pem` to yourself, install the profile, and trust it in Certificate Trust Settings).
 
 **Already on Tailscale with your own reverse proxy (nginx/Caddy) in front of the Docker Compose stack?** Skip mkcert — Tailscale issues a real, globally-trusted cert for your tailnet hostname, so there's no per-device CA to install:
 1. Tailscale admin console → *DNS* → enable **MagicDNS** and **HTTPS Certificates**.
 2. On the box running the Tailscale client (the Docker host, or wherever your reverse proxy lives): `sudo tailscale cert <device>.<tailnet>.ts.net`. This writes `<device>.<tailnet>.ts.net.crt`/`.key`, valid 90 days like Let's Encrypt — re-run it periodically (cron/systemd timer) to renew.
 3. Point your reverse proxy's TLS server block at that cert/key pair, `proxy_pass`/`reverse_proxy` to the odysseus container (`http://127.0.0.1:7000` if co-located, otherwise its LAN/Tailscale IP).
-4. Access Odysseus at `https://<device>.<tailnet>.ts.net` — that exact hostname, since Tailscale only certifies its own `ts.net` names, not custom LAN DNS aliases (e.g. from a local Pi-hole/Adguard entry).
+4. Access Agamemnon at `https://<device>.<tailnet>.ts.net` — that exact hostname, since Tailscale only certifies its own `ts.net` names, not custom LAN DNS aliases (e.g. from a local Pi-hole/Adguard entry).
 5. Add that origin to `.env` and recreate the container: `ALLOWED_ORIGINS=http://localhost,http://127.0.0.1,https://<device>.<tailnet>.ts.net`, and consider flipping `SECURE_COOKIES=true` now that the origin is genuinely TLS.
 
 ### Common self-host traps (30-second fixes)
 A grab-bag of small gotchas that otherwise turn into long debugging sessions.
 
-- **`AUTH_ENABLED=false` is ignored / you're still forced to log in (Windows).** If you edited `.env` in Notepad it may have saved a UTF-8 **BOM**, turning the first key into `﻿AUTH_ENABLED` so it is never matched. Odysseus loads `.env` with `encoding="utf-8-sig"` to tolerate a leading BOM, but the safe fix is to re-save `.env` as **UTF-8 without BOM** (VS Code: *Save with Encoding → UTF-8*).
+- **`AUTH_ENABLED=false` is ignored / you're still forced to log in (Windows).** If you edited `.env` in Notepad it may have saved a UTF-8 **BOM**, turning the first key into `﻿AUTH_ENABLED` so it is never matched. Agamemnon loads `.env` with `encoding="utf-8-sig"` to tolerate a leading BOM, but the safe fix is to re-save `.env` as **UTF-8 without BOM** (VS Code: *Save with Encoding → UTF-8*).
 - **macOS: the app isn't at `http://localhost:7000`.** macOS AirPlay Receiver usually holds port `7000`, so the macOS start script serves on **`7860`** instead — open `http://localhost:7860`. To use `7000`, free it (System Settings → General → AirDrop & Handoff → turn off *AirPlay Receiver*) and set `APP_PORT=7000`.
 - **Copy buttons do nothing over a plain-HTTP Tailscale/LAN URL.** Browsers only expose the clipboard API (`navigator.clipboard`) on **secure origins** — HTTPS, or `localhost`. Over `http://100.x.y.z:7860` it is blocked. Serve over HTTPS (see *HTTPS + LAN/Tailscale exposure* above); `localhost` is exempt, so copy still works on the host itself.
-- **Voice input says the microphone is blocked on HTTP.** Same secure-origin rule as the clipboard above, but for `navigator.mediaDevices.getUserMedia` — browsers refuse mic access on any origin that isn't HTTPS or `localhost`/`127.0.0.1`, no exceptions, even on a trusted LAN/Tailscale IP. This is enforced by the browser itself, not something Odysseus can opt out of. Fix is the same: put HTTPS in front (see *HTTPS + LAN/Tailscale exposure* above); if you're already behind Tailscale with your own reverse proxy, a `tailscale cert` is the least-friction option since it needs no per-device CA install.
+- **Voice input says the microphone is blocked on HTTP.** Same secure-origin rule as the clipboard above, but for `navigator.mediaDevices.getUserMedia` — browsers refuse mic access on any origin that isn't HTTPS or `localhost`/`127.0.0.1`, no exceptions, even on a trusted LAN/Tailscale IP. This is enforced by the browser itself, not something Agamemnon can opt out of. Fix is the same: put HTTPS in front (see *HTTPS + LAN/Tailscale exposure* above); if you're already behind Tailscale with your own reverse proxy, a `tailscale cert` is the least-friction option since it needs no per-device CA install.
 - **Self-hosted ntfy reminders don't reach your phone.** Two things: (1) the bundled ntfy binds to loopback by default — to reach it from your phone set `NTFY_BIND` to your host/Tailscale IP and `NTFY_BASE_URL` to the same server URL in `.env`, then recreate the ntfy container (see the `NTFY_*` block in `.env.example`); (2) in the ntfy **Android** app, subscribe to the topic with **Instant delivery** enabled — non-`ntfy.sh` servers don't get instant push otherwise.
 - **Local mail (Dovecot) login fails: "Plaintext authentication disallowed on non-encrypted connections."** Your IMAP/SMTP server is refusing cleartext auth over an unencrypted link. Prefer enabling TLS on the mail server; on a trusted LAN only, you can allow cleartext (Dovecot: `disable_plaintext_auth = no`).
 
@@ -469,7 +469,7 @@ A grab-bag of small gotchas that otherwise turn into long debugging sessions.
 | Package | Feature unlocked |
 |---------|-----------------|
 | `faster-whisper` | Local speech-to-text (microphone -> text) via the "local" STT provider. |
-| `kokoro`, `soundfile` | Local Kokoro-82M text-to-speech on a CUDA GPU. The pinned Kokoro release supports Odysseus installs on Python 3.11-3.12; these packages are intentionally skipped on Python 3.13+ (including the Python 3.14 container image). |
+| `kokoro`, `soundfile` | Local Kokoro-82M text-to-speech on a CUDA GPU. The pinned Kokoro release supports Agamemnon installs on Python 3.11-3.12; these packages are intentionally skipped on Python 3.13+ (including the Python 3.14 container image). |
 | `PyMuPDF` | PDF page rendering in the side viewer panel and form-filling. (Note: AGPL-3.0) |
 | `markitdown` | Office/EPUB document text extraction (converts .docx/.xlsx/.pptx/.xls/.epub to Markdown). |
 
@@ -479,7 +479,7 @@ Install the optional set only when you need these features:
 pip install -r requirements-optional.txt
 ```
 
-The default Docker image currently uses Python 3.14, while Kokoro 0.9.4 declares Python `>=3.10,<3.13`. Odysseus itself continues to support Python 3.11+, but this pinned optional local-TTS feature requires a native Python 3.11 or 3.12 environment. Kokoro declares `torch`, but the local provider only activates when that torch build has CUDA and a GPU is visible; install the CUDA build appropriate for your host. Browser and configured endpoint TTS remain available on Python 3.13+ and in the container image.
+The default Docker image currently uses Python 3.14, while Kokoro 0.9.4 declares Python `>=3.10,<3.13`. Agamemnon itself continues to support Python 3.11+, but this pinned optional local-TTS feature requires a native Python 3.11 or 3.12 environment. Kokoro declares `torch`, but the local provider only activates when that torch build has CUDA and a GPU is visible; install the CUDA build appropriate for your host. Browser and configured endpoint TTS remain available on Python 3.13+ and in the container image.
 
 ### Faster, reproducible installs with uv (optional)
 [uv](https://docs.astral.sh/uv/) works as a drop-in replacement for the
@@ -501,17 +501,17 @@ uv pip sync requirements.lock                          # reproduce it exactly la
 `requirements.lock` is gitignored and platform-specific (compile it on the OS you deploy to). Regenerate it deliberately when you want to take upgrades. The plain `uv pip install -r requirements.txt` keeps following the unpinned requirements like pip does.
 
 ### Outlook / Office 365 email
-Odysseus email accounts currently use IMAP/SMTP username-password auth. Outlook
+Agamemnon email accounts currently use IMAP/SMTP username-password auth. Outlook
 and Microsoft 365 generally require OAuth instead, so normal Microsoft mailbox
 passwords will fail. See [the Outlook email guide](email-outlook.md) for the
 current limitation and the planned integration direction.
 
 ## Security Notes
-Odysseus is a self-hosted workspace with powerful local tools: shell access, file uploads, model downloads, web research, email/calendar integrations, and API tokens. Treat it like an admin console.
+Agamemnon is a self-hosted workspace with powerful local tools: shell access, file uploads, model downloads, web research, email/calendar integrations, and API tokens. Treat it like an admin console.
 
 - Keep `AUTH_ENABLED=true` for any network-accessible deployment.
 - Keep `LOCALHOST_BYPASS=false` outside local development.
-- Leave `SECURE_COOKIES` unset unless you need to override it: session cookies are marked `Secure` whenever the request arrives over HTTPS. Use `SECURE_COOKIES=true` to force it on for a proxy whose scheme Odysseus cannot see, or `SECURE_COOKIES=false` to force it off while you still serve plain HTTP alongside HTTPS.
+- Leave `SECURE_COOKIES` unset unless you need to override it: session cookies are marked `Secure` whenever the request arrives over HTTPS. Use `SECURE_COOKIES=true` to force it on for a proxy whose scheme Agamemnon cannot see, or `SECURE_COOKIES=false` to force it off while you still serve plain HTTP alongside HTTPS.
 - Do not expose it directly to the public internet without HTTPS and a trusted reverse proxy or private access layer.
 - Keep `.env`, `data/`, `logs/`, databases, uploads, generated media, backups, auth/session files, API keys, and model/provider tokens out of Git and private shares. They are ignored by default.
 - Review `data/auth.json` after first boot: disable open signup unless you intentionally want it, make only your own account admin, and keep demo/test accounts non-admin.
@@ -519,7 +519,7 @@ Odysseus is a self-hosted workspace with powerful local tools: shell access, fil
 - Rotate any API keys or tokens that were ever pasted into a shared chat, demo, screenshot, or log.
 - If you enable API tokens or webhooks, create separate tokens per integration and delete unused ones.
 - Prefer binding manual development runs to `127.0.0.1`; bind to `0.0.0.0` only when you intentionally want LAN/reverse-proxy access.
-- Keep ChromaDB, SearXNG, ntfy, Ollama, vLLM, llama.cpp, databases, and raw model/provider APIs internal-only. Expose only the authenticated Odysseus web/API entrypoint through your trusted proxy or private access layer.
+- Keep ChromaDB, SearXNG, ntfy, Ollama, vLLM, llama.cpp, databases, and raw model/provider APIs internal-only. Expose only the authenticated Agamemnon web/API entrypoint through your trusted proxy or private access layer.
 - Before publishing a fork, run `git status --short` and confirm no private files from `.env`, `data/`, `logs/`, uploads, backups, or local databases are staged.
 
 > **Upgrading an existing install:** `SECURE_COOKIES` used to default to
@@ -531,14 +531,14 @@ Odysseus is a self-hosted workspace with powerful local tools: shell access, fil
 > alongside HTTPS and want the escape hatch.
 
 ### Private or proxied deployments
-Odysseus serves plain HTTP on its app port. Docker Compose binds Odysseus and the bundled services to `127.0.0.1` by default, so a typical production/private setup is:
+Agamemnon serves plain HTTP on its app port. Docker Compose binds Agamemnon and the bundled services to `127.0.0.1` by default, so a typical production/private setup is:
 
-1. Keep Odysseus on localhost, for example `127.0.0.1:7000`.
+1. Keep Agamemnon on localhost, for example `127.0.0.1:7000`.
 2. Terminate HTTPS at a trusted reverse proxy or private access gateway.
-3. Put the authenticated Odysseus web/API entrypoint behind that layer.
+3. Put the authenticated Agamemnon web/API entrypoint behind that layer.
 4. Keep raw service and model ports internal-only.
 
-Cloudflare Access, Tailscale, Caddy, nginx, and Traefik can all fit this pattern; none are required by Odysseus. If your access layer reaches Odysseus on the same host, proxy to `http://127.0.0.1:7000` and keep `AUTH_ENABLED=true` and `LOCALHOST_BYPASS=false`. Any proxy that forwards `X-Forwarded-Proto: https` gets `Secure` session cookies without configuration, so `SECURE_COOKIES` only needs setting when you want to override that — force it on for a proxy that forwards no scheme at all, or off while you still serve plain HTTP.
+Cloudflare Access, Tailscale, Caddy, nginx, and Traefik can all fit this pattern; none are required by Agamemnon. If your access layer reaches Agamemnon on the same host, proxy to `http://127.0.0.1:7000` and keep `AUTH_ENABLED=true` and `LOCALHOST_BYPASS=false`. Any proxy that forwards `X-Forwarded-Proto: https` gets `Secure` session cookies without configuration, so `SECURE_COOKIES` only needs setting when you want to override that — force it on for a proxy that forwards no scheme at all, or off while you still serve plain HTTP.
 `ALLOWED_ORIGINS` lists exact permitted origins for cross-origin browser/API clients; ordinary same-origin reverse-proxy access usually does not need a special CORS entry.
 
 #### Faster over the network: HTTP/2
@@ -551,7 +551,7 @@ costs almost nothing. Over a LAN, VPN, or remote link it can become a major
 part of load time, especially as latency increases.
 
 HTTP/2 multiplexes them onto one connection and the serialisation disappears.
-Odysseus needs no changes for this — uvicorn keeps speaking HTTP/1.1 on
+Agamemnon needs no changes for this — uvicorn keeps speaking HTTP/1.1 on
 loopback and the proxy speaks HTTP/2 to the browser. Mainstream browsers
 negotiate HTTP/2 for normal web pages over TLS; they do not use the cleartext
 h2c mode here, so browser-facing HTTP/2 requires a certificate. The
@@ -562,7 +562,7 @@ HTTPS but not HTTP/2 — uvicorn does not speak it.
 for your platform; on macOS, `brew install caddy`.
 
 **2. Write a `Caddyfile`.** Pick the block that matches how you reach the
-machine. Replace `7000` if Odysseus listens elsewhere — the macOS start script
+machine. Replace `7000` if Agamemnon listens elsewhere — the macOS start script
 uses `7860`.
 
 Public domain, Caddy obtains and renews the certificate itself:
@@ -622,16 +622,16 @@ brew services start caddy          # macOS — reads $(brew --prefix)/etc/Caddyf
 sudo systemctl enable --now caddy  # Linux, if your package installed the unit
 ```
 
-Odysseus's own service is unchanged; the proxy runs alongside it. Under Docker,
+Agamemnon's own service is unchanged; the proxy runs alongside it. Under Docker,
 run the proxy as another container, or on the host pointing at the published
 port.
 
-**4. Point Odysseus at the new origin** in `.env`, then restart it.
+**4. Point Agamemnon at the new origin** in `.env`, then restart it.
 
-A proxy that exposes the HTTPS request scheme to Odysseus needs no `SECURE_COOKIES` setting. Only force it on when the proxy cannot expose that scheme:
+A proxy that exposes the HTTPS request scheme to Agamemnon needs no `SECURE_COOKIES` setting. Only force it on when the proxy cannot expose that scheme:
 
 ```bash
-# only if the proxy cannot expose the external HTTPS scheme to Odysseus:
+# only if the proxy cannot expose the external HTTPS scheme to Agamemnon:
 SECURE_COOKIES=true
 # only if you use remote MCP servers with OAuth:
 OAUTH_REDIRECT_BASE_URL=https://odysseus.example.com
@@ -666,7 +666,7 @@ enable it by right-clicking the column headers.
 
 Three things bite when moving an existing install behind TLS:
 
-- Leave `SECURE_COOKIES` unset when Odysseus can see the external HTTPS scheme;
+- Leave `SECURE_COOKIES` unset when Agamemnon can see the external HTTPS scheme;
   the cookie then follows the request automatically. If your proxy cannot expose
   that scheme, set `SECURE_COOKIES=true` **at the same time** you stop serving
   plain HTTP, not before. An explicit `true` applies to every login, so while an
@@ -676,10 +676,10 @@ Three things bite when moving an existing install behind TLS:
   Gmail redirect URI it cannot be derived from a request — it is registered
   with each MCP authorization server up front — so set it to the external
   origin if you use remote MCP servers over OAuth.
-- Odysseus sends `Strict-Transport-Security` once it sees `X-Forwarded-Proto:
+- Agamemnon sends `Strict-Transport-Security` once it sees `X-Forwarded-Proto:
   https`. HSTS applies to the whole hostname and ignores the port, so any other
   plain-HTTP service on that same hostname becomes unreachable in browsers that
-  have visited Odysseus. Give Odysseus its own hostname, or strip the header at
+  have visited Agamemnon. Give Agamemnon its own hostname, or strip the header at
   the proxy (`header_down -Strict-Transport-Security` in Caddy).
 
 Server-sent events are not buffered by this configuration, so chat streaming
@@ -698,7 +698,7 @@ Common internal-only ports from the default docs/compose setup:
 
 | Port | Service |
 |---|---|
-| `7000` | Odysseus raw app port |
+| `7000` | Agamemnon raw app port |
 | `8080` | SearXNG |
 | `8091` | ntfy |
 | `8100` | ChromaDB host port for manual/compose access |
@@ -751,14 +751,14 @@ They are Settings choices now: the environment values are only a fallback for
 native installs that already set them, and the compose files do not forward
 them.
 
-Pointing Odysseus at an Obsidian-style Markdown vault needs no configuration —
+Pointing Agamemnon at an Obsidian-style Markdown vault needs no configuration —
 frontmatter, headings, tags and `[[wikilinks]]` are used automatically. See
 [Markdown vault retrieval](vault-retrieval.md) for how that works and the
 optional ranking knobs (recency weighting, per-file diversity, link expansion).
 
 ### Built-in MCP servers (optional setup)
 
-Odysseus auto-registers a few built-in MCP servers at startup. The npx-based ones (currently the browser server, `@playwright/mcp`) only start when their npm package is already in the local npx cache. If a package isn't cached, that server is skipped with a startup log message explaining what to do, so a fresh install does not block on a multi-minute npm download or hang if Playwright system deps are missing.
+Agamemnon auto-registers a few built-in MCP servers at startup. The npx-based ones (currently the browser server, `@playwright/mcp`) only start when their npm package is already in the local npx cache. If a package isn't cached, that server is skipped with a startup log message explaining what to do, so a fresh install does not block on a multi-minute npm download or hang if Playwright system deps are missing.
 
 To enable the browser MCP (page navigation, screenshots, vision), run once:
 
@@ -766,7 +766,7 @@ To enable the browser MCP (page navigation, screenshots, vision), run once:
 npx -y @playwright/mcp@latest --version
 ```
 
-That installs `@playwright/mcp` plus Playwright (~300MB total). Restart Odysseus and the server will register at startup.
+That installs `@playwright/mcp` plus Playwright (~300MB total). Restart Agamemnon and the server will register at startup.
 
 ## Architecture
 ```

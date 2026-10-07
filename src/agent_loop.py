@@ -449,7 +449,7 @@ _DOMAIN_RULES = {
 - A chat's own toggles ("turn off shell/search/research/documents") use `ui_control toggle <name> <on|off>`, not memory. `manage_settings` disables a tool for every chat.""",
     "sessions": """\
 ## Chat/session rules
-- Odysseus chats are sessions. Use `list_sessions`/`manage_session`; do not shell out looking for chat files.
+- Agamemnon chats are sessions. Use `list_sessions`/`manage_session`; do not shell out looking for chat files.
 - Preserve clickable session links from tool output in your final answer.""",
     "files": """\
 ## File rules

@@ -4,7 +4,7 @@ layout: default
 
 # Backup & Restore
 
-Odysseus keeps all of your state in the `data/` directory — the SQLite database
+Agamemnon keeps all of your state in the `data/` directory — the SQLite database
 (`app.db`), the Fernet encryption key (`data/.app_key`), the vault, memory, RAG
 indexes, personal documents, and uploads. The `scripts/odysseus-backup` tool
 snapshots that directory into a single gzip tarball and restores it later.
