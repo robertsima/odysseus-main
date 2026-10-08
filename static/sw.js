@@ -9,7 +9,7 @@
 //   - Other static assets (images/fonts/libs): cache-first with bg refresh.
 //   - API / non-GET: never cached.
 // Bump CACHE_NAME whenever the precache list or SW logic changes.
-const CACHE_NAME = 'agamemnon-v391-storage-migration';
+const CACHE_NAME = 'agamemnon-v392-shared-appearance';
 const SHELL_NETWORK_TIMEOUT_MS = 2500;
 
 // KaTeX resolves these from its own stylesheet, so caching the CSS without them
@@ -73,6 +73,8 @@ const PRECACHE = [
   '/static/js/search-chat.js',
   '/static/js/compare/index.js',
   '/static/js/theme.js',
+  '/static/js/appearancePreferences.js',
+  '/static/js/chatHeader.js',
   '/static/js/censor.js',
   '/static/js/settings.js',
   '/static/js/admin.js',
