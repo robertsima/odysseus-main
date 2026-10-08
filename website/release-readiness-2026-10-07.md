@@ -8,6 +8,12 @@ Repository: `/app/data/development/odysseus-main`. Worktree: `/app/data/agent_wo
 
 The final tested source commit is the commit containing this report. Exact SHA, final full-suite result, capture times, runtime startup log and diff are recorded under `.visual-check/<that SHA>/verification.txt` and `manifest.json`. This avoids a self-referential SHA in a tracked report. Earlier full results are not evidence for that final commit: `4666ad9d` had 11,076 Python passes; `b6761b18` had 11,089. The final lane runs after this report is committed. Read its `full.log` and `full.exit`, not the earlier counts.
 
+## PR #64 browser CI follow-up
+
+Browser job `113167494764` in run `37733421427` failed only the plugin-application loadout test, with 211 other tests passing. The fixture replaced the legacy `OdysseusPluginCatalog` global while the renamed editor reads `AgamemnonPluginCatalog`. The actual catalog retains its legacy alias. Updating the fixture to replace the canonical global reproduced the CI failure before repair and passed all five editor tests afterward. No production code changed. Follow-up full and browser lane logs are stored under the repair commit's `.visual-check/<SHA>/` directory. Earlier screenshots retain their original source SHA because this test/report-only change does not change runtime appearance.
+
+Latest-dev integration remains a separate required gate. Exact target `4ac7d4c6c8817b785ddfb5638c797158de857920` has not been integrated because managed linked-worktree writes reject merge and sandbox Git cannot access source metadata. No bypass was attempted.
+
 ## Seven criterion outcomes
 
 | Criterion | Outcome and observed checks |

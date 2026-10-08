@@ -117,7 +117,7 @@ def test_applying_a_plugin_changes_capabilities_and_keeps_unsaved_personality(op
     page = open_app(1440)
     fleet = Fleet(page, {"tool_access": "all", "agent_instructions": "Stored instructions"})
     # The plugin catalog is its own widget; stand in for it and press "Apply" the way it does.
-    page.evaluate("window.OdysseusPluginCatalog = {mount: (el, opts) => { window.__plugin = opts; }}")
+    page.evaluate("window.AgamemnonPluginCatalog = {mount: (el, opts) => { window.__plugin = opts; }}")
     open_editor(page)
     instructions = page.locator('[data-config="agent_instructions"]')
     instructions.fill("Be terse and cite files")
