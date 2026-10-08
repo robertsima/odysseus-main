@@ -467,8 +467,9 @@ function render() {
   else {
     const pluginPicker = surface.querySelector('[data-ag-plugin-picker]');
     const selectedAgent = state.rows.find((item) => item.session_id === state.selected) || state.rows[0];
-    if (pluginPicker && selectedAgent && window.AgamemnonPluginCatalog?.mount) {
-      window.AgamemnonPluginCatalog.mount(pluginPicker, {
+    const pluginCatalog = window.AgamemnonPluginCatalog || window.OdysseusPluginCatalog;
+    if (pluginPicker && selectedAgent && pluginCatalog?.mount) {
+      pluginCatalog.mount(pluginPicker, {
         sessionId: selectedAgent.session_id,
         api,
         onApplied: (result) => applyPluginSettings(selectedAgent, result),

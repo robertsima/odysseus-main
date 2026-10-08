@@ -10,9 +10,11 @@ The final tested source commit is the commit containing this report. Exact SHA, 
 
 ## PR #64 browser CI follow-up
 
-Browser job `113167494764` in run `37733421427` failed only the plugin-application loadout test, with 211 other tests passing. The fixture replaced the legacy `OdysseusPluginCatalog` global while the renamed editor reads `AgamemnonPluginCatalog`. The actual catalog retains its legacy alias. Updating the fixture to replace the canonical global reproduced the CI failure before repair and passed all five editor tests afterward. No production code changed. Follow-up full and browser lane logs are stored under the repair commit's `.visual-check/<SHA>/` directory. Earlier screenshots retain their original source SHA because this test/report-only change does not change runtime appearance.
+Browser job `113167494764` in run `37733421427` failed only the plugin-application loadout test, with 211 other tests passing. The fixture replaced the legacy `OdysseusPluginCatalog` global while the renamed editor reads `AgamemnonPluginCatalog`. The actual catalog retains its legacy alias. The first correction changed the fixture to use the canonical global.
 
-Latest-dev integration remains a separate required gate. Exact target `4ac7d4c6c8817b785ddfb5638c797158de857920` has not been integrated because managed linked-worktree writes reject merge and sandbox Git cannot access source metadata. No bypass was attempted.
+The resumed repair also supports extensions exposing only the legacy global. The editor prefers `AgamemnonPluginCatalog` and falls back to `OdysseusPluginCatalog` when the canonical object is absent. Parameterized coverage deletes both globals before installing either fixture, exercises plugin application and verifies unsaved personality and tool settings survive. Without the fallback the legacy case reproduces `Cannot read properties of undefined (reading 'onApplied')`; with it all six editor tests pass. Follow-up full/browser logs and fresh captures are keyed to the repair commit. No earlier successful run is attributed to these changes.
+
+The running harness image update did not integrate source. Fetch on 8 October still resolves `origin/dev` to approved exact target `4ac7d4c6c8817b785ddfb5638c797158de857920`. The managed merge retry refuses with `linked_worktree_read_only`; sandbox Git cannot access source metadata. No bypass was attempted. Integration and combined-code revalidation remain a separate required gate.
 
 ## Seven criterion outcomes
 
@@ -49,7 +51,7 @@ The mandatory storage migration module is precached by service-worker cache vers
 
 ## Checked locally
 
-Final local focused runs before commit:
+Historical focused runs before this follow-up:
 
 - 156 profile/plugin/Markdown/client authorization tests passed; 261 client/header/email/scheduler contracts passed; 626 Git/Claude/Cookbook tests passed; 626 Git/Claude/environment/MCP contracts passed (overlapping groups, not additive unique coverage).
 - 13 Chromium live-chat/panels/font tests passed, including the former nested-fence xfail. Earlier browser failures were missing Playwright in a reset sandbox; installed test dependencies and the required-browser lane passed.
