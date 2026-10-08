@@ -9,7 +9,7 @@
 //   - Other static assets (images/fonts/libs): cache-first with bg refresh.
 //   - API / non-GET: never cached.
 // Bump CACHE_NAME whenever the precache list or SW logic changes.
-const CACHE_NAME = 'odysseus-v390-agent-menu';
+const CACHE_NAME = 'agamemnon-v391-storage-migration';
 const SHELL_NETWORK_TIMEOUT_MS = 2500;
 
 // KaTeX resolves these from its own stylesheet, so caching the CSS without them
@@ -45,6 +45,7 @@ const PRECACHE = [
   '/static/style.css',
   '/static/app.js',
   '/static/js/storage.js',
+  '/static/js/storageBrandMigration.js',
   '/static/js/serverPrefs.js',
   '/static/js/appConfig.js',
   '/static/js/ui.js',

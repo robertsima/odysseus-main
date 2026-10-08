@@ -26,7 +26,11 @@ The final tested source commit is the commit containing this report. Exact SHA, 
 
 `src.agent_lifecycle.unit_lock` coordinates managed worker creation/registration, send-to-session child creation/busy registration, archive validation/commit and restore. Archive queries the real approval store for every target, including finished turns. Expired/retired approvals follow store semantics. No model/tool await is held in the critical section. This is a process lock: the supported deployment is one app process, not multiple Uvicorn workers.
 
-Tests: `tests/routes/agents_routes/test_archive_takes_the_unit.py`, `test_unit_archive_atomic.py`, worker/send-to-session regressions. Captures distinguish real persisted unit ancestry from separately labelled canned activity fixtures.
+All archive/restore entrypoints now use `src.agent_lifecycle.change_archive`: Phalanx, sidebar and bulk HTTP actions, and the session-management tool. Ownership, traversal, active work and pending approvals are checked under the same lock; flags and markers commit at one database boundary. Standalone chat HTTP response formats remain unchanged. Regression coverage includes sidebar/tool approval refusal, active children, unit restoration and rollback.
+
+Tests: `tests/routes/agents_routes/test_archive_takes_the_unit.py`, `test_unit_archive_atomic.py`, `test_all_archive_entrypoints.py`, worker/send-to-session regressions. Focused lifecycle/session checks passed 201 tests. Captures distinguish real persisted unit ancestry from separately labelled canned activity fixtures.
+
+The mandatory storage migration module is precached by service-worker cache version `agamemnon-v391-storage-migration`. `tests/static/sw/storage_offline.test.mjs` installs the actual worker into simulated CacheStorage, disables the network with no HTTP cache, fetches both storage modules through the worker and executes the module graph. Both service-worker tests pass. This is an executable offline contract, not a browser certification.
 
 ## UI and upgrade repairs
 

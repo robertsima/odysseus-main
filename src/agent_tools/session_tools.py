@@ -985,6 +985,17 @@ async def manage_session(content: str, session_id: Optional[str] = None, owner: 
             "results": f"[{name}](#session-{target_sid}) - click to open.",
         }
 
+    if action in ("archive", "unarchive"):
+        from fastapi import HTTPException
+        from src.agent_lifecycle import change_archive
+        if owner is None:
+            return {"error": "Session owner is required", "exit_code": 1}
+        try:
+            result = change_archive(target_sid, owner, _session_manager, restore=action == "unarchive")
+            return {**result, "action": action, "results": result["message"]}
+        except HTTPException as exc:
+            return {"error": str(exc.detail), "exit_code": 1}
+
     db = SessionLocal()
     try:
         if action == "rename":
@@ -999,24 +1010,6 @@ async def manage_session(content: str, session_id: Optional[str] = None, owner: 
             _session_manager.update_session_name(target_sid, new_name)
             return {"action": "rename", "session_id": target_sid, "name": new_name,
                     "results": f"Session renamed to '{new_name}'"}
-
-        elif action == "archive":
-            db_sess = _session_query(db).first()
-            if not db_sess:
-                return _not_found()
-            db_sess.archived = True
-            db.commit()
-            return {"action": "archive", "session_id": target_sid,
-                    "results": f"Session '{db_sess.name}' archived"}
-
-        elif action == "unarchive":
-            db_sess = _session_query(db).first()
-            if not db_sess:
-                return _not_found()
-            db_sess.archived = False
-            db.commit()
-            return {"action": "unarchive", "session_id": target_sid,
-                    "results": f"Session '{db_sess.name}' unarchived"}
 
         elif action == "delete":
             if target_sid == session_id:

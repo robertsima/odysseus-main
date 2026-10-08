@@ -741,78 +741,12 @@ def setup_agents_routes(session_manager) -> APIRouter:
             logger.warning("crew profile sync failed for %s", session_id, exc_info=True)
         return {"session_id": session_id, "crew_member_id": crew_id, "profile": name}
 
-    def _archive_unit(owned: Dict[str, Any], session_id: str) -> Set[str]:
-        """The chat plus every owned chat descended from it via ``parent_session``.
-
-        A worker chat can be attached through ``parent_session``. Archive acts
-        on the whole unit: archiving only the parent left its idle workers in
-        the fleet with a parent that was no longer listed, so each one became
-        a top-level unit of its own (2026-10-07).
-        """
-        from core.database import get_session_settings
-        descendants = {session_id}
-        changed = True
-        while changed:
-            changed = False
-            for sid in owned:
-                if sid in descendants:
-                    continue
-                try:
-                    parent = (get_session_settings(sid, strict=True) or {}).get("parent_session")
-                except Exception as exc:
-                    # This is a safety check. Failing open could archive a
-                    # parent while an unseen child is still queued.
-                    raise HTTPException(409, "Could not verify child work; try again") from exc
-                if parent in descendants:
-                    descendants.add(sid)
-                    changed = True
-        return descendants
-
-    def _active_archive_targets(unit: Set[str]) -> list[str]:
-        """The members of an archive unit that still have live work.
-
-        Archiving must not make an active child vanish from the normal
-        workspace. It intentionally does not stop work; stopping remains an
-        explicit action in the dashboard.
-        """
-        from src.tool_approvals import tool_approval_store
-        return sorted(sid for sid in unit
-                      if agent_runs.is_busy(sid) or activity.has_active_run(sid)
-                      or agent_control.live_children(sid) > 0
-                      or tool_approval_store.has_pending_for_session(sid))
 
     @router.post("/sessions/{session_id}/archive")
     async def archive_session(request: Request, session_id: str):
-        from src.agent_lifecycle import unit_lock
-        with unit_lock:
-            return _archive_session(request, session_id)
+        from src.agent_lifecycle import change_archive
+        return change_archive(session_id, effective_user(request), session_manager)
 
-    def _archive_session(request: Request, session_id: str):
-        user, owned = _owned(request)
-        sess = owned.get(session_id)
-        if sess is None:
-            raise HTTPException(404, "Session not found")
-        # Include archived intermediates after restart to discover live nested
-        # descendants. Their independent archive decisions remain untouched.
-        unit = _archive_unit({**_archived_owned(user), **owned}, session_id)
-        active = _active_archive_targets(unit)
-        if active:
-            raise HTTPException(409, "Stop active work before archiving: " + ", ".join(active))
-        from core.database import archive_session_unit
-        try:
-            workers = archive_session_unit(session_id, unit, user)
-        except Exception as exc:
-            logger.warning("Could not archive agent session %s for %s: %s", session_id, user, exc)
-            raise HTTPException(500, "Could not archive this chat")
-        for sid in [session_id, *workers]:
-            if sid in owned:
-                owned[sid].archived = True
-        message = "Archived. Its chat and run history are preserved."
-        if workers:
-            message = (f"Archived with its {len(workers)} worker{'s' if len(workers) != 1 else ''}. "
-                       "Chats and run history are preserved.")
-        return {"ok": True, "session_id": session_id, "archived": True,
-                "archived_workers": workers, "message": message}
 
     @router.post("/sessions/{session_id}/needs/clear")
     async def clear_needs(request: Request, session_id: str):
@@ -821,68 +755,12 @@ def setup_agents_routes(session_manager) -> APIRouter:
         _require_owned(request, session_id)
         return {"ok": True, "session_id": session_id, "cleared": open_needs.clear(session_id)}
 
-    def _settings_of(row: Any) -> Dict[str, Any]:
-        try:
-            data = json.loads(getattr(row, "settings_json", None) or "{}")
-        except (TypeError, ValueError):
-            return {}
-        return data if isinstance(data, dict) else {}
 
     @router.post("/sessions/{session_id}/unarchive")
     async def unarchive_session(request: Request, session_id: str):
-        from src.agent_lifecycle import unit_lock
-        with unit_lock:
-            return _unarchive_session(request, session_id)
+        from src.agent_lifecycle import change_archive
+        return change_archive(session_id, effective_user(request), session_manager, restore=True)
 
-    def _unarchive_session(request: Request, session_id: str):
-        """Restore a chat with its unit: the archived parents it sits under
-        and the workers that were archived along with them."""
-        user, owned = _owned(request)
-        restored: list[str] = []
-        try:
-            # Archived sessions may no longer be resident in the session
-            # manager after a restart, so authorise against their DB owner.
-            # Never use this as a cross-owner restore path.
-            from core.database import SessionLocal, Session as DbSession
-            db = SessionLocal()
-            try:
-                row = db.query(DbSession).filter(DbSession.id == session_id).first()
-                if row is None or getattr(row, "owner", None) != user:
-                    raise HTTPException(404, "Session not found")
-                archived = {r.id: r for r in db.query(DbSession).filter(
-                    DbSession.owner == user, DbSession.archived == True).all()}  # noqa: E712
-                # A restored worker under a still-archived parent would stand
-                # alone in the fleet, so restore up to the top archived parent.
-                chain = [session_id]
-                parent = _settings_of(row).get("parent_session")
-                while parent in archived and parent not in chain:
-                    chain.append(parent)
-                    parent = _settings_of(archived[parent]).get("parent_session")
-                targets = {row.id: row}
-                targets.update((sid, archived[sid]) for sid in chain if sid in archived)
-                targets.update((sid, r) for sid, r in archived.items()
-                               if _settings_of(r).get("archived_with") in chain)
-                for target in targets.values():
-                    target.archived = False
-                    settings = _settings_of(target)
-                    if settings.pop("archived_with", None) is not None:
-                        target.settings_json = json.dumps(settings, ensure_ascii=False, sort_keys=True)
-                db.commit()
-                restored = sorted(targets)
-            finally:
-                db.close()
-            for sid in restored:
-                sess = owned.get(sid)
-                if sess is not None:
-                    sess.archived = False
-                elif hasattr(session_manager, "_load_session_from_db"):
-                    session_manager._load_session_from_db(sid)
-        except Exception as exc:
-            if isinstance(exc, HTTPException):
-                raise
-            logger.warning("Could not restore agent session %s for %s: %s", session_id, user, exc)
-            raise HTTPException(500, "Could not restore this chat")
-        return {"ok": True, "session_id": session_id, "archived": False, "restored": restored}
 
     @router.post("/sessions/{session_id}/cleanup-runs")
     async def cleanup_runs(request: Request, session_id: str):

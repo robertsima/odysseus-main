@@ -2808,13 +2808,14 @@ def get_session_settings(session_id: str, *, strict: bool = False) -> dict:
         return {}
 
 
-def archive_session_unit(session_id: str, targets: set[str], owner: str) -> list[str]:
+def archive_session_unit(session_id: str, targets: set[str], owner: str, db=None) -> list[str]:
     """Commit archive flags and restore markers together, or roll back.
 
     Independently archived descendants keep their existing restore decision.
     The caller holds agent_lifecycle.unit_lock through validation and commit.
     """
-    with get_db_session() as db:
+    from contextlib import nullcontext
+    with (get_db_session() if db is None else nullcontext(db)) as db:
         rows = db.query(Session).filter(Session.id.in_(targets)).all()
         if {row.id for row in rows} != targets or any(row.owner != owner for row in rows):
             raise ValueError("Archive unit changed ownership or disappeared")
