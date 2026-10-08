@@ -143,3 +143,14 @@ async def test_a_drop_after_output_is_never_replayed(monkeypatch, upstream):
     assert calls["n"] == 1
     assert _text(chunks) == "partial"
     assert _errors(chunks)[0]["status"] == 502
+
+
+async def test_a_local_model_read_timeout_is_not_replayed(upstream):
+    # A silent server on this machine is usually stuck loading or out of
+    # memory; a second read timeout would only delay the fallback route.
+    state = upstream(httpx.ReadTimeout, 99, _openai_body)
+
+    chunks = await asyncio.wait_for(_collect("http://127.0.0.1:11434/v1"), timeout=10)
+
+    assert state["calls"] == 1
+    assert _errors(chunks)[0]["status"] == 504

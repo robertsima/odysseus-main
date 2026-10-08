@@ -23,6 +23,7 @@ _CORE_TOOLSET = frozenset({
     "grep", "glob", "ls", "get_workspace", "preview_file", "update_plan",
     "web_search", "web_fetch", "recall_tool_output", "ask_user",
     "manage_skills", "discover_tools", "manage_bg_jobs", "recall_chat_history",
+    "manage_memory", "search_documents",
 })
 CHATGPT_URL = "https://chatgpt.com/backend-api/codex/responses"
 CHATGPT_MODEL = "gpt-6-luna"
@@ -56,7 +57,7 @@ def _names(schemas):
 
 
 def _turn(monkeypatch, text, *, workspace, url="https://api.openai.com/v1", model="gpt-4o",
-          session_id=None, disabled_tools=None, settings=None):
+          session_id=None, disabled_tools=None, settings=None, active_document=None):
     """Run one turn: round 1 reads a file, round 2 runs a command, round 3 answers.
 
     Returns one (offered names, allowed_tools) pair per model request.
@@ -86,7 +87,7 @@ def _turn(monkeypatch, text, *, workspace, url="https://api.openai.com/v1", mode
     _collect(al.stream_agent_loop(
         url, model, [{"role": "user", "content": text}],
         max_rounds=4, session_id=session_id, workspace=workspace,
-        disabled_tools=disabled_tools, allow_private=False,
+        disabled_tools=disabled_tools, allow_private=False, active_document=active_document,
     ))
     assert len(requests) == 3, requests
     return requests
@@ -165,3 +166,11 @@ def test_tools_the_loadout_enables_join_the_core_set(monkeypatch, tmp_path):
 
     for names, _allowed in requests:
         assert set(names) == _CORE_TOOLSET | {"manage_calendar"}
+
+
+def test_an_open_document_brings_the_document_tools(monkeypatch, tmp_path):
+    # Per-turn selection added them for an open document; core mode keeps that.
+    requests = _turn(monkeypatch, "tighten the intro", workspace=str(tmp_path),
+                     active_document={"id": "doc-1", "title": "Release notes", "content": "Intro"})
+
+    assert {"edit_document", "update_document"} <= set(requests[0][0])

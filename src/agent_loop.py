@@ -5326,11 +5326,13 @@ _DEDUPE_POLLING_NAME_RE = re.compile(
 # is builtin-only, so an MCP write followed by an identical MCP read would serve
 # the pre-write answer from the memo. The mutating call's OWN signature still
 # survives the clear (see _record_call_result), so a model repeating the same
-# write is still caught.
+# write is still caught. The git verbs: `manage_agent_worktree sync` merges the
+# base and `commit` concludes it; read as non-mutating, a re-run `sync` after a
+# resolution would be served the earlier "conflicted" answer.
 _DEDUPE_MUTATING_NAME_RE = re.compile(
     r"(?:^|_)(?:create|update|delete|remove|write|set|add|insert|import|export|"
     r"execute|run|send|post|upload|modify|edit|rename|move|apply|install|start|"
-    r"stop|cancel|publish)(?:_|$)",
+    r"stop|cancel|publish|sync|commit|merge|rebase|push|pull|abort)(?:_|$)",
     re.IGNORECASE,
 )
 
@@ -5560,7 +5562,13 @@ _CORE_TOOLSET = frozenset({
     "manage_skills", "discover_tools", "manage_bg_jobs",
     # The compaction summary and the trim note tell the model to call it.
     "recall_chat_history",
+    # Persistent context is what this app adds over a plain coding agent:
+    # remembering a fact and reading the vault stay one call away. The
+    # private-grant filter in `_core_toolset` still applies to the vault.
+    "manage_memory", "search_documents",
 })
+# Added when the turn has an open document, as per-turn selection did.
+_CORE_DOCUMENT_TOOLS = frozenset({"edit_document", "update_document", "suggest_document", "create_document"})
 
 
 def _core_toolset_enabled() -> bool:
@@ -7133,6 +7141,8 @@ async def stream_agent_loop(
             logger.debug("[core-tools] permission view unavailable", exc_info=True)
             _core_permitted = set(_CORE_TOOLSET)
         _core_extra = set(forced_tools or ()) | _skill_required_tools | _routing_protected
+        if active_document:
+            _core_extra |= _CORE_DOCUMENT_TOOLS
         if session_id and stable_tools.route_supported(endpoint_url, model):
             # Tools this chat already declared to the provider stay callable,
             # so the declared list and the callable list are the same.

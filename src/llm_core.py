@@ -368,6 +368,18 @@ def _upstream_drop_chunk(kind: str, exc: BaseException, target_url: str) -> str:
     return f'event: error\ndata: {json.dumps(payload)}\n\n'
 
 
+def _is_local_model_url(url: str) -> bool:
+    """A model server on this machine or the LAN. A silent local server is
+    usually stuck loading or out of memory, and a second read timeout only
+    delays the fallback route, so its read timeout is not replayed."""
+    try:
+        from src.model_context import is_local_endpoint
+
+        return is_local_endpoint(url)
+    except Exception:
+        return False
+
+
 def _upstream_drop_kind(chunk: str) -> Optional[str]:
     data = _sse_error_data(chunk) if isinstance(chunk, str) else None
     kind = (data or {}).get("upstream_drop")
@@ -4002,6 +4014,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                     not emitted
                     and not drop_retry_used
                     and _upstream_drop_kind(chunk)
+                    and not (_upstream_drop_kind(chunk) == "read_timeout" and _is_local_model_url(target_url))
                     and not _is_host_dead(target_url)
                 ):
                     # The connection dropped or went silent before anything
