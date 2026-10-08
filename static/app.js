@@ -471,12 +471,15 @@ function initializeEventListeners() {
       currentMeta.setAttribute('role', 'button');
       currentMeta.setAttribute('aria-label', 'Session actions');
       currentMeta.addEventListener('keydown', (e) => {
+        // The inline rename editor owns its own Space/Enter behavior.
+        if (e.target !== currentMeta) return;
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
           currentMeta.click();
         }
       });
       currentMeta.addEventListener('click', (e) => {
+        if (e.target !== currentMeta) return;
         e.stopPropagation();
         exportDlBtn.click();
       });
@@ -1371,6 +1374,8 @@ function initializeEventListeners() {
     .then(r => r.json())
     .then(d => {
       window._isAdmin = !!d.is_admin;
+      // Settings may already be open while this request is in flight.
+      settingsModule.syncAdminVisibility();
       if (d.is_admin && userBarAdmin) userBarAdmin.style.display = '';
       const userBarName = el('user-bar-name');
       const userBarAvatar = el('user-bar-avatar');
