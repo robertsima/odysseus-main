@@ -310,11 +310,15 @@ async def test_binding_does_not_leak(ws, admin):
 # must still surface the file tools, otherwise the agent says it has no file
 # access (the bug this guards against).
 
-def _sent_tool_names(monkeypatch, *, workspace, message="look at the local project", force_keyword_fallback=False, private_grant=False):
+def _sent_tool_names(monkeypatch, *, workspace, message="look at the local project", force_keyword_fallback=False, private_grant=False, core_toolset=True):
     import asyncio
     import src.agent_loop as al
 
-    monkeypatch.setattr(al, "get_setting", lambda key, default=None: default, raising=False)
+    monkeypatch.setattr(
+        al, "get_setting",
+        lambda key, default=None: core_toolset if key == "agent_core_toolset" else default,
+        raising=False,
+    )
     monkeypatch.setattr(al, "get_mcp_manager", lambda: None, raising=False)
     monkeypatch.setattr(al, "estimate_tokens", lambda *a, **k: 10, raising=False)
     monkeypatch.setattr("core.database.get_session_settings", lambda sid, **kw: {"private_vault_access": private_grant})
@@ -352,7 +356,10 @@ def _sent_tool_names(monkeypatch, *, workspace, message="look at the local proje
 
 
 def test_low_signal_with_workspace_surfaces_readonly_file_tools(monkeypatch):
-    names = _sent_tool_names(monkeypatch, workspace="/tmp")
+    # Per-turn selection only: with `agent_core_toolset` on (the default) a
+    # workspace turn gets the whole core set whatever the wording
+    # (tests/src/agent_loop/test_core_toolset.py), 2026-10-08.
+    names = _sent_tool_names(monkeypatch, workspace="/tmp", core_toolset=False)
     # read-only nav tools surface so the agent can explore
     assert "read_file" in names
     assert "get_workspace" in names

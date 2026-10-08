@@ -213,6 +213,9 @@ DEFAULT_SETTINGS = {
     # per turn — see `agent_loop._pinned_policy_toolset` for why 25. 0 disables
     # pinning and restores per-turn selection for every session.
     "agent_pinned_toolset_max_tools": 25,
+    # Workspace (coding) agent turns offer one fixed core tool set every round
+    # instead of re-selecting tools per turn; see agent_loop._core_toolset.
+    "agent_core_toolset": True,
     # Chat UI: fold an agent tool timeline after this many calls in one turn
     # (the first and last few stay visible; a summary bar expands the rest).
     # 0 = never fold.

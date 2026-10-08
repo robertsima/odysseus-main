@@ -100,6 +100,33 @@ rounds steering the design tool.
 So each turn selects a subset. Selection is a union of several sources, and
 the `[tool-routing]` log line reports which one dominated.
 
+### 2.0a Core toolset for workspace turns
+
+A chat with a workspace (a coding chat, or a worker in a managed worktree)
+skips per-turn selection altogether when `agent_core_toolset` is on (the
+default). Every round of every turn offers the same list, as Claude Code does:
+the core coding tools (`read_file`, `write_file`, `edit_file`, `apply_patch`,
+`bash`, `python`, `grep`, `glob`, `ls`, `get_workspace`, `preview_file`,
+`update_plan`, `web_search`, `web_fetch`, `recall_tool_output`,
+`recall_chat_history`, `ask_user`, `manage_skills`, `discover_tools`,
+`manage_bg_jobs`), the tools the loadout enables, forced tools, and every tool
+the chat was offered or declared earlier (§2.5). Everything else comes through
+`discover_tools`, which attaches and remembers as before.
+
+Why: selection read the message's wording, so "check my calendar then fix the
+failing test" merged the calendar domain in, the next turn's wording picked a
+different set, and on the Codex route only part of the declared list was
+callable per round (52 declared, 29 callable). A round costs 6-7 s at any
+prompt size, so each selection miss that the model repaired with
+`discover_tools` cost a round, and each change to the list cost a cache miss.
+
+Policy is not widened. The list is cut by the same permission view
+`discover_tools` and the executor use (allowlists, disabled tools, the owner's
+baseline, plan and read-only modes), bash and python follow the Shell gate,
+and private-vault tools need the grant. A pinned role (§2.0) and a caller that
+passes `relevant_tools` keep their own sets; chats without a workspace keep the
+selection below. The log line is `[core-tools] session=... N tools`.
+
 ### 2.0 Pinned toolsets
 
 None of that runs when the session's own policy has already named the toolset.
@@ -641,7 +668,6 @@ bounded — a guard that can fire indefinitely is a new way to burn the budget.
 | intent without action | the round announces an action and calls nothing | one sharp nudge to actually call it | `_MAX_INTENT_NUDGES` = 2 |
 | stopping short | a turn that ran tools ends on "Blocked…" / "I stopped before…" without naming a need | ask it to clear the blocker or name it (`Needs user:` / `Needs parent:`) | `_MAX_UNBLOCK_CHECKS` = 1 |
 | open checklist | the turn updated its task checklist and ends with steps open | ask it to carry on, tick or rewrite | `_MAX_CHECKLIST_NUDGES` = 2 |
-| one read per round | four rounds in a row each made one read-only call (`read_file`, `grep`, `glob`, a `sed -n`/`rg`/`git diff` shell command) | ask it to batch the reads it already knows it needs | `_MAX_BATCH_NUDGES` = 3 |
 | runaway call | the same call signature very many times | stop the turn | fixed |
 | stall | repeated identical rounds with no answer text | stop the turn | fixed |
 | round cap | budget spent with work outstanding | emit `rounds_exhausted` with partial work | — |
@@ -1238,6 +1264,7 @@ A turn's behaviour is reconstructable from these lines.
 | --- | --- |
 | `[agent-intent]` | what the turn was classified as, and which tools were selected |
 | `[tool-routing]` | which source dominated, what was dropped and by which gate |
+| `[core-tools]` | a workspace turn took the fixed core toolset, and how many tools it offers |
 | `[agent-debug]` | how many schemas were sent vs selected, which admin schemas were intentional, and which MCP servers were demoted |
 | `[agent-cache]` | whether the static prefix stayed stable and where request history first changed |
 | `[agent-steer]` | which queued message reached which round, and what tools its human instruction added |

@@ -1004,6 +1004,15 @@ register_all([
         group="Agents", min_value=0, max_value=200, unit="tools", advanced=True,
     ),
     SettingSpec(
+        key="agent_core_toolset", type="bool", label="Fixed core tools for workspace agent turns",
+        help=("When a chat has a workspace, every round offers the same core coding tools (files, "
+              "shell, search, web, plan, ask) plus the tools the agent enables and the ones the chat "
+              "already used, instead of picking tools from each message's wording. The model reaches "
+              "anything else with discover_tools. A fixed list keeps the prompt cached and avoids "
+              "rounds lost to a tool the selection missed. Off restores per-turn selection."),
+        group="Agents", advanced=True,
+    ),
+    SettingSpec(
         key="agent_sticky_tools_max", type="int", label="Tools kept across turns",
         help=("A chat keeps offering the tools earlier turns used, so the model's "
               "prompt cache stays valid; past this many, a turn that needs more starts "

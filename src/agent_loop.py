@@ -5266,53 +5266,6 @@ def _detect_runaway_call(call_freq, threshold=15):
     return sig.split(":", 1)[0] if sig else None
 
 
-# ── Batching nudge ──
-# 2026-10-07 bundle: 307 of 343 rounds (90%) made exactly one call, mostly one
-# `read_file`, `grep` or `sed -n` range at a time on 100-160k prompts, although
-# the "Batch." rule and `parallel_tool_calls` were both in place. A round costs
-# ~7 s of model latency at any prompt size (the prefix is cached), so the round
-# count sets the turn's speed. After a streak of single read-only rounds the
-# loop says so at the tail of the conversation, which keeps the cached prefix.
-_BATCH_NUDGE_STREAK = 4
-_MAX_BATCH_NUDGES = 3
-_READ_ONLY_TOOLS = frozenset({"read_file", "grep", "glob", "ls", "recall_tool_output", "search_documents"})
-_READ_ONLY_SHELL_RE = re.compile(
-    r"^\s*(?:cd\s+\S+\s*(?:&&|;)\s*)?"
-    r"(?:sed\s+-n|cat|head|tail|nl|wc|ls|find|rg|grep|git\s+(?:diff|show|log|status|grep|blame))\b"
-)
-# A `>` that is not part of `2>` or `&>`: the command writes a file.
-_SHELL_WRITE_RE = re.compile(r"(?<![0-9&])>")
-
-
-def _is_single_read_round(tool_blocks) -> bool:
-    """True when the round made one call and that call only read."""
-    if len(tool_blocks) != 1:
-        return False
-    block = tool_blocks[0]
-    if block.tool_type in _READ_ONLY_TOOLS:
-        return True
-    if block.tool_type != "bash":
-        return False
-    command = (block.content or "").strip()
-    if command.startswith("{"):
-        try:
-            command = str((json.loads(command) or {}).get("command") or "")
-        except (ValueError, TypeError, AttributeError):
-            return False
-    if command.startswith("#!bg") or _SHELL_WRITE_RE.search(command):
-        return False
-    return bool(_READ_ONLY_SHELL_RE.match(command))
-
-
-def _batch_nudge_text(streak: int) -> str:
-    return (
-        f"The last {streak} rounds each made one read-only call, and every round re-sends the "
-        "whole conversation. Gather what you already know you need in one round: several "
-        "`read_file`, `grep` or `glob` calls side by side, or one shell command that prints every "
-        "range you need. Hold back only the calls that depend on output you have not seen yet."
-    )
-
-
 # ── Duplicate-call guard ──
 # A call that repeats an earlier one in the same turn — same tool name AND the
 # same arguments — cannot return anything the model has not already been shown,
@@ -5587,6 +5540,71 @@ def _explain_dropped_matches(
     if len(dropped) > limit:
         explained.append((f"+{len(dropped) - limit} more", "truncated"))
     return explained
+
+
+# ── Core toolset for workspace turns ──
+# 2026-10-08: a workspace (coding) turn re-selected its tools every turn from
+# the message's wording (intent domains, tool RAG, the Terminus swap, starved-
+# domain repair) and, on the ChatGPT route, narrowed `allowed_tools` per round
+# (52 declared, 29 callable). Each selection miss cost a `discover_tools` round
+# (~6-7 s at any prompt size) and the repair code around it kept growing.
+# Claude Code offers one small fixed tool set every round and lets the model
+# choose; this does the same for chats with a workspace. The chat's policy
+# still decides what is offered (never widened), the loadout's enabled tools
+# and the chat's earlier tools ride along, and anything else comes through
+# `discover_tools`. Chats without a workspace keep per-turn selection.
+_CORE_TOOLSET = frozenset({
+    "read_file", "write_file", "edit_file", "apply_patch", "bash", "python",
+    "grep", "glob", "ls", "get_workspace", "preview_file", "update_plan",
+    "web_search", "web_fetch", "recall_tool_output", "ask_user",
+    "manage_skills", "discover_tools", "manage_bg_jobs",
+    # The compaction summary and the trim note tell the model to call it.
+    "recall_chat_history",
+})
+
+
+def _core_toolset_enabled() -> bool:
+    value = get_setting("agent_core_toolset", True)
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "off", "no"}
+    return bool(value)
+
+
+def _core_toolset(
+    permitted: Set[str],
+    *,
+    disabled_tools: Set[str],
+    enabled_tools: Iterable[str] = (),
+    extra: Iterable[str] = (),
+    shell_offered: bool = True,
+    allow_private: bool = False,
+    mcp_mgr=None,
+) -> Set[str]:
+    """A workspace turn's tools: the core set, the loadout's enabled tools and
+    ``extra`` (forced tools, profile skill tools, tools the chat already
+    declared), cut to what ``permitted`` allows.
+
+    ``permitted`` is the permission view `discover_tools` gets
+    (`TurnToolDiscovery.permitted_names`), so the offer and the executor agree.
+    ``enabled_tools`` may hold `mcp__<server>__*` patterns; they are read the
+    way execution reads them (`allowlist_permits`).
+    """
+    from src.private_access import tool_requires_private_grant
+    from src.tool_policy import allowlist_permits
+
+    permitted = set(permitted or ()) - set(disabled_tools or ())
+    enabled = [str(name) for name in (enabled_tools or ()) if name]
+    wanted = set(_CORE_TOOLSET) | set(extra or ())
+    wanted = _expand_browser_mcp_tools(wanted | set(enabled), mcp_mgr)
+    if enabled:
+        wanted |= {name for name in permitted if allowlist_permits(name, "selected", enabled)}
+    chosen = wanted & permitted
+    if not shell_offered:
+        chosen -= {"bash", "python"}
+    if allow_private is not True:
+        chosen = {name for name in chosen
+                  if name in ("bash", "python") or not tool_requires_private_grant(name)}
+    return chosen
 
 
 # How many tools a session's own policy may leave allowed before the harness
@@ -6694,7 +6712,18 @@ async def stream_agent_loop(
                 "turn: %s",
                 _tool_selection_source, len(_pinned_tools), _name_list(_pinned_tools, 25),
             )
-    if _relevant_tools and _pinned_tools is None:
+    # A workspace turn offers the fixed core toolset (`_CORE_TOOLSET`); the real
+    # set is computed once the permission view exists, below. Setting it here
+    # skips retrieval, and `_core_mode` keeps the per-turn shaping passes off
+    # it. A pinned role already has its whole small policy bound, and a caller
+    # that passes `relevant_tools` (scheduler, skill tester) chose on purpose.
+    _core_mode = bool(
+        workspace and not guide_only and not relevant_tools and _pinned_tools is None
+        and not _ody_qwen_finetune_model and _core_toolset_enabled()
+    )
+    if _core_mode:
+        _relevant_tools = set(_CORE_TOOLSET)
+    elif _relevant_tools and _pinned_tools is None:
         logger.info(f"[tool-rag] Using caller-provided relevant_tools ({len(_relevant_tools)} tools)")
     if not guide_only and not _relevant_tools and _low_signal_turn:
         from src.tool_index import ALWAYS_AVAILABLE
@@ -6808,7 +6837,7 @@ async def stream_agent_loop(
     # times out.
     _pre_domain_tools = set(_relevant_tools) if _relevant_tools is not None else None
     _terminus_toolset = False
-    if not guide_only and _relevant_tools is not None:
+    if not guide_only and _relevant_tools is not None and not _core_mode:
         for _domain in (_intent.get("domains") or set()):
             _relevant_tools.update(_DOMAIN_TOOL_MAP.get(str(_domain), set()))
         if "cookbook" in (_intent.get("domains") or set()):
@@ -6854,7 +6883,7 @@ async def stream_agent_loop(
     # regardless of which selection path (RAG, keyword, caller-provided) ran.
     # Do not leak document tools into unrelated turns just because the editor
     # panel is open.
-    if _relevant_tools is not None and _active_document_relevant:
+    if _relevant_tools is not None and _active_document_relevant and not _core_mode:
         _relevant_tools.update({"edit_document", "update_document", "suggest_document"})
         if _active_email_draft_relevant:
             # The open compose document already contains the recipient,
@@ -6874,7 +6903,7 @@ async def stream_agent_loop(
     # Current-turn chat uploads are real files under the upload/data root. Make
     # the read-side file/document tools visible immediately so the agent can
     # inspect files whose inline text was truncated or omitted.
-    if not guide_only and uploaded_files:
+    if not guide_only and uploaded_files and not _core_mode:
         if _relevant_tools is None:
             from src.tool_index import ALWAYS_AVAILABLE
             _relevant_tools = set(ALWAYS_AVAILABLE)
@@ -6890,7 +6919,7 @@ async def stream_agent_loop(
             _relevant_tools = set(ALWAYS_AVAILABLE)
         _relevant_tools.update(forced_set)
 
-    if not guide_only:
+    if not guide_only and not _core_mode:
         try:
             from src.tool_policy import known_tool_names
 
@@ -6918,7 +6947,7 @@ async def stream_agent_loop(
     # incident). Not under a pinned role: the pin already is every tool its
     # policy allows, and `_reassert_pinned_toolset` would undo an addition.
     _mcp_requested_tools: Set[str] = set()
-    if not guide_only and _pinned_tools is None:
+    if not guide_only and _pinned_tools is None and not _core_mode:
         # A short follow-up ("try again") inherits the server its previous
         # message named, as a named tool does above; otherwise the retry of
         # "check that penpot works" was left with whatever retrieval picked
@@ -6977,7 +7006,7 @@ async def stream_agent_loop(
                             "[tool-rag] profile skills declare toolsets that name nothing: %s",
                             sorted(_profile_unknown),
                         )
-                if _retrieval_query:
+                if _retrieval_query and not _core_mode:
                     # skill_declared_tools resolves exact names, MCP server
                     # names ("todoist", "lotus") and prose aliases; a bare
                     # known-name match dropped every one of those, so a
@@ -7047,6 +7076,7 @@ async def stream_agent_loop(
         and _relevant_tools is not None
         and _pre_domain_tools is not None
         and not _terminus_toolset
+        and not _core_mode
     ):
         from src.tool_index import ALWAYS_AVAILABLE as _ALWAYS
         _protected = (set(_ALWAYS) | set(_pre_domain_tools) | _skill_required_tools
@@ -7090,6 +7120,33 @@ async def stream_agent_loop(
         except Exception as _disc_err:
             logger.debug("[tool-rag] turn discovery unavailable: %s", _disc_err)
             _turn_discovery = None
+    if _core_mode:
+        # The policy's permission view, the one discover_tools and the executor
+        # use: a core tool the chat may not call is not offered.
+        try:
+            _core_permitted = (
+                _turn_discovery.permitted_names(
+                    _rearm_policy_settings(session_id, disabled_tools, allow_private))
+                if _turn_discovery is not None else set(_CORE_TOOLSET)
+            )
+        except Exception:
+            logger.debug("[core-tools] permission view unavailable", exc_info=True)
+            _core_permitted = set(_CORE_TOOLSET)
+        _core_extra = set(forced_tools or ()) | _skill_required_tools | _routing_protected
+        if session_id and stable_tools.route_supported(endpoint_url, model):
+            # Tools this chat already declared to the provider stay callable,
+            # so the declared list and the callable list are the same.
+            _core_extra |= stable_tools.preview(session_id, ())
+        _relevant_tools = _core_toolset(
+            _core_permitted,
+            disabled_tools=disabled_tools,
+            enabled_tools=_enabled_tools,
+            extra=_core_extra,
+            shell_offered=_shell_offered,
+            allow_private=allow_private,
+            mcp_mgr=mcp_mgr,
+        )
+        _base_relevant_tools = set(_relevant_tools)
     if (
         _turn_discovery is not None
         and _relevant_tools is not None
@@ -7100,6 +7157,10 @@ async def stream_agent_loop(
         # chat's policy already allows.
         _relevant_tools.add("discover_tools")
         _base_relevant_tools.add("discover_tools")
+    if _core_mode:
+        # Admin tools named by keyword would change the list per turn; they
+        # come through discover_tools like any other non-core tool.
+        _admin_tools = set()
     if not guide_only and _base_relevant_tools is not None and _admin_tools:
         # The admin tools this request's keywords named join the selection
         # itself, so they are remembered like any other offered tool. Added
@@ -7134,6 +7195,7 @@ async def stream_agent_loop(
             _sticky_chunked
             and not relevant_tools
             and _pinned_tools is None
+            and not _core_mode
             and _turn_discovery is not None
         ):
             try:
@@ -7329,6 +7391,7 @@ async def stream_agent_loop(
         _relevant_tools is not None
         and not _ody_doc_finetune_mode
         and not relevant_tools
+        and not _core_mode
     ):
         _removed_doc_tools = sorted(document_tools_to_drop(
             _relevant_tools,
@@ -7348,7 +7411,7 @@ async def stream_agent_loop(
     # words named that the selection above emptied out, and find out which
     # domains are off for real. See `repair_starved_domains`.
     _starved_domains: list[str] = []
-    if _relevant_tools is not None and not guide_only:
+    if _relevant_tools is not None and not guide_only and not _core_mode:
         _starved_domains = repair_starved_domains(
             _relevant_tools,
             _intent_domains,
@@ -7376,6 +7439,9 @@ async def stream_agent_loop(
 
     if _relevant_tools is not None:
         logger.info("[agent-intent] selected_tools=%s", sorted(_relevant_tools)[:50])
+    if _core_mode and _relevant_tools is not None:
+        logger.info("[core-tools] session=%s %d tools: %s", session_id, len(_relevant_tools),
+                    _name_list(_relevant_tools, 40))
 
     prep_timings["tool_selection"] = time.time() - _t1
 
@@ -7540,6 +7606,9 @@ async def stream_agent_loop(
         try:
             if (
                 session_id and not guide_only and _turn_discovery is not None
+                # A core-toolset turn already offers the loadout's enabled
+                # tools, so what it declares is what it may call.
+                and not _core_mode
                 and str(_tool_access).strip().lower() == "selected"
                 and stable_tools.enabled()
             ):
@@ -7867,8 +7936,6 @@ async def stream_agent_loop(
     # signatures + consecutive no-text tool rounds to bail early.
     _recent_call_sigs = collections.deque(maxlen=6)
     _stuck_rounds = 0
-    _single_read_streak = 0
-    _batch_nudges = 0
     # Result digest of each call's last run, so a repeated call that returned
     # something new (a polled job's fresh activity) counts as progress.
     _last_call_digest: Dict[str, str] = {}
@@ -10245,14 +10312,6 @@ async def stream_agent_loop(
         if _dup_pending_directive:
             messages.append(_harness_directive(_dup_pending_directive))
             _dup_pending_directive = None
-
-        _single_read_streak = _single_read_streak + 1 if _is_single_read_round(tool_blocks) else 0
-        if _single_read_streak >= _BATCH_NUDGE_STREAK and _batch_nudges < _MAX_BATCH_NUDGES:
-            messages.append(_harness_directive(_batch_nudge_text(_single_read_streak)))
-            logger.info("[agent-pacing] round=%s batching nudge after %d single read-only rounds (%d/%d)",
-                        round_num, _single_read_streak, _batch_nudges + 1, _MAX_BATCH_NUDGES)
-            _batch_nudges += 1
-            _single_read_streak = 0
 
         # Background jobs this chat started that finished while the turn ran.
         try:
