@@ -41,7 +41,7 @@ class _Mgr:
 
 
 @pytest.fixture
-def env(tmp_path, monkeypatch):
+def env(tmp_path, monkeypatch, app_db):
     monkeypatch.setattr(constants, "DATA_DIR", str(tmp_path))
     act._reset_for_tests()
     agent_runs._RUNS.clear(); agent_runs._EXTERNAL.clear(); agent_runs._FINISHED.clear()
@@ -51,11 +51,12 @@ def env(tmp_path, monkeypatch):
     import src.ai_interaction as ai
     monkeypatch.setattr(ai, "get_session_manager", lambda: mgr)
     import core.database as db
+    monkeypatch.setattr(db, "SessionLocal", app_db.SessionLocal)
+    with db.get_db_session() as store:
+        store.add_all([db.Session(id=s.id, name=s.name, owner=s.owner, endpoint_url='http://localhost:11434', model='test') for s in mgr.sessions.values()])
     monkeypatch.setattr(db, "get_session_settings", lambda sid, **kwargs: {})
     monkeypatch.setattr(db, "update_session_settings", lambda sid, patch: patch)
-    # This file uses an in-memory manager; transactional persistence is tested
-    # against the real database in routes/agents_routes/test_unit_archive_atomic.
-    monkeypatch.setattr(db, "archive_session_unit", lambda root, targets, owner: sorted(targets - {root}))
+
     # Fake endpoints must not perform a real context-window probe while a
     # worker/parent handoff is under its deterministic five-second test limit.
     import src.model_context as model_context
@@ -183,6 +184,8 @@ async def test_archive_refuses_an_active_child_and_cleanup_hides_only_completed_
     mgr.sessions["a2"] = _Sess("a2", "Alice worker")
     settings = {"a2": {"parent_session": "a1"}}
     import core.database as db
+    with db.get_db_session() as store:
+        store.add(db.Session(id="a2", name="Alice worker", owner="alice", endpoint_url='http://localhost:11434', model='test'))
     monkeypatch.setattr(db, "get_session_settings", lambda sid, **kwargs: settings.get(sid, {}))
     monkeypatch.setattr(db, "update_session_settings", lambda sid, patch: settings.setdefault(sid, {}).update(patch) or settings[sid])
     archive = eps[("POST", "/api/agents/sessions/{session_id}/archive")]
@@ -210,6 +213,8 @@ async def test_archive_refuses_queued_cli_children_and_cleanup_is_owner_scoped(e
     mgr.sessions["a2"] = _Sess("a2", "Queued CLI child")
     settings = {"a2": {"parent_session": "a1"}}
     import core.database as db
+    with db.get_db_session() as store:
+        store.add(db.Session(id="a2", name="Queued CLI child", owner="alice", endpoint_url='http://localhost:11434', model='test'))
     monkeypatch.setattr(db, "get_session_settings", lambda sid, **kwargs: settings.get(sid, {}))
     monkeypatch.setattr(agent_control, "live_children", lambda sid: 1 if sid == "a2" else 0)
     archive = eps[("POST", "/api/agents/sessions/{session_id}/archive")]
