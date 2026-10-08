@@ -43741,5 +43741,9 @@ details.admin-ep-advanced[open] > summary { opacity: 0.8; }
 }
 
 /* Combined agent turn wall time, visible after delivery in both chat themes. */
-.agent-turn-duration{display:inline-flex;align-items:center;margin-inline-start:8px;padding:2px 7px;border:1px solid currentColor;border-radius:999px;font-size:11px;font-weight:600;opacity:.8;white-space:nowrap;vertical-align:middle}
+/* A completed-turn badge is shared by both skins. Font changes can make the
+   header wider than its message, so wrap the real header instead of clipping
+   elapsed time or adding a second skin-specific timer. */
+.msg .role:has(>.agent-turn-duration){max-width:100%;box-sizing:border-box;flex-wrap:wrap;white-space:normal;row-gap:4px}
+.agent-turn-duration{display:inline-flex;align-items:center;flex-shrink:0;margin-inline-start:8px;padding:2px 7px;border:1px solid currentColor;border-radius:999px;font-size:11px;font-weight:600;opacity:.8;white-space:nowrap;vertical-align:middle}
 .agent-thread>.agent-turn-duration{margin:6px 8px;color:var(--text-secondary,var(--fg));}

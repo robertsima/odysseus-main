@@ -52,6 +52,29 @@ def appearance(page, style):
     set_checkbox(page, '#theme-style-toggle', style == 'agamemnon')
 
 
+@pytest.mark.parametrize('style', ['classic', 'agamemnon'])
+@pytest.mark.parametrize('width', [320, 390])
+def test_custom_font_does_not_clip_mobile_turn_duration(open_app, style, width):
+    page = open_app(width)
+    page.evaluate("async () => { const {showTurnDuration} = await import('/static/js/roundTiming.js');"
+                  " showTurnDuration([...document.querySelectorAll('.msg-ai')].at(-1), 73.5); }")
+    appearance(page, style)
+    set_select(page, '#theme-font-select', 'serif')
+    page.click('#themeGrid [data-theme="ocean"]')
+    page.keyboard.press('Escape')
+    settle(page)
+    badge = page.locator('.agent-turn-duration').last
+    bounds = badge.evaluate("""e => {
+        const badge = e.getBoundingClientRect();
+        const host = e.closest('.msg-ai').getBoundingClientRect();
+        return {right: badge.right, hostRight: host.right, left: badge.left,
+                hostLeft: host.left, scroll: e.scrollWidth, width: e.clientWidth};
+    }""")
+    assert bounds['right'] <= bounds['hostRight'] + 1
+    assert bounds['left'] >= bounds['hostLeft'] - 1
+    assert bounds['scroll'] <= bounds['width'] + 1
+
+
 @pytest.mark.parametrize('style', ['agamemnon', 'classic'])
 def test_stock_palette_keeps_explicit_font_through_switch_and_reload(open_app, style):
     page = open_app(1440, chat=False)
