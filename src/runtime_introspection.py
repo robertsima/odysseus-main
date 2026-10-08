@@ -221,6 +221,8 @@ def _tool_trace(events: List[dict], start, finish) -> Dict[str, Any]:
 #: writes. Without this the three very different causes are one word.
 _ABORT_CAUSES = (
     ("Server restarted", "server_restart"),
+    ("Agamemnon became active", "foreground_interrupt"),
+    # Run records written before the rename.
     ("Odysseus became active", "foreground_interrupt"),
     ("Stopped by user", "user_stop"),
 )

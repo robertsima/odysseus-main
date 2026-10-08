@@ -49,7 +49,7 @@ export async function openChatPage({ model = 'model-a', endpointUrl = 'http://lo
   // happy-dom has no 2D canvas; the thinking spinner draws on one. Every
   // drawing call is a no-op here.
   HTMLCanvasElement.prototype.getContext = () => new Proxy({}, { get: () => () => ({}) });
-  localStorage.setItem('odysseus-toggles', JSON.stringify({ mode }));
+  localStorage.setItem('agamemnon-toggles', JSON.stringify({ mode }));
 
   const history = { s1: [], s2: [] };
   fake.route('GET', '/api/sessions', () => [

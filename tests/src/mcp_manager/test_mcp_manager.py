@@ -63,7 +63,7 @@ def test_playwright_mcp_connection_error_includes_install_hint():
     assert "package not found" in msg
     assert "Browser MCP could not start" in msg
     assert "npx -y @playwright/mcp@latest --version" in msg
-    assert "restart Odysseus" in msg
+    assert "restart Agamemnon" in msg
 
 
 def test_generic_mcp_connection_error_preserves_original_error():
@@ -352,7 +352,7 @@ def test_network_failure_names_the_configured_address_without_secrets():
     assert error.startswith("MCP error -32603: Tool execution failed: fetch failed")
     assert "network failure" in error
     assert "PENPOT_API_URL=http://localhost:9001." in error
-    assert "localhost/127.0.0.1 is the Odysseus container itself" in error
+    assert "localhost/127.0.0.1 is the Agamemnon container itself" in error
     for secret in ("s3cret", "pw", "t=x", "PENPOT_ACCESS_TOKEN"):
         assert secret not in error, secret
 

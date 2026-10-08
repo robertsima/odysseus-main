@@ -548,6 +548,9 @@ async def test_the_chat_that_started_a_worker_sees_it_start_and_finish(monkeypat
     import src.headless_agent as headless
 
     parent_chat, worker_chat = _Chat("parent"), _Chat("w-9")
+    from core import database
+    with database.get_db_session() as db:
+        db.add(database.Session(id="parent", name="Parent", owner="alice", endpoint_url="http://mock", model="mock", archived=False))
     sessions = {"parent": parent_chat, "w-9": worker_chat}
     monkeypatch.setattr(ai_interaction, "get_session_manager", lambda: _manager(sessions))
     monkeypatch.setattr(session_tools, "_new_child_session", lambda *a, **k: (worker_chat, None))

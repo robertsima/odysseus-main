@@ -1,0 +1,10 @@
+/* Shared default for server-rendered auth/result pages outside the app shell. */
+@font-face { font-family: 'Space Grotesk'; font-weight: 400; font-style: normal; font-display: swap; src: url('/static/fonts/SpaceGrotesk-Regular.woff2') format('woff2'); }
+@font-face { font-family: 'Space Grotesk'; font-weight: 700; font-style: normal; font-display: swap; src: url('/static/fonts/SpaceGrotesk-Bold.woff2') format('woff2'); }
+:root { color-scheme: dark; --theme-font: 'Space Grotesk', system-ui, sans-serif; }
+body, button, input, select, textarea { font-family: var(--theme-font) !important; }
+body { background: #101112 !important; color: #e7e4db !important; }
+.card { background: #181a1c !important; border-color: #524c3d !important; box-sizing: border-box; max-width: min(480px, 95vw) !important; }
+button, a.auth-link { background: #bda779 !important; color: #101112 !important; }
+input[type=text] { box-sizing: border-box; }
+button:focus-visible, a:focus-visible, input:focus-visible { outline: 2px solid #d7c291 !important; outline-offset: 3px; }

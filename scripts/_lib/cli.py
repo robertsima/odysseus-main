@@ -90,7 +90,8 @@ def common_parser(prog: str, description: str = "") -> argparse.ArgumentParser:
     common.add_argument("--pretty", action="store_true",
                         help="Pretty-print JSON output")
 
-    p = argparse.ArgumentParser(prog=prog, description=description, parents=[common])
+    p = argparse.ArgumentParser(prog=prog.replace("odysseus", "agamemnon"),
+                                description=description.replace("Odysseus", "Agamemnon"), parents=[common])
     p.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     p._common_parents = [common]  # consumed by callers when building sub-parsers
     return p

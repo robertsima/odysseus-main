@@ -738,7 +738,7 @@ def _hardware_visibility_warning(result):
             "severity": "warning",
             "title": "No GPU visible inside Docker",
             "message": (
-                "Cookbook is scanning hardware from inside the Odysseus container. "
+                "Cookbook is scanning hardware from inside the Agamemnon container. "
                 "If your host has a GPU, Docker may not be exposing it to the container, "
                 "so model recommendations may be CPU-only or too conservative."
             ),

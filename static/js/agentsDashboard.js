@@ -63,7 +63,7 @@ const STEER_STATE_NOTE = {
   cancelled: 'The turn ended before the agent read it',
   failed: 'Never reached the agent',
 };
-const SOURCE_LABEL = { odysseus: 'Odysseus', claude_code: 'Claude Code', session: 'Sub-agent', pipeline: 'Pipeline', bg_job: 'Background job', worktree: 'Worktree', system: 'System' };
+const SOURCE_LABEL = { odysseus: 'Agamemnon', claude_code: 'Claude Code', session: 'Sub-agent', pipeline: 'Pipeline', bg_job: 'Background job', worktree: 'Worktree', system: 'System' };
 const KIND_ICON = { run_started: '▸', run_finished: '■', message: '›', tool_start: '→', tool_result: '←', file_change: '±', commit: '●', status: '·', error: '!', note: '~' };
 const MODAL_ID = 'agents-dashboard';
 const FLEET_PAGE_SIZE = 8;
@@ -467,8 +467,9 @@ function render() {
   else {
     const pluginPicker = surface.querySelector('[data-ag-plugin-picker]');
     const selectedAgent = state.rows.find((item) => item.session_id === state.selected) || state.rows[0];
-    if (pluginPicker && selectedAgent && window.OdysseusPluginCatalog?.mount) {
-      window.OdysseusPluginCatalog.mount(pluginPicker, {
+    const pluginCatalog = window.AgamemnonPluginCatalog || window.OdysseusPluginCatalog;
+    if (pluginPicker && selectedAgent && pluginCatalog?.mount) {
+      pluginCatalog.mount(pluginPicker, {
         sessionId: selectedAgent.session_id,
         api,
         onApplied: (result) => applyPluginSettings(selectedAgent, result),
@@ -565,7 +566,9 @@ function filteredRows() {
   return state.rows.filter((row) => visible.has(row.session_id));
 }
 /** Parent → worker rows among `rows`, and the rows with no listed parent.
- *  A worker whose parent is filtered out or archived stands on its own. */
+ *  A worker whose parent is not listed (deleted, or a live worker whose parent
+ *  was archived) stands on its own. Archive takes the whole unit, and the
+ *  overview keeps idle workers of an archived parent in the archive view. */
 function fleetTree(rows) {
   const byId = new Map(rows.map((row) => [row.session_id, row]));
   const kids = new Map();
@@ -927,7 +930,7 @@ function rowHtml(r, nest = {}) {
     ? `<span class="ag-row-attn">${r.pending_approvals} approval${r.pending_approvals === 1 ? '' : 's'}</span>` : '';
   // What it is waiting for, in its own words (the first `Needs user:` line).
   const need = r.status === 'needs_input' && (r.needs || []).length
-    ? `<div class="ag-row-need" title="${esc(r.needs.join('\n'))}"><span class="ag-row-need-label">Needs:</span> ${esc(r.needs[0])}${r.needs.length > 1 ? ` (+${r.needs.length - 1})` : ''} <button type="button" class="wb-btn wb-btn-sm wb-btn-ghost ag-need-clear" data-ag="clear-needs" data-sid="${esc(r.session_id)}" title="Already answered (in another chat, or outside Odysseus)? Clear this request">Mark answered</button></div>` : '';
+    ? `<div class="ag-row-need" title="${esc(r.needs.join('\n'))}"><span class="ag-row-need-label">Needs:</span> ${esc(r.needs[0])}${r.needs.length > 1 ? ` (+${r.needs.length - 1})` : ''} <button type="button" class="wb-btn wb-btn-sm wb-btn-ghost ag-need-clear" data-ag="clear-needs" data-sid="${esc(r.session_id)}" title="Already answered (in another chat, or outside Agamemnon)? Clear this request">Mark answered</button></div>` : '';
   const children = (r.children || []).slice(0, 5);
   const crew = children.length ? `<div class="ag-card-crew" title="${r.children?.length || 0} attached workers"><span class="ag-crew-line"></span>${children.map(c => robotHtml(c, 'micro')).join('')}${r.children.length > children.length ? `<b>+${r.children.length - children.length}</b>` : ''}</div>` : '';
   const status = r.status || 'idle';
@@ -1016,7 +1019,7 @@ function renderDetail() {
           : `<button type="button" class="wb-btn wb-btn-sm" data-ag="open-chat" data-sid="${esc(r.session_id)}">Open chat</button>`}${
           r.parent_session && !isCurrentChat(r.parent_session) ? `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="open-chat" data-sid="${esc(r.parent_session)}" title="Parent agent: ${esc(r.parent_name || r.parent_session)}">↳ ${esc(r.parent_name || 'parent')}</button>` : ''}${
           r.status === 'running' ? `<button type="button" class="wb-btn wb-btn-sm" data-ag="stop-chat" data-sid="${esc(r.session_id)}">Stop</button>` : ''}${
-          r.archived ? `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="restore-agent" data-sid="${esc(r.session_id)}">Restore</button>` : !running ? `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="archive-agent" data-sid="${esc(r.session_id)}" title="Hide this idle chat; its chat and run history stay preserved">Archive</button>` : ''}</span>
+          r.archived || r.archived_with_parent ? `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="restore-agent" data-sid="${esc(r.session_id)}" title="Restore this agent with its parent and the workers archived with it">Restore</button>` : !running ? `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="archive-agent" data-sid="${esc(r.session_id)}" title="Hide this idle chat; its chat and run history stay preserved">Archive</button>` : ''}</span>
       </div>
     </div>
     <div class="ag-detail-tabs" role="tablist" aria-label="${esc(r.name)} details">${tabs}</div>
@@ -1597,12 +1600,15 @@ async function onClick(e) {
       uiModule.showToast(r.stopped ? 'Stopping' : 'Nothing to stop'); scheduleRefresh();
     } else if (act === 'archive-agent') {
       const selected = state.rows.find((item) => item.session_id === b.dataset.sid);
-      if (!selected || !window.confirm(`Archive “${selected.name}”? Its chat and run history stay preserved. Active work cannot be archived.`)) return;
+      // Archive takes the whole unit, so say so before the workers disappear.
+      const workers = selected ? descendants(selected, fleetTree(state.rows).kids).length : 0;
+      const unit = workers ? ` and its ${workers} worker${workers === 1 ? '' : 's'}` : '';
+      if (!selected || !window.confirm(`Archive “${selected.name}”${unit}? Chats and run history stay preserved. Active work cannot be archived.`)) return;
       b.disabled = true;
-      await post(`/api/agents/sessions/${encodeURIComponent(b.dataset.sid)}/archive`);
+      const r = await post(`/api/agents/sessions/${encodeURIComponent(b.dataset.sid)}/archive`);
       state.events.delete(b.dataset.sid);
       state.selected = null;
-      uiModule.showToast('Archived — chat and run history were preserved', 'success');
+      uiModule.showToast(r?.message || 'Archived — chat and run history were preserved', 'success');
       await refresh();
     } else if (act === 'restore-agent') {
       b.disabled = true;

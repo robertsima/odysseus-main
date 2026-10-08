@@ -755,70 +755,16 @@ def setup_session_routes(
     @router.post("/session/{sid}/archive")
     def archive_session(request: Request, sid: str):
         """Archive a session, keeping its data but removing it from active sessions."""
-        _verify_session_owner(request, sid)
-        try:
-            # First check if session exists
-            session_manager.get_session(sid)
-            
-            # Archive the session
-            db = SessionLocal()
-            try:
-                db_session = db.query(DbSession).filter(DbSession.id == sid).first()
-                if db_session:
-                    db_session.archived = True
-                    db_session.updated_at = utcnow_naive()
-                    db.commit()
-                    
-                    # Update in memory if it exists
-                    if sid in session_manager.sessions:
-                        session_manager.sessions[sid].archived = True
-                        
-                    logger.info(f"Archived session {sid}")
-                    return {"status": "archived"}
-                else:
-                    raise HTTPException(404, f"Session {sid} not found")
-                    
-            except HTTPException:
-                raise
-            except Exception as e:
-                db.rollback()
-                logger.error(f"Error archiving session {sid}: {e}")
-                raise HTTPException(500, "Failed to archive session")
-            finally:
-                db.close()
-
-        except KeyError:
-            raise HTTPException(404, f"Session '{sid}' not found")
+        from src.agent_lifecycle import change_archive
+        change_archive(sid, effective_user(request), session_manager)
+        return {"status": "archived"}
     
     @router.post("/session/{sid}/unarchive")
     def unarchive_session(request: Request, sid: str):
         """Restore an archived session back to the active session list."""
-        _verify_session_owner(request, sid)
-        db = SessionLocal()
-        try:
-            db_session = db.query(DbSession).filter(DbSession.id == sid).first()
-            if not db_session:
-                raise HTTPException(404, f"Session {sid} not found")
-            db_session.archived = False
-            db_session.updated_at = utcnow_naive()
-            db.commit()
-            # Reload into session manager so it appears in the active list
-            try:
-                if sid in session_manager.sessions:
-                    session_manager.sessions[sid].archived = False
-                else:
-                    session_manager._load_session_from_db(sid)
-            except Exception:
-                pass  # Non-fatal — session will load on next access
-            return {"status": "unarchived"}
-        except HTTPException:
-            raise
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Error unarchiving session {sid}: {e}")
-            raise HTTPException(500, "Failed to unarchive session")
-        finally:
-            db.close()
+        from src.agent_lifecycle import change_archive
+        change_archive(sid, effective_user(request), session_manager, restore=True)
+        return {"status": "unarchived"}
 
     @router.get("/sessions/archived")
     def list_archived_sessions(request: Request, search: str = "", offset: int = 0, limit: int = 20, sort: str = "recent", model: str = ""):

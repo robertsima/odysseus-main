@@ -126,7 +126,7 @@ def test_resend_preserves_queued_stop_until_old_run_identity_arrives():
     )
     header_capture = _extract_source(
         _CHAT,
-        "const streamRunId = res.headers.get('X-Odysseus-Run-Id')",
+        "const streamRunId = res.headers.get('X-Agamemnon-Run-Id')",
         "// Mark the chat log busy",
     )
     script = f"""
@@ -174,7 +174,7 @@ def test_resend_preserves_queued_stop_until_old_run_identity_arrives():
         const streamSessionId = 'session-1';
         const streamGeneration = oldGeneration;
         const res = {{ headers: {{ get(name) {{
-          return name === 'X-Odysseus-Run-Id' ? 'old-run' : null;
+          return name === 'X-Agamemnon-Run-Id' ? 'old-run' : null;
         }} }} }};
         {header_capture}
       }}
@@ -191,7 +191,7 @@ def test_resend_preserves_queued_stop_until_old_run_identity_arrives():
           currentRunIdPolluted: _streamRunIds.has('session-1'),
           stopCalls: calls.map(call => ({{
             url: call.url,
-            runId: call.options.headers['X-Odysseus-Run-Id'],
+            runId: call.options.headers['X-Agamemnon-Run-Id'],
           }})),
         }},
       }}));
@@ -537,7 +537,7 @@ def test_stop_during_replacement_preflight_never_borrows_old_controller():
         normal: {{
           ownAborted: ownCtrl.signal.aborted,
           oldStillUntouched: oldCtrl.signal.aborted,
-          stopRunId: calls[0] && calls[0].options.headers['X-Odysseus-Run-Id'],
+          stopRunId: calls[0] && calls[0].options.headers['X-Agamemnon-Run-Id'],
         }},
       }}));
     """

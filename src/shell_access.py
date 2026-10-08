@@ -143,7 +143,7 @@ def guard_settings_change(request: Any, session_id: str, patch: Dict[str, Any]) 
                   or getattr(request.state, "current_user", None) == INTERNAL_TOOL_USER
                   or getattr(request.state, "api_token", False))
     if agent_call:
-        raise HTTPException(403, "Only a person in the Odysseus UI can widen a chat's shell or vault access "
+        raise HTTPException(403, "Only a person in the Agamemnon UI can widen a chat's shell or vault access "
                                  f"({', '.join(wider)})")
     if normalize(patch.get("shell_access")) == "host" and not auth_disabled():
         mgr = getattr(request.app.state, "auth_manager", None)

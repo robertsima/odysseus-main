@@ -69,10 +69,6 @@ def test_reply_streams_in_sanitized_and_survives_a_reload(live_app, live_page):
     assert event_handlers(reloaded) == []
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "static/js/markdown.js parses only three-backtick fences, so a longer fence around a fenced "
-    "block is split into pieces (found 2026-10-04). This also hides mutant B10 from the browser: "
-    "the streaming tail is drawn by the same parser; tests/static/js/streamingSegmenter/ covers B10."))
 def test_nested_code_fence_renders_as_one_code_block(live_app, live_page):
     _, page = open_chat(live_app, live_page, "Fence probe")
     composer(page).fill(f"Show a nested fence. {PROBE_FENCE}")

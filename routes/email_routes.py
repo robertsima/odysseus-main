@@ -38,7 +38,7 @@ from email.mime.multipart import MIMEMultipart
 
 from fastapi import APIRouter, Query, UploadFile, File, BackgroundTasks, HTTPException, Depends, Request
 from fastapi.responses import FileResponse, StreamingResponse
-from src.constants import DATA_DIR
+from src.constants import DATA_DIR, LEGACY_REMINDER_SUBJECT_PREFIX, REMINDER_SUBJECT_PREFIX
 
 from src.llm_core import llm_call_async
 from src.upload_limits import read_upload_limited, EMAIL_COMPOSE_UPLOAD_MAX_BYTES
@@ -1377,10 +1377,13 @@ def _move_email_message(conn, uid: str, dest: str, role: str = "") -> bool:
 
 
 def _apply_odysseus_headers(msg, kind: str | None = None, ref_id: str | None = None):
+    msg["X-Agamemnon-Origin"] = "agamemnon-ui"
     msg["X-Odysseus-Origin"] = ODYSSEUS_MAIL_ORIGIN
     if kind:
+        msg["X-Agamemnon-Kind"] = re.sub(r"[^A-Za-z0-9_.-]", "-", kind)[:64]
         msg["X-Odysseus-Kind"] = re.sub(r"[^A-Za-z0-9_.-]", "-", kind)[:64]
     if ref_id:
+        msg["X-Agamemnon-Ref"] = re.sub(r"[^A-Za-z0-9_.:-]", "-", ref_id)[:128]
         msg["X-Odysseus-Ref"] = re.sub(r"[^A-Za-z0-9_.:-]", "-", ref_id)[:128]
 
 
@@ -1966,12 +1969,14 @@ def setup_email_routes():
                 # All emails NOT marked as answered/done (read or unread).
                 status, data = _imap_uid_search(conn, f"(UNANSWERED{from_clause})")
             elif filter_ == "reminders":
-                # Prefer the Odysseus marker header, but include the subject
-                # fallback too. The fallback uses a distinct Odysseus prefix
-                # so ordinary emails containing "Reminder" don't get mixed in.
+                # Prefer the marker header, but include the subject fallback
+                # too. The fallback uses a distinct product prefix so ordinary
+                # emails containing "Reminder" don't get mixed in; reminders
+                # sent before the Agamemnon rename carry the Odysseus prefix.
                 status, data = _imap_uid_search(
                     conn,
-                    f'(OR HEADER X-Odysseus-Kind "reminder" SUBJECT "Reminder (Odysseus):"{from_clause})',
+                    f'(OR OR HEADER X-Odysseus-Kind "reminder" SUBJECT "{REMINDER_SUBJECT_PREFIX}" '
+                    f'SUBJECT "{LEGACY_REMINDER_SUBJECT_PREFIX}"{from_clause})',
                 )
             elif filter_ == "pending_30d":
                 # "What's pending in the last month" — UNANSWERED + delivered
@@ -4005,10 +4010,12 @@ def setup_email_routes():
                         # explicit kind header, and subject fallback catches
                         # clients/providers that stripped custom headers.
                         uids.update(_search_uids(conn, f'(HEADER X-Odysseus-Kind {_search_quote("reminder")})'))
-                        uids.update(_search_uids(conn, f'(SUBJECT {_search_quote("Reminder (Odysseus):")})'))
+                        for prefix in (REMINDER_SUBJECT_PREFIX, LEGACY_REMINDER_SUBJECT_PREFIX):
+                            uids.update(_search_uids(conn, f'(SUBJECT {_search_quote(prefix)})'))
                         for addr in own_addrs:
                             addr_q = _search_quote(addr)
-                            uids.update(_search_uids(conn, f'(FROM {addr_q} SUBJECT {_search_quote("Reminder (Odysseus):")})'))
+                            for prefix in (REMINDER_SUBJECT_PREFIX, LEGACY_REMINDER_SUBJECT_PREFIX):
+                                uids.update(_search_uids(conn, f'(FROM {addr_q} SUBJECT {_search_quote(prefix)})'))
                             # Legacy reminders created before the Odysseus
                             # prefix still came from this mailbox as
                             # "Reminder: ..."; include them in Clear without
@@ -4250,7 +4257,7 @@ def setup_email_routes():
 
     @router.post("/compose-from-odysseus")
     async def compose_from_odysseus(data: dict, owner: str = Depends(require_owner)):
-        """Stage an Odysseus document or gallery image as a compose upload."""
+        """Stage an Agamemnon document or gallery image as a compose upload."""
         kind = str(data.get("kind") or "").strip().lower()
         item_id = str(data.get("id") or "").strip()
         if kind not in {"document", "gallery"} or not item_id:

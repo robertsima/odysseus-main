@@ -262,7 +262,7 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
             return requested
         if not explicit:
             return SENSITIVITY_PRIVATE
-        restart = " and restart Odysseus" if declaration.source == "ODYSSEUS_PERSONAL_DIRS" else ""
+        restart = " and restart Agamemnon" if declaration.source == "ODYSSEUS_PERSONAL_DIRS" else ""
         raise HTTPException(
             400,
             f"{directory} cannot be made public: it is declared private by "
@@ -607,7 +607,7 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
             if abs(current_modified - body.modified) > 0.000001:
                 raise HTTPException(
                     409,
-                    "This file changed outside Odysseus. Reopen it before saving so those changes are not overwritten.",
+                    "This file changed outside Agamemnon. Reopen it before saving so those changes are not overwritten.",
                 )
 
         _write_vault_file(write_target, payload)

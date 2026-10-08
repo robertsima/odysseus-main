@@ -287,7 +287,7 @@ def _is_app_remote(url: str) -> bool:
     return bool(cfg.repo_slug and path.casefold() == cfg.repo_slug.casefold())
 
 
-PUBLISH_FLOW_MESSAGE = "Odysseus repositories must use request_publish/publish"
+PUBLISH_FLOW_MESSAGE = "Agamemnon repositories must use request_publish/publish"
 
 
 def publish_refusal(path, action: str) -> Optional[str]:
@@ -336,7 +336,7 @@ def _push_sync(path, token=None, remote_branch=None, expected_head=None):
         if is_odysseus_repository(str(path)) or _is_app_remote(url):
             _fail(
                 "use_publish_flow",
-                "Odysseus repositories must use request_publish/publish",
+                "Agamemnon repositories must use request_publish/publish",
             )
         if not _status(repo)["clean"]:
             _fail("dirty_tree", "working tree must be clean before push")
@@ -424,7 +424,7 @@ def _force_push_with_lease_sync(
         if is_odysseus_repository(str(path)) or _is_app_remote(url):
             _fail(
                 "use_publish_flow",
-                "Odysseus repositories must use request_publish/publish",
+                "Agamemnon repositories must use request_publish/publish",
             )
         if not _status(repo)["clean"]:
             _fail("dirty_tree", "working tree must be clean before force-with-lease")
@@ -489,7 +489,7 @@ def _delete_remote_branch_sync(
         if is_odysseus_repository(str(path)) or _is_app_remote(url):
             _fail(
                 "use_publish_flow",
-                "Odysseus repositories must use request_publish/publish",
+                "Agamemnon repositories must use request_publish/publish",
             )
         target_ref = b"refs/heads/" + name.encode()
         remote_oid = _fetch_exact(repo, url, target_ref, token)
@@ -841,9 +841,9 @@ def _pull_with_restore_sync(path: Path, token=None):
             stash = Stash(repo)
             try:
                 stash_oid = stash.push(
-                    author=b"Odysseus Autostash <odysseus@localhost>",
-                    committer=b"Odysseus Autostash <odysseus@localhost>",
-                    message=b"Odysseus pull_with_restore",
+                    author=b"Agamemnon Autostash <odysseus@localhost>",
+                    committer=b"Agamemnon Autostash <odysseus@localhost>",
+                    message=b"Agamemnon pull_with_restore",
                     config=repo.get_config(),
                 )
             except Exception:  # noqa: BLE001 - stash internals expose no stable exception set

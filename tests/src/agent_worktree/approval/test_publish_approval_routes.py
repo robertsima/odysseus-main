@@ -182,7 +182,7 @@ def test_the_agent_is_told_a_person_approves_in_the_ui():
     from src import tool_schemas
 
     text = str(tool_schemas.__dict__)
-    assert "approves it in the Odysseus UI" in text
+    assert "approves it in the Agamemnon UI" in text
     assert "paste the code back to you" not in text
 
 

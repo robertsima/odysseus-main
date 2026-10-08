@@ -118,7 +118,7 @@ function _filterPool(start, end) {
 // something and cancels whatever scheduled task is running; a person coming
 // back to the tab is already reported by the interactive activity heartbeat
 // (static/app.js), so this loses no real signal.
-const _CAL_PASSIVE_HEADERS = { 'X-Odysseus-Poll': '1' };
+const _CAL_PASSIVE_HEADERS = { 'X-Agamemnon-Poll': '1' };
 
 async function _fetchEvents(start, end, force, passive) {
   if (!force && _rangeIsCached(start, end)) {
@@ -2624,7 +2624,7 @@ async function _showCalSettings() {
             </button>
             <span id="cal-settings-todoist-status" style="font-size:11px;opacity:0.65;">Checking...</span>
           </div>
-          <div style="font-size:10px;opacity:0.4;margin-top:4px;">Shows Todoist tasks with due dates on this calendar. Configure the container with TODOIST_API_TOKEN, then restart Odysseus.</div>
+          <div style="font-size:10px;opacity:0.4;margin-top:4px;">Shows Todoist tasks with due dates on this calendar. Configure the container with TODOIST_API_TOKEN, then restart Agamemnon.</div>
         </div>
       </div>
     </div>

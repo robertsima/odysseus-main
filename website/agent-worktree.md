@@ -2,7 +2,7 @@
 
 ## Updating an existing checkout (scoped Git)
 
-`manage_git` supports ordinary Git workflows, separate from Odysseus's own
+`manage_git` supports ordinary Git workflows, separate from Agamemnon's own
 publishing worktree. Use `repositories` first; then supply the returned absolute
 `repository` path. Roots come from **Settings → Claude Code repository roots**
 (`claude_code_repository_roots` / `CLAUDE_CODE_REPOSITORY_ROOTS`), defaulting to
@@ -97,14 +97,14 @@ Private GitHub repositories use `GITHUB_PERSONAL_ACCESS_TOKEN` only when the
 current chat permits the `github_read` integration; sessionless calls are
 anonymous. Push also requires `ODYSSEUS_GITHUB_MCP_WRITE=true`, permission for
 `github_write` in that agent's loadout, and a token with repository write access.
-Odysseus self-publishing still requires the host-reviewed publishing flow below;
+Agamemnon self-publishing still requires the host-reviewed publishing flow below;
 the generic Git tool cannot bypass it. Its publishing token is not borrowed. Tokens stay
 in memory and HTTPS redirects are refused. If an upstream branch was removed,
 the tool reports that instead of silently pulling `main` or `dev`.
 
 For GitHub.com, the token must look like an actual GitHub credential (normally
 `github_pat_...` for a fine-grained PAT or `ghp_...` for a classic PAT). An
-Odysseus `ody_...` API token in that variable is rejected, and the GitHub MCP
+Agamemnon `ody_...` API token in that variable is rejected, and the GitHub MCP
 servers are not registered. The deployed container needs:
 
 ```dotenv
@@ -170,7 +170,7 @@ create a worktree, edit, run tests and commit — it simply cannot push.
    are sensitive. It pushes nothing.
 4. **You** run the CLI on the host, read the file list, and approve. The CLI
    prints a one-time code.
-5. **You** paste the code to the agent, which calls `publish`. Odysseus
+5. **You** paste the code to the agent, which calls `publish`. Agamemnon
    re-derives the change from git, spends the code, pushes the branch, and opens
    a **draft** pull request.
 
@@ -230,7 +230,7 @@ switched off.
 
 A worker whose workspace is in another checkout gets `REPOSITORY_REQUIRED`
 (nothing created) if it calls `start` without `repository`; the 2026-09-28
-failure was exactly that call silently making a worktree of Odysseus.
+failure was exactly that call silently making a worktree of Agamemnon.
 
 ## Cleaning up a worktree
 
@@ -244,7 +244,7 @@ lost:
   result says why.
 
 The stray worktree created on 2026-09-28 (branch `agent/odysseus/origin/main`
-at `/app/data/agent_worktrees/origin__main`, made from the Odysseus base
+at `/app/data/agent_worktrees/origin__main`, made from the Agamemnon base
 branch) is removed with:
 
 ```json
@@ -304,7 +304,7 @@ points the agent at a different host.
 ### Credentials
 
 Preferred: a GitHub App installed on that one repository, with **Contents:
-write** and **Pull requests: write**. Odysseus mints a one-hour installation
+write** and **Pull requests: write**. Agamemnon mints a one-hour installation
 token per operation and holds it in memory only.
 
 ```bash
@@ -335,7 +335,7 @@ key under the data mount does not expose it to the agent.
 
 Fallback, for a setup where a GitHub App is not practical: a fine-grained
 personal access token scoped to the one repository, in
-`ODYSSEUS_AGENT_GITHUB_TOKEN`. It is long-lived, so rotate it. Odysseus logs a
+`ODYSSEUS_AGENT_GITHUB_TOKEN`. It is long-lived, so rotate it. Agamemnon logs a
 warning every time it uses one.
 
 Tokens are never written to `.git/config`, a credential helper, a log line, or a
@@ -412,7 +412,7 @@ needs a second acknowledgement: `approve` refuses without `--allow-sensitive`.
 
 ## Reading the app's own logs
 
-The agent can tail Odysseus's logs to debug itself, through `read_app_logs`.
+The agent can tail Agamemnon's logs to debug itself, through `read_app_logs`.
 It is read-only, addresses logs by name within known log directories only, and
 redacts credential-shaped content (Authorization headers, bearer tokens, API
 keys, JWTs, URLs carrying userinfo or query keys) before returning lines.
@@ -483,7 +483,7 @@ exactly what plan mode is for.
 - A change touching more than 500 files is refused; split it.
 - If the remote branch moved between the request and the publish, the publish is
   refused and you need a fresh request.
-- Odysseus never merges. The pull request is always created as a draft.
+- Agamemnon never merges. The pull request is always created as a draft.
 - Publishing only works through `manage_agent_worktree`. Git commands the agent
   runs in `bash` have no credential by design and will fail to authenticate.
 - The agent may still ask you to approve something it should not. The file list

@@ -10,9 +10,9 @@ metadata:
 
 # Claude Code delegation
 
-Claude Code is a coding agent that Odysseus runs as a local subprocess, not a chat model: `chat_with_model` and `list_models` never list it, and `/app` is not a repository it can work in. Everything goes through `delegate_to_claude_code` (outside chat, `/api/claude-code/tasks`).
+Claude Code is a coding agent that Agamemnon runs as a local subprocess, not a chat model: `chat_with_model` and `list_models` never list it, and `/app` is not a repository it can work in. Everything goes through `delegate_to_claude_code` (outside chat, `/api/claude-code/tasks`).
 
-You decide scope, risk and acceptance. Claude Code implements inside one checkout. Odysseus never pushes for it and never handles its Anthropic credentials: the operator signs the unmodified binary in, and the harness hands it only a scoped Odysseus token for calling back into this instance when configured. Read [terms-and-boundaries.md](references/terms-and-boundaries.md) before proposing any change to how Claude is reached.
+You decide scope, risk and acceptance. Claude Code implements inside one checkout. Agamemnon never pushes for it and never handles its Anthropic credentials: the operator signs the unmodified binary in, and the harness hands it only a scoped Agamemnon token for calling back into this instance when configured. Read [terms-and-boundaries.md](references/terms-and-boundaries.md) before proposing any change to how Claude is reached.
 
 ## Preflight (once per session, before the first delegation)
 
@@ -22,7 +22,7 @@ You decide scope, risk and acceptance. Claude Code implements inside one checkou
    - `hints` names the exact repair for anything missing (binary path, sign-in, no checkout under the roots). Report it. Sign-in cannot be fixed from chat.
    - `update_required` is set when an earlier run found the CLI too old for its model. `{"action": "update"}` (admin) runs the binary's own updater and reports `version_before` and `version_after`; it is refused while any delegation runs.
 2. When the user names a repository, match it against `repositories`. If it is not listed, say so and offer the listed ones. The path always comes from `repositories`, never from a guess and never `/app`.
-3. For Odysseus itself, use the dedicated agent worktree (an `agent_worktrees/...` entry) when one exists, so a delegation cannot disturb the running app's files.
+3. For Agamemnon itself, use the dedicated agent worktree (an `agent_worktrees/...` entry) when one exists, so a delegation cannot disturb the running app's files.
 
 ## Delegation loop
 
@@ -46,7 +46,7 @@ You decide scope, risk and acceptance. Claude Code implements inside one checkou
 5. Verify independently: inspect the diff with the workspace file tools and run the smallest relevant test.
 6. Allow one narrow repair pass. After two unsuccessful passes, take the work over in the primary harness or escalate.
 7. Publishing is a separate, human-gated step: `manage_agent_worktree` (`request_publish`, operator approval, `publish`). Claude Code cannot push, so never ask it to.
-8. After acceptance, if the owner keeps a delegation log (a knowledge-base folder such as `AI Mind`; `search_documents` for "Claude Code Delegation" shows whether the note exists), record the outcome as [documentation-policy.md](references/documentation-policy.md) says. Skip the record when there is no log or the user calls the work throwaway.
+8. After acceptance, if the owner keeps a delegation log (an explicitly selected knowledge-base folder; use the owner's configured destination rather than guessing a personal vault name), record the outcome as [documentation-policy.md](references/documentation-policy.md) says. Skip the record when there is no log or the user calls the work throwaway.
 
 ## Acceptance
 

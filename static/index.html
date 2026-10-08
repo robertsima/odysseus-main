@@ -29,13 +29,14 @@
       if (t && t.name) document.documentElement.setAttribute('data-theme', t.name);
       var style = JSON.parse(localStorage.getItem('odysseus-page-style-v1') || 'null');
       document.documentElement.setAttribute('data-style', style && (style.value === 'classic' || style.value === 'agamemnon') ? style.value : (t && t.name && t.name !== 'dark' ? 'classic' : 'agamemnon'));
-      // An absent local preference gets the Agamemnon first-paint palette;
+      // An absent local preference gets the Agamemnon first-paint palette
+      // (THEMES.dark in theme.js, so the gold does not shift once it boots);
       // explicit saved/server themes continue through the existing sync path.
       if (!t || !t.colors) {
         var ds = document.documentElement.style;
         ds.setProperty('--bg', '#111417'); ds.setProperty('--fg', '#f7f8fa');
-        ds.setProperty('--panel', '#1b2127'); ds.setProperty('--border', '#647180');
-        ds.setProperty('--red', '#f0c45a'); ds.setProperty('--brand-color', '#f0c45a');
+        ds.setProperty('--panel', '#1b2127'); ds.setProperty('--border', '#59636d');
+        ds.setProperty('--red', '#d7b35a'); ds.setProperty('--brand-color', '#d7b35a');
         var dmeta = document.querySelector('meta[name="theme-color"]');
         if (dmeta) dmeta.setAttribute('content', '#111417');
       }
@@ -93,10 +94,12 @@
         }
       }
       // Apply font early
-      if (t && t.font) {
-        var fm = {mono:"'Fira Code', monospace",sans:"system-ui, -apple-system, 'Segoe UI', sans-serif",serif:"Georgia, 'Times New Roman', serif",opendyslexic:"'OpenDyslexic', sans-serif"};
-        if (fm[t.font]) { s.setProperty('--font-family', fm[t.font]); }
-        else { s.setProperty('--font-family', "'" + t.font.replace(/'/g,'') + "', sans-serif"); }
+      // Mirrors FONT_MAP in theme.js; `auto` leaves the page style's typeface.
+      if (t && t.font && t.font !== 'auto') {
+        var fm = {mono:"'Fira Code', monospace",grotesk:"'Space Grotesk', system-ui, sans-serif",sans:"system-ui, -apple-system, 'Segoe UI', sans-serif",serif:"Georgia, 'Times New Roman', serif",humanist:"'Trebuchet MS', 'Segoe UI', sans-serif",editorial:"Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif",classic:"'Times New Roman', Times, serif",code:"'Cascadia Code', 'SFMono-Regular', Consolas, 'Liberation Mono', monospace",rounded:"ui-rounded, 'Arial Rounded MT Bold', system-ui, sans-serif",opendyslexic:"'OpenDyslexic', sans-serif"};
+        var fs = document.documentElement.style;
+        if (fm[t.font]) { fs.setProperty('--font-family', fm[t.font]); }
+        else { fs.setProperty('--font-family', "'" + t.font.replace(/'/g,'') + "', sans-serif"); }
       }
       // Apply density class on html
       if (t && t.density && t.density !== 'comfortable') {
@@ -331,7 +334,7 @@
 <!-- AGAMEMNON SOLDIER SYMBOLS END -->
   <!-- Loading overlay — hides all flashing until app is ready -->
   <div id="app-loader" style="position:fixed;inset:0;z-index:99999;background:var(--bg,#111417);display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px;transition:opacity .3s">
-    <div id="loader-wave" style="color:color-mix(in srgb, #f7f8fa 62%, var(--brand-color,var(--red,#f0c45a)));font-family:monospace;font-size:11px;opacity:.5;position:relative;padding-top:10px;line-height:1;white-space:pre">▁▂▃</div>
+    <div id="loader-wave" style="color:color-mix(in srgb, #f7f8fa 62%, var(--brand-color,var(--red,#d7b35a)));font-family:monospace;font-size:11px;opacity:.5;position:relative;padding-top:10px;line-height:1;white-space:pre">▁▂▃</div>
   </div>
   <script nonce="{{CSP_NONCE}}">
   (function(){
@@ -391,7 +394,7 @@
           <div class="wb-toolbar">
             <details class="wb-filter-options"><summary>Filters</summary><div class="wb-filter-fields">
               <select id="wb-scope" class="wb-select" title="Which sessions to follow" aria-label="Scope"><option value="session">This chat</option><option value="all">All sessions</option></select>
-              <select id="wb-filter" class="wb-select" title="Filter by source" aria-label="Source"><option value="">All sources</option><option value="odysseus">Odysseus</option><option value="claude_code">Claude Code</option><option value="session">Sub-agents</option><option value="pipeline">Pipelines</option><option value="bg_job">Background jobs</option><option value="worktree">Worktree</option><option value="system">System</option></select>
+              <select id="wb-filter" class="wb-select" title="Filter by source" aria-label="Source"><option value="">All sources</option><option value="odysseus">Agamemnon</option><option value="claude_code">Claude Code</option><option value="session">Sub-agents</option><option value="pipeline">Pipelines</option><option value="bg_job">Background jobs</option><option value="worktree">Worktree</option><option value="system">System</option></select>
             </div></details>
             <span class="wb-spacer"></span>
             <span class="wb-live" id="wb-live" role="status" aria-live="polite" title="Activity feed connection (separate from run status)">Feed offline</span>
@@ -782,7 +785,9 @@
           <div class="theme-fd-group">
             <label class="theme-fd-label">Font</label>
             <select id="theme-font-select" class="theme-fd-select" aria-label="Font">
-              <option value="mono">Monospace</option>
+              <option value="auto">Theme default</option>
+              <option value="mono">Monospace · Fira Code</option>
+              <option value="grotesk">Grotesk · Space Grotesk</option>
               <option value="sans">Sans-serif</option>
               <option value="serif">Serif</option>
               <option value="humanist">Humanist · Trebuchet</option>
@@ -1886,7 +1891,7 @@
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>Add provider
               </button>
             </h2>
-            <div class="admin-toggle-sub" style="margin-bottom:10px">Model servers and cloud accounts Odysseus can call. Click a provider to choose which of its models appear in the picker.</div>
+            <div class="admin-toggle-sub" style="margin-bottom:10px">Model servers and cloud accounts Agamemnon can call. Click a provider to choose which of its models appear in the picker.</div>
 
             <div id="adm-addProvider" class="adm-add-provider" hidden>
               <div class="adm-add-provider-head">
@@ -2010,7 +2015,7 @@
               <span style="flex:1"></span>
               <label class="admin-switch" title="Enable microphone dictation"><input type="checkbox" id="set-sttEnabledToggle" checked aria-label="Voice input on"><span class="admin-slider"></span></label>
             </h2>
-            <div class="admin-toggle-sub" style="margin-bottom:8px">Dictate into the composer. Local Whisper keeps recordings on this Odysseus instance.</div>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Dictate into the composer. Local Whisper keeps recordings on this Agamemnon instance.</div>
             <div id="set-sttConfigWrap" class="settings-col">
               <div class="settings-row">
                 <label class="settings-label" for="set-sttProviderSelect">Provider</label>
@@ -2331,7 +2336,7 @@
 
           <div class="admin-card settings-labels-wide" id="set-workbenchCard">
             <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4M6 8l3 3-3 3M11 14h5"/></svg>Workbench</h2>
-            <div class="admin-toggle-sub" style="margin-bottom:8px">The Workbench window shows every agent process for a chat as it happens — Odysseus turns, Claude Code runs, sub-agents, pipelines — plus the files they changed, their commits and the repository's pull requests.</div>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">The Workbench window shows every agent process for a chat as it happens — Agamemnon turns, Claude Code runs, sub-agents, pipelines — plus the files they changed, their commits and the repository's pull requests.</div>
             <div class="settings-col">
               <div class="settings-row" data-setting-key="workbench_enabled"><label class="settings-label" for="set-wbEnabled">Workbench window</label><label class="admin-switch"><input id="set-wbEnabled" type="checkbox"><span class="admin-slider"></span></label></div>
               <div class="settings-row" data-setting-key="workbench_auto_open"><label class="settings-label" for="set-wbAutoOpen" title="Open the Agents panel automatically when a Claude Code run, sub-agent or pipeline starts in the current chat.">Open Agents panel on delegation</label><label class="admin-switch"><input id="set-wbAutoOpen" type="checkbox"><span class="admin-slider"></span></label></div>
@@ -2358,7 +2363,7 @@
         <div data-settings-panel="claude-code" class="hidden">
           <div class="admin-card settings-labels-wide" id="set-claudeCodeCard">
             <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>Claude Code delegation</h2>
-            <div class="admin-toggle-sub" style="margin-bottom:8px">Agents hand bounded coding tasks to Claude Code (<code>delegate_to_claude_code</code>) inside an approved checkout from <a href="#" data-go-settings-tab="agents" data-go-scroll-to="#set-agentWorkspaceCard" class="settings-inline-link">Development folders</a>, either in this container or in GitHub Actions. Claude Code signs in with your own account; Odysseus never stores those credentials. Values here override the <code>CLAUDE_CODE_*</code> environment variables; an empty field keeps the environment default.</div>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Agents hand bounded coding tasks to Claude Code (<code>delegate_to_claude_code</code>) inside an approved checkout from <a href="#" data-go-settings-tab="agents" data-go-scroll-to="#set-agentWorkspaceCard" class="settings-inline-link">Development folders</a>, either in this container or in GitHub Actions. Claude Code signs in with your own account; Agamemnon never stores those credentials. Values here override the <code>CLAUDE_CODE_*</code> environment variables; an empty field keeps the environment default.</div>
             <div id="set-ccStatus" class="cc-status" style="margin-bottom:10px;"></div>
             <div id="set-ccLogin" class="cc-login" style="margin-bottom:10px;">
               <div class="settings-row" style="gap:8px;flex-wrap:wrap;">
@@ -2387,7 +2392,7 @@
                 <label class="admin-switch"><input id="set-ccStream" type="checkbox"><span class="admin-slider"></span></label>
               </div>
               <div class="settings-row" data-setting-key="claude_code_auto_update">
-                <label class="settings-label" for="set-ccAutoUpdate" title="Let Odysseus keep the Claude Code CLI in this container up to date.">Auto-update Claude Code</label>
+                <label class="settings-label" for="set-ccAutoUpdate" title="Let Agamemnon keep the Claude Code CLI in this container up to date.">Auto-update Claude Code</label>
                 <label class="admin-switch"><input id="set-ccAutoUpdate" type="checkbox"><span class="admin-slider"></span></label>
               </div>
               <div class="settings-row" data-setting-key="claude_code_backend">
@@ -2399,7 +2404,7 @@
             </div>
 
             <h3 class="agent-profiles-title" style="margin-top:14px">Cloud runner (GitHub Actions)</h3>
-            <div class="admin-toggle-sub" style="margin-bottom:8px">Runs Claude Code in GitHub's cloud with Anthropic's official GitHub Action, so nothing has to be signed in inside this container. Your Claude credential lives only in each repository's secrets (<code>CLAUDE_CODE_OAUTH_TOKEN</code> from <code>claude setup-token</code>, or <code>ANTHROPIC_API_KEY</code>); Odysseus never sees it. Claude works on a <code>claude/odysseus-*</code> branch and the result comes back as a draft pull request. Uses the GitHub credential configured for the agent worktree.</div>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Runs Claude Code in GitHub's cloud with Anthropic's official GitHub Action, so nothing has to be signed in inside this container. Your Claude credential lives only in each repository's secrets (<code>CLAUDE_CODE_OAUTH_TOKEN</code> from <code>claude setup-token</code>, or <code>ANTHROPIC_API_KEY</code>); Agamemnon never sees it. Claude works on a <code>claude/odysseus-*</code> branch and the result comes back as a draft pull request. Uses the GitHub credential configured for the agent worktree.</div>
             <div class="settings-col">
               <div class="settings-row" style="align-items:flex-start;" data-setting-key="claude_cloud_repositories">
                 <label class="settings-label" for="set-ccCloudRepos" style="margin-top:6px;" title="owner/repo slugs Claude may be dispatched to, or * for any repository the GitHub credential can see. Without a hub repository each needs the workflow file and a Claude secret.">Cloud repositories<br><span style="font-weight:normal;opacity:.7">owner/repo, one per line; * = any</span></label>
@@ -2443,8 +2448,8 @@
                   <input id="set-ccConcurrency" type="number" min="0" max="16" step="1" placeholder="Default" class="settings-select" aria-label="Provider-wide concurrent jobs; zero uses deployment default">
                 </div>
                 <div class="settings-row" data-setting-key="claude_code_odysseus_url">
-                  <label class="settings-label" for="set-ccCallbackUrl" title="Lets a delegated Claude session call back into this Odysseus through the scoped /api/codex/* API.">Callback URL</label>
-                  <input id="set-ccCallbackUrl" type="text" placeholder="http://127.0.0.1:7000" class="settings-select">
+                  <label class="settings-label" for="set-ccCallbackUrl" title="Where a delegated Claude session reaches this Agamemnon's scoped /api/codex/* API. Leave empty to use this instance's own address; the token file below turns the callback on.">Callback URL</label>
+                  <input id="set-ccCallbackUrl" type="text" placeholder="this instance (automatic)" class="settings-select">
                 </div>
                 <div class="settings-row" data-setting-key="claude_code_odysseus_token_file">
                   <label class="settings-label" for="set-ccTokenFile" title="Private file (mode 0600) holding a Claude Agent token created under Connections. Passed only in the child's environment.">Callback token file</label>
@@ -2794,7 +2799,7 @@
         <div data-settings-panel="reminders" class="hidden">
           <div class="admin-card">
             <h2 style="display:flex;align-items:center;gap:8px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>How you're notified<span style="flex:1"></span><span id="set-reminder-test-msg" style="font-size:11px;font-weight:normal;"></span><button class="admin-btn-sm" id="set-reminder-test-btn" style="font-size:11px;font-weight:normal;display:inline-flex;align-items:center;gap:4px;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>Test</button></h2>
-            <div class="admin-toggle-sub" style="margin-bottom:8px">Where fired note reminders are delivered. Every reminder also shows as a browser notification inside Odysseus.</div>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Where fired note reminders are delivered. Every reminder also shows as a browser notification inside Agamemnon.</div>
             <div class="settings-col">
               <div class="settings-row" data-setting-key="reminder_channel">
                 <label class="settings-label" for="set-reminder-channel">Channel</label>
@@ -2831,7 +2836,7 @@
           </div>
           <div class="admin-card">
             <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Public app URL</h2>
-            <div class="admin-toggle-sub" style="margin-bottom:8px">Used to build clickable links back to Odysseus in outgoing reminder and urgent-email messages (e.g. <code>https://chat.yourdomain.com</code>). Leave blank to omit links.</div>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Used to build clickable links back to Agamemnon in outgoing reminder and urgent-email messages (e.g. <code>https://chat.yourdomain.com</code>). Leave blank to omit links.</div>
             <div class="settings-col">
               <div class="settings-row" data-setting-key="app_public_url">
                 <label class="settings-label" for="set-app-public-url">URL</label>
@@ -2924,12 +2929,12 @@
         <div data-settings-panel="builtin" class="hidden">
           <div class="admin-card">
             <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M17.5 14v7M14 17.5h7"/></svg>Built-in integrations</h2>
-            <div class="admin-toggle-sub" style="margin-bottom:8px">Tool servers Odysseus ships with. They start on their own; one marked <b>Not set up</b> needs a value in the container environment first. Accounts and servers you add yourself are under <a href="#" data-open-settings="integrations" style="color:var(--accent, var(--red))">Connections</a>.</div>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Tool servers Agamemnon ships with. They start on their own; one marked <b>Not set up</b> needs a value in the container environment first. Accounts and servers you add yourself are under <a href="#" data-open-settings="integrations" style="color:var(--accent, var(--red))">Connections</a>.</div>
             <div id="builtin-intg-list" class="builtin-list"><div class="builtin-empty">Loading…</div></div>
           </div>
           <div class="admin-card">
             <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><rect x="2" y="4" width="20" height="6" rx="1.5"/><rect x="2" y="14" width="20" height="6" rx="1.5"/><path d="M6 7h.01M6 17h.01"/></svg>Bundled services</h2>
-            <div class="admin-toggle-sub" style="margin-bottom:8px">Services that run next to Odysseus in Docker.</div>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Services that run next to Agamemnon in Docker.</div>
             <div id="builtin-services-list" class="builtin-list"><div class="builtin-empty">Loading…</div></div>
             <div style="text-align:right;padding-top:8px;"><button type="button" class="btn btn-secondary" id="builtin-refresh">Refresh</button></div>
           </div>
@@ -2954,7 +2959,7 @@
               </svg>
               Terminal Logs
             </h2>
-            <div class="admin-toggle-sub settings-system-logs-toggle-sub">Live diagnostic logs and system output from the Odysseus process.</div>
+            <div class="admin-toggle-sub settings-system-logs-toggle-sub">Live diagnostic logs and system output from the Agamemnon process.</div>
 
             <div class="settings-col settings-system-logs-col">
               <!-- Controls row -->
@@ -3145,6 +3150,7 @@
 
 <!-- Load modules in this order -->
 <script src="/static/js/pluginCatalog.js"></script>
+<script type="module" src="/static/js/storageBrandMigration.js"></script>
 <script type="module" src="/static/js/storage.js"></script>
 <script type="module" src="/static/js/ui.js"></script>
 <script type="module" src="/static/js/markdown.js"></script>

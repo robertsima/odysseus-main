@@ -18,7 +18,8 @@ from src.owner_identity import INTERNAL_TOOL_USER, auth_disabled
 # admin user's session cookie). Set once at import; tools read the
 # same value from this module. Never persisted or exposed externally.
 INTERNAL_TOOL_TOKEN = os.environ.get("ODYSSEUS_INTERNAL_TOKEN") or secrets.token_hex(32)
-INTERNAL_TOOL_HEADER = "X-Odysseus-Internal-Token"
+INTERNAL_TOOL_HEADER = "X-Agamemnon-Internal-Token"
+LEGACY_INTERNAL_TOOL_HEADER = "X-Odysseus-Internal-Token"
 
 
 def get_application_route_path(scope: Mapping[str, object]) -> str:
@@ -64,7 +65,7 @@ def require_admin(request: Request):
     # (b) the auth middleware already validated the token and stamped
     #     request.state.current_user = "internal-tool".
     try:
-        hdr = request.headers.get(INTERNAL_TOOL_HEADER)
+        hdr = request.headers.get(INTERNAL_TOOL_HEADER) or request.headers.get(LEGACY_INTERNAL_TOOL_HEADER)
         if hdr and secrets.compare_digest(hdr, INTERNAL_TOOL_TOKEN):
             return
         if getattr(request.state, "current_user", None) == INTERNAL_TOOL_USER:

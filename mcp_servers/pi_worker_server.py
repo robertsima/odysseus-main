@@ -32,9 +32,7 @@ ROOT_ENV = "ODYSSEUS_PI_WORKER_ROOT"
 IDENTITY_ENV = "ODYSSEUS_PI_WORKER_IDENTITY_FILE"
 DOC_ROOT_ENV = "ODYSSEUS_PI_DOCUMENTATION_ROOT"
 
-DEFAULT_SCRIPT = "D:/Development/Start-Pi-Worker.ps1"
-DEFAULT_ROOT = "D:/Development"
-DEFAULT_DOC_ROOT = "/app/data/personal_docs/AI Mind"
+# No assumed drive, workspace or vault folder: each install names its own.
 DEFAULT_DOC_NAME = "Local Model Delegation.md"
 DEFAULT_TIMEOUT_SECONDS = 900
 MAX_TIMEOUT_SECONDS = 1800
@@ -60,9 +58,16 @@ def _normalize_windows_path(value: str, *, field: str) -> str:
     return str(path).replace("\\", "/").rstrip("/")
 
 
+def _required_env(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise ValueError(f"{name} is not configured")
+    return value
+
+
 def _validate_project_path(project_path: str) -> str:
     project = _normalize_windows_path(project_path, field="project_path")
-    root = _normalize_windows_path(os.environ.get(ROOT_ENV, DEFAULT_ROOT), field=ROOT_ENV)
+    root = _normalize_windows_path(_required_env(ROOT_ENV), field=ROOT_ENV)
     project_lower = project.casefold()
     root_lower = root.casefold()
     if project_lower != root_lower and not project_lower.startswith(root_lower + "/"):
@@ -80,7 +85,7 @@ def _worker_host() -> str:
 
 
 def _remote_command(project_path: str, thinking: str, no_session: bool) -> str:
-    script = _normalize_windows_path(os.environ.get(SCRIPT_ENV, DEFAULT_SCRIPT), field=SCRIPT_ENV)
+    script = _normalize_windows_path(_required_env(SCRIPT_ENV), field=SCRIPT_ENV)
     session_arg = " -NoSession" if no_session else ""
     return (
         "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass "
@@ -92,7 +97,7 @@ def _remote_command(project_path: str, thinking: str, no_session: bool) -> str:
 def _ssh_argv(project_path: str, thinking: str, no_session: bool) -> list[str]:
     ssh = shutil.which("ssh")
     if not ssh:
-        raise ValueError("ssh executable was not found in the Odysseus runtime")
+        raise ValueError("ssh executable was not found in the Agamemnon runtime")
     args = [
         ssh,
         "-T",
@@ -109,14 +114,14 @@ def _ssh_argv(project_path: str, thinking: str, no_session: bool) -> list[str]:
 
 
 def _documentation_path() -> str:
-    root = os.path.realpath(os.environ.get(DOC_ROOT_ENV, DEFAULT_DOC_ROOT))
-    if not root:
-        raise ValueError(f"{DOC_ROOT_ENV} is not configured")
-    if os.path.basename(root).casefold() != "ai mind":
-        raise ValueError(f"{DOC_ROOT_ENV} must point to the AI Mind directory")
+    """The delegation log note inside the folder ODYSSEUS_PI_DOCUMENTATION_ROOT names.
+
+    Any folder may hold the log; it used to have to be called "AI Mind".
+    """
+    root = os.path.realpath(_required_env(DOC_ROOT_ENV))
     path = os.path.realpath(os.path.join(root, DEFAULT_DOC_NAME))
     if os.path.commonpath([root, path]) != root:
-        raise ValueError("documentation path must stay inside AI Mind")
+        raise ValueError(f"the delegation log must stay inside {DOC_ROOT_ENV}")
     return path
 
 
@@ -283,14 +288,20 @@ async def _run_pi_task(
                 await stderr_task
 
 
+def _workspace_label() -> str:
+    root = os.environ.get(ROOT_ENV, "").strip()
+    return root.replace("\\", "/") if root else f"the worker root ({ROOT_ENV})"
+
+
 @server.list_tools()
 async def list_tools() -> list[Tool]:
+    workspace = _workspace_label()
     return [
         Tool(
             name="run_pi_task",
             description=(
                 "Delegate a coding or repository task to the Windows Pi agent. Pi can inspect, "
-                "edit, and run commands inside the selected project under D:/Development. "
+                f"edit, and run commands inside the selected project under {workspace}. "
                 "Use for bounded, low-to-medium complexity work that does not need a large context "
                 "window. Pass paths, symbols, constraints, and acceptance tests instead of pasted "
                 "files or conversation history. The call is non-interactive."
@@ -300,7 +311,7 @@ async def list_tools() -> list[Tool]:
                 "properties": {
                     "project_path": {
                         "type": "string",
-                        "description": "Absolute Windows project path under D:/Development.",
+                        "description": f"Absolute Windows project path under {workspace}.",
                     },
                     "task": {
                         "type": "string",
@@ -329,16 +340,17 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="record_pi_task",
             description=(
-                "Append a concise acceptance record to the AI Mind Local Model Delegation note. "
-                "Call only after the primary harness independently judges the delegated change "
-                "sufficient and verifies its tests. This tool never writes to Vault Mind."
+                f"Append a concise acceptance record to the delegation log ({DEFAULT_DOC_NAME} in "
+                f"the folder {DOC_ROOT_ENV} names). Call only after the primary harness "
+                "independently judges the delegated change sufficient and verifies its tests. "
+                "This tool writes nowhere else in the vault."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "project_path": {
                         "type": "string",
-                        "description": "Absolute Windows project path under D:/Development.",
+                        "description": f"Absolute Windows project path under {workspace}.",
                     },
                     "task": {"type": "string", "description": "Short accepted-task title."},
                     "outcome": {"type": "string", "description": "Concise result summary."},

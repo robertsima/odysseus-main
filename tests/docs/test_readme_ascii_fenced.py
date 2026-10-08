@@ -27,7 +27,7 @@ def test_readme_opens_with_wordmark_title():
     # The README must still open with a recognizable Odysseus title: now the
     # centered wordmark image rather than an H1 / ASCII banner.
     head = "\n".join(README.read_text(encoding="utf-8").splitlines()[:15])
-    assert 'alt="Odysseus"' in head, "README must open with the Odysseus wordmark image"
+    assert '<h1 align="center">Agamemnon</h1>' in head, "README must open with the current product title"
 
 
 def test_reintroduced_ascii_banner_stays_fenced():

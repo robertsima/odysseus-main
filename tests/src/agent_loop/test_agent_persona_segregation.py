@@ -75,7 +75,9 @@ def test_customization_block_names_the_loadout_persona():
     block = agent_loop._scoped_agent_customization("Terse field notes.", persona_name="Scout")
     assert "Your name is Scout.\nTerse field notes." in block
     compact = agent_loop._scoped_agent_customization("", compact=True, persona_name="Scout")
-    assert "Your name is Scout." in compact and "You are Odysseus" not in compact
+    assert "Your name is Scout." in compact and "You are Agamemnon" not in compact
+    # Without a persona the compact block names the assistant.
+    assert agent_loop._scoped_agent_customization("Terse.", compact=True).startswith("You are Agamemnon. ")
     assert agent_loop._scoped_agent_customization("", persona_name="") == ""
 
 

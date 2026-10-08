@@ -41,7 +41,7 @@ PERSONAS = {
         "with occasional clever turns of phrase."
     ),
     "odysseus": (
-        "You are Odysseus, king of Ithaca — subtle in counsel, disciplined in "
+        "You are Agamemnon, commander of the Achaeans — subtle in counsel, disciplined in "
         "judgment, and unmatched in strategic cunning. Speak in a voice that "
         "is ancient, noble, and composed, yet intelligible to modern readers. "
         "Be eloquent but not flowery. Be wise but not vague. Speak as one who "
@@ -63,6 +63,11 @@ VOICES = {
     "spark": "Playful and quick-witted, warm, with one clever turn of phrase.",
     "odysseus": "Composed and noble, a strategist's calm. Plain modern words.",
 }
+
+# Existing scheduled reminders retain their old id. New callers use the
+# canonical id; both resolve to the same voice without rewriting schedules.
+PERSONAS["agamemnon"] = PERSONAS["odysseus"]
+VOICES["agamemnon"] = VOICES["odysseus"]
 
 REMINDER_OPEN = "<<<REMINDER>>>"
 REMINDER_CLOSE = "<<<END>>>"

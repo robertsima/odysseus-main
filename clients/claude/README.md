@@ -1,10 +1,10 @@
-# Odysseus Claude Code Integration
+# Agamemnon Claude Code Integration
 
-This directory contains the Claude Code skill bundle for Odysseus.
+This directory contains the Claude Code skill bundle for Agamemnon.
 
 ## User Flow
 
-1. Open Odysseus Settings > Integrations.
+1. Open Agamemnon Settings > Integrations.
 2. Add a Claude Agent.
 3. Copy the full setup commands shown after the generated token.
 4. Toggle the tools Claude is allowed to use.
@@ -33,17 +33,17 @@ the `odysseus` skill is available in any session that has `ODYSSEUS_URL` and
 
 ## Bidirectional collaboration
 
-Claude Code can call Odysseus through the scope-gated `/api/codex/*` endpoints
+Claude Code can call Agamemnon through the scope-gated `/api/codex/*` endpoints
 using the bundled helper. Run `capabilities` before making calls and grant only
 the scopes needed by the Claude Agent token.
 
-Odysseus can call the locally installed Claude Code binary through the native
+Agamemnon can call the locally installed Claude Code binary through the native
 `delegate_to_claude_code` agent tool. Delegation is admin-only, limited to Git
 repositories at or one level below the approved roots (default
 `/app/data/development` and `/app/data/agent_worktrees`), and never grants
 push, sudo, or arbitrary shell permission.
 
-Claude Code is **not** a chat model in Odysseus. `chat_with_model("claude")`
+Claude Code is **not** a chat model in Agamemnon. `chat_with_model("claude")`
 and `list_models` will never find it; the agent is routed to
 `delegate_to_claude_code` for anything that mentions Claude Code, and the
 chat-model tools answer a `claude` lookup with that pointer.
@@ -83,7 +83,7 @@ environment variables as the fallback:
 | `claude_code_max_concurrent_tasks` | `CLAUDE_CODE_MAX_CONCURRENT_TASKS` | aggregate Claude subprocess limit (default 2) |
 | `claude_code_model` | — | Claude model alias passed with `--model` (empty = Claude Code's default) |
 | `claude_code_restricted` | — | run with `--restricted` (default on): ignore hooks/MCP servers declared inside the checkout, confine file tools to it, refuse bypassPermissions |
-| `claude_code_odysseus_url` / `claude_code_odysseus_token_file` | `CLAUDE_CODE_ODYSSEUS_URL` / `CLAUDE_CODE_ODYSSEUS_TOKEN_FILE` | callback into this Odysseus (below) |
+| `claude_code_odysseus_url` / `claude_code_odysseus_token_file` | `CLAUDE_CODE_ODYSSEUS_URL` / `CLAUDE_CODE_ODYSSEUS_TOKEN_FILE` | callback into this Agamemnon (below) |
 | `claude_code_auto_update` | `CLAUDE_CODE_AUTO_UPDATE` | off by default. On: a run refused with "version X or newer is required" triggers one `update` and one retry, when no other delegation is running and the failed run left the checkout untouched |
 
 The same card shows the live preflight (`GET /api/claude-code/status`) and
@@ -140,7 +140,7 @@ the browser instead of `docker exec`-ing into the NAS:
 
 1. Settings > Tools > **Claude Code delegation** > pick the account type
    (Claude subscription, or Anthropic Console for API billing) > **Sign in**.
-2. Odysseus runs `claude auth login --claudeai` (or `--console`) in the
+2. Agamemnon runs `claude auth login --claudeai` (or `--console`) in the
    container, as the app user, with the delegation environment (`HOME`,
    `CLAUDE_CONFIG_DIR`, proxy/CA variables; no server secrets). The card
    shows the authorization link the CLI prints. Open it on your own
@@ -149,10 +149,10 @@ the browser instead of `docker exec`-ing into the NAS:
    container, so the authorization page shows a code instead (Claude Code's
    documented fallback for SSH sessions and containers). Paste it into the
    card and press **Submit code**.
-4. Odysseus writes the code to the waiting CLI's stdin. The CLI exchanges it
+4. Agamemnon writes the code to the waiting CLI's stdin. The CLI exchanges it
    with its own PKCE verifier, stores the login in
    `$CLAUDE_CONFIG_DIR/.credentials.json` (mode 0600, written by the CLI),
-   and exits. Odysseus then runs `claude auth status`; the card shows the
+   and exits. Agamemnon then runs `claude auth status`; the card shows the
    signed-in account, plan, and auth method, and **Check status** turns ready.
 
 **Sign out** runs `claude auth logout`. It is refused while a delegation or
@@ -162,9 +162,9 @@ the stored sign-in. The card names the variable but never shows its value.
 
 Guarantees:
 
-- Odysseus never sees a Claude token. The login stays in the CLI's own store,
+- Agamemnon never sees a Claude token. The login stays in the CLI's own store,
   as it would after an SSH login. The pasted code is useless without the
-  CLI's verifier. Odysseus writes it to the process and drops it: it is not
+  CLI's verifier. Agamemnon writes it to the process and drops it: it is not
   logged, stored, returned in a response, kept in browser storage, or put in
   chat/task history. The log records only state transitions
   (`[claude-login] session=… awaiting_code -> verifying`), so the diagnostics
@@ -184,7 +184,7 @@ Why `claude auth login` and not `claude setup-token`: `auth login` is a plain
 subcommand that reads the code from stdin, so it works over ordinary pipes
 with no terminal. `setup-token` and the interactive `/login` are full-screen
 terminal UIs that need a TTY. `setup-token` also prints a year-long token
-that Odysseus would then have to store and pass to every run, which the
+that Agamemnon would then have to store and pass to every run, which the
 terms below rule out. To keep the credential out of the container entirely,
 use the cloud runner.
 
@@ -200,12 +200,12 @@ their own credentials (subscription sign-in or API key) and usage is neither
 resold nor intermediated, and it expressly allows an end user to sign in to a
 hosted, unmodified Claude Code with their own subscription. It forbids
 third-party software from collecting, storing, or routing requests through
-Claude.ai credentials. Odysseus therefore:
+Claude.ai credentials. Agamemnon therefore:
 
 - runs the binary as published and never modifies it or its auth methods;
 - never reads, stores, or forwards Claude's OAuth/session token or API key —
   the operator signs in once as the container user (`HOME=$CLAUDE_CODE_HOME`),
-  from Settings (above: Odysseus only relays the one-time code to the CLI) or
+  from Settings (above: Agamemnon only relays the one-time code to the CLI) or
   over SSH;
 - does **not** offer "Claude" as a chat model backed by that sign-in. To chat
   with Claude models directly, add an Anthropic **API key** as a model
@@ -227,7 +227,7 @@ the working summary; the linked Anthropic pages are the authority.
 3. For a longer job: "Start a background Claude Code task in the
    claude-code-integration worktree to …", then "poll it".
 
-To let an Odysseus-delegated Claude process call back into Odysseus during the
+To let an Agamemnon-delegated Claude process call back into Agamemnon during the
 same job, set `CLAUDE_CODE_ODYSSEUS_URL` and
 `CLAUDE_CODE_ODYSSEUS_TOKEN_FILE`. The token file must be a private regular
 file (mode `0600`) containing a fresh, scoped Claude Agent token. The token is
@@ -235,12 +235,12 @@ passed only in the child environment; it is never placed in argv or task
 persistence. Install the skill under the launcher's `CLAUDE_CONFIG_DIR` (the
 setup command above handles both standard and custom config directories).
 
-That token is minted by Odysseus, not by Claude: Settings > Integrations >
+That token is minted by Agamemnon, not by Claude: Settings > Integrations >
 **+ Add Integration** > **Claude Agent** creates one, shows it once, and lets
 you toggle its scopes (turn **Vault** on for the shared context store). It
 starts with `ody_`. Nothing about a Claude sign-in is involved — this
-credential only lets a Claude Code session read back into Odysseus. Write it
-into the token file as the user Odysseus runs as:
+credential only lets a Claude Code session read back into Agamemnon. Write it
+into the token file as the user Agamemnon runs as:
 
 ```bash
 umask 077
@@ -271,7 +271,7 @@ session (automation, CI, another admin tool):
 
 Jobs are serialized per repository (a second task against the same checkout
 queues behind the first). Aggregate Claude subprocess concurrency is capped by
-`CLAUDE_CODE_MAX_CONCURRENT_TASKS` (default `2`). Bounded task results survive an Odysseus restart — a
+`CLAUDE_CODE_MAX_CONCURRENT_TASKS` (default `2`). Bounded task results survive an Agamemnon restart — a
 task that was mid-flight when the process restarted is reported as
 `interrupted` rather than silently disappearing. No credentials or process
 environment are ever persisted, only owner/repository/status and the bounded
@@ -281,11 +281,11 @@ A cookie-session caller must be an admin. An API-token caller needs the
 `claude_code:write` scope (`claude_code:read` is enough for the `GET`); the
 `claude_code_tasks` token profile grants exactly that.
 
-## Sharing Odysseus's context store with Claude Code
+## Sharing Agamemnon's context store with Claude Code
 
 The `/api/codex/*` API is how a Claude Code session reads the same data the
-Odysseus agent uses. Claude Code is the client, Odysseus is the data server,
-and no Anthropic credential is ever handled by Odysseus.
+Agamemnon agent uses. Claude Code is the client, Agamemnon is the data server,
+and no Anthropic credential is ever handled by Agamemnon.
 
 Reachable with the `claude_agent` token profile: todos, memory, calendar,
 email (read/draft), the editor document library, the Cookbook serve surface,
@@ -315,13 +315,13 @@ Two places the session can run:
   its environment and allowlists the helper script, so a delegated job can
   search the vault mid-task.
 - **On your own machine**, in a terminal. Export `ODYSSEUS_URL` (the LAN or
-  tailnet address of the Odysseus host) and `ODYSSEUS_API_TOKEN`, then install
+  tailnet address of the Agamemnon host) and `ODYSSEUS_API_TOKEN`, then install
   the plugin bundle with the command Settings shows. Claude Code loads the
   `odysseus` skill from its config directory and calls back over the network.
 
 ## Scope enforcement
 
-The token is scope-gated. Every tool surface is checked server-side in Odysseus,
+The token is scope-gated. Every tool surface is checked server-side in Agamemnon,
 so even if Claude tries to call a forbidden endpoint, it gets `403` until the
 user enables the matching toggle in Settings > Integrations > Claude Agent.
 The `claude_agent` token profile bundles the scopes a Claude Code session
@@ -330,7 +330,7 @@ public vault).
 
 `diagnostics:read` is opt-in and in no profile: it lets the token download the
 diagnostics bundle (redacted logs plus the config of the chats, workers and
-loadouts they mention; never chat messages) so Claude Code can debug Odysseus
+loadouts they mention; never chat messages) so Claude Code can debug Agamemnon
 without you pasting log lines. It is honoured only for a token owned by an
 admin. Enable *Diagnostics* on the Claude Agent token, then:
 

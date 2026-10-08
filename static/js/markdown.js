@@ -618,7 +618,9 @@ export function mdToHtml(src, opts) {
   // ___ALLOWED_HTML_0___) can leak into quoted HTML/JS samples, because the
   // placeholder gets captured as literal code content and never restored inside
   // the final <pre><code> block.
-  s = s.replace(/```(\w+)?\n([\s\S]*?)```/g, (_, lang, code) => {
+  // A closing fence must be at least as long as its opener and on its
+  // own line. Shorter fences inside a quoted Markdown sample are code.
+  s = s.replace(/^ {0,3}(`{3,})([\w-]*)[^\S\r\n]*\r?\n([\s\S]*?)^ {0,3}\1`*[^\S\r\n]*(?=\r?$)/gm, (_, fence, lang, code) => {
     const cleaned = code
       .replace(/\r\n/g, '\n')
       .replace(/[ \t]+$/gm, '')

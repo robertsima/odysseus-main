@@ -420,6 +420,8 @@ def test_the_execution_record_survives_onto_the_run(db):
 def test_abort_causes_are_distinguished(db):
     for error, expected in (
         ("Server restarted while task was running", "server_restart"),
+        ("Paused because Agamemnon became active", "foreground_interrupt"),
+        # A run recorded before the rename keeps its wording.
         ("Paused because Odysseus became active", "foreground_interrupt"),
         ("Stopped by user", "user_stop"),
     ):

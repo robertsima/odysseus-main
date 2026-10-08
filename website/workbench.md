@@ -10,7 +10,7 @@ time a run starts in the current chat.
 
 | Source | What publishes it |
 |---|---|
-| Odysseus | every agent turn: tool calls, results, errors, the final answer |
+| Agamemnon | every agent turn: tool calls, results, errors, the final answer |
 | Claude Code | `delegate_to_claude_code` runs, live from the CLI's stream-json transcript |
 | Sub-agent | `send_to_session` with `mode: "agent"`: a full agent run inside another session |
 | Pipeline | multi-model pipelines (`do_pipeline`), one event per step |
@@ -28,7 +28,7 @@ everything, which is how you watch a sub-agent working in another session.
 **Changes** lists the files a run touched, or the working tree of any approved
 repository, with a side-by-side "old vs new" view or a classic unified diff.
 Pop any file out into its own window. "Send to agent" drops the diff into the
-composer so Odysseus can review it; clicking a line number drops that line.
+composer so Agamemnon can review it; clicking a line number drops that line.
 
 **Commits** lists commits since a run started, or the repository log, with the
 full message and per-file diffs.
@@ -37,7 +37,7 @@ full message and per-file diffs.
 `docs/agent-worktree.md`) to list the repository's pull requests with checks,
 files, comments and reviews. Comment, approve or request changes from the
 window. Clicking a line number in a PR file attaches a review comment to that
-line. "Ask Odysseus to address" writes a prompt with the failing checks and the
+line. "Ask Agamemnon to address" writes a prompt with the failing checks and the
 latest review comments into the composer.
 
 ![Changes view: side-by-side old vs new](workbench-changes.png)

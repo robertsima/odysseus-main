@@ -291,7 +291,7 @@ def _format_mcp_connection_error(name: str, command: str = "", args: Optional[Li
             f"{raw_error}\n\n"
             "Browser MCP could not start. On fresh installs, cache the Playwright MCP package once before connecting:\n\n"
             "npx -y @playwright/mcp@latest --version\n\n"
-            "Then restart Odysseus and reconnect the Browser MCP server."
+            "Then restart Agamemnon and reconnect the Browser MCP server."
         )
 
     if name.lower() == "todoist" or lower_command.startswith("td "):
@@ -1468,7 +1468,7 @@ class McpManager:
             return (
                 f"This is a network failure (DNS lookup, refused connection, timeout, or "
                 f"TLS/certificate). MCP server '{name}' is a remote server{where}. "
-                f"{arguments_first} either Odysseus could not reach it, or it could not reach "
+                f"{arguments_first} either Agamemnon could not reach it, or it could not reach "
                 "the service behind it, and retrying the same call unchanged will not help "
                 "until that address or the remote service is fixed."
             )
@@ -1520,8 +1520,8 @@ class McpManager:
         return (
             f"This is a network failure (DNS lookup, refused connection, timeout, or "
             f"TLS/certificate). MCP server '{name}' is running. {arguments_first} its process "
-            "could not reach the service it wraps: stdio MCP servers run inside Odysseus's own "
-            "network, so when Odysseus runs in Docker, localhost/127.0.0.1 is the Odysseus "
+            "could not reach the service it wraps: stdio MCP servers run inside Agamemnon's own "
+            "network, so when Agamemnon runs in Docker, localhost/127.0.0.1 is the Agamemnon "
             "container itself, not the Docker host, and LAN hostnames resolve through the "
             f"container's DNS. {configured} Fix the address in this server's MCP settings and "
             "reconnect it, or start the service if it is down; retrying the same call "

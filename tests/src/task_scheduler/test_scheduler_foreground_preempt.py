@@ -160,7 +160,7 @@ def test_sweep_preempts_a_running_task_once_with_the_retry(make_test_db, monkeyp
     run = runs[0]
     assert run.status == "aborted"
     assert "Stopped by user" not in run.error
-    assert "Odysseus became active" in run.error
+    assert "Agamemnon became active" in run.error
     assert "GET /api/email/list" in run.error
     assert "retrying in 15 min" in run.error
     # The short retry, not the task's normal next occurrence (None for an
@@ -214,7 +214,7 @@ def test_sweep_preempts_a_queued_task_with_the_same_label(make_test_db, monkeypa
     assert counts == [1]
     runs, task = _load(session_local, ScheduledTask, TaskRun)
     assert runs[0].status == "aborted"
-    assert "Odysseus became active" in runs[0].error
+    assert "Agamemnon became active" in runs[0].error
     assert "retrying in 15 min" in runs[0].error
     assert task.next_run > _utcnow() + timedelta(minutes=14)
     assert scheduler._foreground_preemptions() == {}
@@ -255,9 +255,9 @@ def test_pause_message_without_a_distinct_reason():
     from src.task_scheduler import TaskScheduler
 
     assert TaskScheduler._foreground_pause_message() == (
-        "Paused because Odysseus became active; retrying in 15 min"
+        "Paused because Agamemnon became active; retrying in 15 min"
     )
     # The sweep's default reason would otherwise repeat itself.
-    assert TaskScheduler._foreground_pause_message("Odysseus became active") == (
-        "Paused because Odysseus became active; retrying in 15 min"
+    assert TaskScheduler._foreground_pause_message("Agamemnon became active") == (
+        "Paused because Agamemnon became active; retrying in 15 min"
     )

@@ -46,6 +46,9 @@ from dotenv import load_dotenv
 # is silently ignored and the user is unexpectedly forced to log in (issue #142).
 # utf-8-sig reads plain UTF-8 (no BOM) identically, so this is safe everywhere.
 load_dotenv(encoding="utf-8-sig")
+# AGAMEMNON_* names configure the ODYSSEUS_* variables the code reads.
+from src.env_aliases import apply as _apply_env_aliases
+_apply_env_aliases()
 
 import asyncio
 import logging
@@ -165,6 +168,8 @@ app.add_middleware(
         "X-Auth-Token",
         "X-Odysseus-Internal-Token",
         "X-Odysseus-Owner",
+        "X-Agamemnon-Internal-Token",
+        "X-Agamemnon-Owner",
         "X-Requested-With",
         "X-TZ-Name",
         "X-TZ-Offset",
@@ -406,14 +411,14 @@ if AUTH_ENABLED:
             # (no admin cookie available in that context). Restricted to
             # loopback clients + matching token to keep it locked down.
             try:
-                from core.middleware import INTERNAL_TOOL_HEADER, INTERNAL_TOOL_TOKEN as _ITT, INTERNAL_TOOL_USER
-                _hdr = request.headers.get(INTERNAL_TOOL_HEADER)
+                from core.middleware import INTERNAL_TOOL_HEADER, LEGACY_INTERNAL_TOOL_HEADER, INTERNAL_TOOL_TOKEN as _ITT, INTERNAL_TOOL_USER
+                _hdr = request.headers.get(INTERNAL_TOOL_HEADER) or request.headers.get(LEGACY_INTERNAL_TOOL_HEADER)
                 if _hdr and secrets.compare_digest(_hdr, _ITT) and _is_trusted_loopback(request):
                     # Impersonation: when the agent's loopback call sets
                     # X-Odysseus-Owner, attribute the request to that user only
                     # if they exist. Authorization checks remain separate; this
                     # is just owner attribution for notes/calendar/etc.
-                    _impersonate = (request.headers.get("X-Odysseus-Owner") or "").strip()
+                    _impersonate = (request.headers.get("X-Agamemnon-Owner") or request.headers.get("X-Odysseus-Owner") or "").strip()
                     _auth_mgr = getattr(request.app.state, "auth_manager", None) or auth_manager
                     if _impersonate and _impersonate in getattr(_auth_mgr, "users", {}):
                         request.state.current_user = _impersonate

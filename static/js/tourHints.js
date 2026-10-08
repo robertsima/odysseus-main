@@ -66,7 +66,7 @@ function _onModalOpened(modal) {
 }
 
 function _show(modal) {
-  if (_hasSeen()) return;
+  if (_hasSeen() || !_isVisible(modal)) { _shown = false; return; }
   const content = modal.querySelector('.modal-content') || modal;
   const r = content.getBoundingClientRect();
 
@@ -115,10 +115,16 @@ function _show(modal) {
   });
 
   const dismiss = () => {
+    closeObserver.disconnect();
     pop.classList.add('tour-hint-out');
     setTimeout(() => pop.remove(), 280);
     _markSeen();
   };
+  const closeObserver = new MutationObserver(() => {
+    if (!_isVisible(modal)) dismiss();
+  });
+  closeObserver.observe(modal, { attributes: true, attributeFilter: ['class', 'style'] });
+  pop.setAttribute('role', 'note');
   pop.querySelector('.tour-hint-dismiss').addEventListener('click', dismiss);
   // Auto-dismiss after 14s so it doesn't linger forever.
   setTimeout(() => { if (pop.isConnected) dismiss(); }, 14000);

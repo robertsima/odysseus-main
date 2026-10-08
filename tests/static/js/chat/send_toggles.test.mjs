@@ -11,7 +11,7 @@ import { openChatPage } from './_chatPage.mjs';
 const page = await openChatPage();
 
 async function sendWith({ bash, web, mode }) {
-  localStorage.setItem('odysseus-toggles', JSON.stringify({ mode }));
+  localStorage.setItem('agamemnon-toggles', JSON.stringify({ mode }));
   document.getElementById('bash-toggle').checked = bash;
   document.getElementById('web-toggle').checked = web;
   const stream = page.streamReply();

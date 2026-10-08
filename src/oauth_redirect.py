@@ -40,13 +40,20 @@ def _first(value: str) -> str:
 def google_redirect_uri(request, callback_path: str, env_var: str) -> str:
     """The OAuth redirect URI for ``callback_path`` (e.g. ``/api/calendar/oauth/google/callback``).
 
-    ``env_var`` (when set and non-empty) wins outright; otherwise the scheme
-    and host the browser used, honouring ``X-Forwarded-Proto`` /
-    ``X-Forwarded-Host`` from an HTTPS proxy.
+    ``env_var`` (when set and non-empty) wins outright; then the install's
+    public URL (Settings > Public URL, else ``APP_PUBLIC_URL``) plus
+    ``callback_path``, so one origin serves the Gmail and Calendar flows
+    alike; otherwise the scheme and host the browser used, honouring
+    ``X-Forwarded-Proto`` / ``X-Forwarded-Host`` from an HTTPS proxy.
     """
     configured = (os.environ.get(env_var) or "").strip()
     if configured:
         return configured
+    from src.settings import get_setting_or_env
+
+    public = str(get_setting_or_env("app_public_url", "APP_PUBLIC_URL", "") or "").strip().rstrip("/")
+    if public:
+        return f"{public}{callback_path}"
     headers = request.headers
     forwarded_proto = _first(headers.get("x-forwarded-proto", "")).lower()
     scheme = "https" if (request.url.scheme == "https" or forwarded_proto == "https") else "http"

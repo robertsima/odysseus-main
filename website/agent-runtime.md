@@ -376,7 +376,7 @@ step" inside a wrapper saying not to follow it).
 ### The rules on native routes
 
 Every GPT/Claude route takes the compact path: an identity line naming
-Odysseus, a short tool list, `_API_AGENT_RULES` ("How to work"), then the
+Agamemnon, a short tool list, `_API_AGENT_RULES` ("How to work"), then the
 domain rule blocks for the tools present. As of 2026-09-30 the rules follow
 the vendors' current guidance for agentic models (OpenAI's GPT-5.5/5.6
 prompting guides, Anthropic's prompting best practices; the research is
@@ -887,7 +887,7 @@ depth and policy rule, but only when the loadout names it outright
 (`tool_access: "selected"`, never through `"all"`) and the chat that started the
 worker may use it itself: a Claude Code run is a bounded leaf (restricted mode,
 fixed tool allowlist, one run per checkout, the instance-wide concurrency gate,
-counted against the worker's own child limit, and no way to start an Odysseus
+counted against the worker's own child limit, and no way to start an Agamemnon
 agent), and from a worker it runs only in that worker's workspace or a managed
 worktree of the same repository. Every other entry in `SUBAGENT_BLOCKED_TOOLS`
 (other chats, other agents, pipelines) stays off at every depth, and at the
@@ -943,7 +943,7 @@ chat that started it. A mistyped request id gets the open requests as a hint
 (`worktree_tools._similar_request_hint`); lookup stays exact.
 
 **Running a project's own tests.** Umni's backend needs Java 21 and its app
-Node >=24.3; the image had no JDK and only the Node 22 Odysseus itself runs
+Node >=24.3; the image had no JDK and only the Node 22 Agamemnon itself runs
 on, every fresh worktree failed with `jest: not found`, and each worker
 downloaded the whole npm tree again (the sandbox's HOME is a fresh tmpfs). Now:
 
@@ -1018,7 +1018,7 @@ the agent strip above the composer is built from: it polls
 `/api/workbench/runs?session_id=<chat>` on its own cadence (and at once on any
 delegated-work event), so it does not depend on the activity stream delivering
 the launch event. That mattered: browsers allow six connections per host over
-HTTP/1.1, and every open Odysseus tab used to hold two event streams for its
+HTTP/1.1, and every open Agamemnon tab used to hold two event streams for its
 whole life, so with three tabs — or two and a streaming reply — every further
 fetch queued indefinitely and the strip in the launching chat never asked. Hidden
 tabs now drop their streams after 30 s and reconnect on return, the strip's

@@ -901,7 +901,15 @@ def child_run_scope():
         _IN_CHILD_RUN.reset(token)
 
 
-async def launch_worker(*, owner: Optional[str], task: str, profile_name: Optional[str] = None,
+async def launch_worker(**kwargs) -> dict:
+    # _launch_worker performs setup without suspension (its awaits are inside
+    # detached nested functions). Release before the worker starts running.
+    from src.agent_lifecycle import unit_lock
+    with unit_lock:
+        return await _launch_worker(**kwargs)
+
+
+async def _launch_worker(*, owner: Optional[str], task: str, profile_name: Optional[str] = None,
                         parent_session: Optional[str] = None, model: Optional[str] = None,
                         inline_profile: Optional[dict] = None, handoff: bool = True,
                         run_metadata: Optional[dict] = None, runtime_settings: Optional[dict] = None,
@@ -936,6 +944,11 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
             raise ValueError(
                 f"worker nesting limit reached ({max_worker_depth()} levels below a chat you started); "
                 "do this part yourself or return it to the chat that started you")
+        from core.database import Session as DbSession, get_db_session
+        with get_db_session() as db:
+            archived = db.query(DbSession.archived).filter(DbSession.id == parent_session).scalar()
+            if archived:
+                raise ValueError("Restore the parent chat before launching a worker")
     manager = get_session_manager()
     if manager is None:
         raise RuntimeError("session manager unavailable")

@@ -429,7 +429,7 @@ FUNCTION_TOOL_SCHEMAS = [
             "name": "manage_agent_worktree",
             "strict": False,
             "description": (
-                "Isolated, human-gated publishing worktree for a repository; send only the fields the chosen action uses. start (name = task name, base = origin/main, a branch or a SHA) makes branch agent/<repo>/<name>; status, diff and commit work in it; request_publish freezes the change; a person approves it in the Odysseus UI (pushes nothing); show_request and list_requests follow it; checks reads the open PR's CI (wait_seconds waits for it to finish in one call), marking failures that also fail on the base; cleanup removes a clean worktree and refuses one with uncommitted work unless the person said in this chat to discard it (discard_uncommitted). Pass `repository` (absolute path from manage_git repositories) for any project, and the same value on later calls; omit it only for the Odysseus source checkout. publish needs a request_id and an approval_code a person gives you; you cannot approve your own change. repo_list, repo_status and repo_pull are legacy: use manage_git."
+                "Isolated, human-gated publishing worktree for a repository; send only the fields the chosen action uses. start (name = task name, base = origin/main, a branch or a SHA) makes branch agent/<repo>/<name>; status, diff and commit work in it; request_publish freezes the change; a person approves it in the Agamemnon UI (pushes nothing); show_request and list_requests follow it; checks reads the open PR's CI (wait_seconds waits for it to finish in one call), marking failures that also fail on the base; cleanup removes a clean worktree and refuses one with uncommitted work unless the person said in this chat to discard it (discard_uncommitted). Pass `repository` (absolute path from manage_git repositories) for any project, and the same value on later calls; omit it only for the Agamemnon source checkout. publish needs a request_id and an approval_code a person gives you; you cannot approve your own change. repo_list, repo_status and repo_pull are legacy: use manage_git."
             ),
             "parameters": {
                 "type": "object",
@@ -441,12 +441,12 @@ FUNCTION_TOOL_SCHEMAS = [
                                  "repo_list", "repo_status", "repo_pull"],
                         "description": "Default status; name a branch for one worktree. diagnose is local and read-only. repo_* are legacy; use manage_git for repository discovery/sync."
                     },
-                    "repository": {"type": "string", "description": "Absolute checkout path from manage_git repositories, not a URL. Omit only for the Odysseus source checkout."},
+                    "repository": {"type": "string", "description": "Absolute checkout path from manage_git repositories, not a URL. Omit only for the Agamemnon source checkout."},
                     "name": {"type": "string", "description": "start only: task name; the branch becomes agent/<repo>/<name> (agent/odysseus/<name> without repository)"},
                     "branch": {"type": "string", "description": "Full agent branch, when it already exists (checks, diff, commit...). Not a base such as origin/main"},
                     "discard_uncommitted": {"type": "boolean", "description": "cleanup only: remove a worktree with uncommitted work. Needs the person's own words in this chat; saves a recovery snapshot ref first"},
                     "wait_seconds": {"type": "integer", "description": "checks only: wait up to this many seconds (0-900, default 0) for running checks to finish; ends early when the user writes"},
-                    "base": {"type": "string", "description": "start only: existing ref or commit the new branch starts from (origin/main, a branch, or a SHA). Default: the configured base (Odysseus) or origin/HEAD"},
+                    "base": {"type": "string", "description": "start only: existing ref or commit the new branch starts from (origin/main, a branch, or a SHA). Default: the configured base (Agamemnon) or origin/HEAD"},
                     "expected_base": {"type": "string", "description": "start only: full commit SHA base must resolve to; start refuses on mismatch"},
                     "expected_head": {"type": "string", "description": "request_publish/diagnose: full tested HEAD SHA. Refuse a different registered HEAD before network; diagnose explains clone drift and metadata blockers."},
                     "message": {"type": "string", "description": "Commit message (action=commit)"},
@@ -467,7 +467,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "function": {
             "name": "read_app_logs",
             "description": (
-                "Read Odysseus's own application logs to debug the running app. list shows the log files; tail returns the last lines of one (filter by substring or level); trace with an id (workflow, run or session) gathers every line and run record that mentions it; bundle writes a diagnostics zip (logs plus configs, never message text) and returns its path. Credentials are redacted."
+                "Read Agamemnon's own application logs to debug the running app. list shows the log files; tail returns the last lines of one (filter by substring or level); trace with an id (workflow, run or session) gathers every line and run record that mentions it; bundle writes a diagnostics zip (logs plus configs, never message text) and returns its path. Credentials are redacted."
             ),
             "parameters": {
                 "type": "object",
@@ -978,7 +978,7 @@ FUNCTION_TOOL_SCHEMAS = [
                     "end": {"type": "string", "description": "list_events range end (ISO datetime). Defaults to +14 days when no range is given."},
                     "event_type": {"type": "string", "description": "Tag / category for the event. Common values: work, personal, health, travel, meal, social, admin, other. Aliases accepted: tag, category, type."},
                     "importance": {"type": "string", "enum": ["low", "normal", "high", "critical"], "description": "Priority level (defaults to 'normal')"},
-                    "reminder_minutes": {"type": "integer", "description": "For create_event: create an Odysseus reminder this many minutes before the event, e.g. 5 for 'reminder 5 min before'."},
+                    "reminder_minutes": {"type": "integer", "description": "For create_event: create an Agamemnon reminder this many minutes before the event, e.g. 5 for 'reminder 5 min before'."},
                     "rrule": {"type": "string", "description": "iCalendar RRULE, e.g. 'FREQ=WEEKLY;BYDAY=MO'. On update_event an empty string removes recurrence."}
                 },
                 "required": ["action"]
@@ -1401,7 +1401,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "app_api",
-            "description": "Loopback to the internal Odysseus endpoints the UI uses (cookbook, gallery, library, memory, notes, calendar, tasks, settings, themes, research), for what no named tool covers. action='endpoints' pages the OpenAPI list (filter, then limit/offset); action='call' (default) takes method, path, body. Auth, user, admin, shell, install and email-account paths are blocked.",
+            "description": "Loopback to the internal Agamemnon endpoints the UI uses (cookbook, gallery, library, memory, notes, calendar, tasks, settings, themes, research), for what no named tool covers. action='endpoints' pages the OpenAPI list (filter, then limit/offset); action='call' (default) takes method, path, body. Auth, user, admin, shell, install and email-account paths are blocked.",
             "parameters": {
                 "type": "object",
                 "properties": {

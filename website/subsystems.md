@@ -1,6 +1,6 @@
 # Subsystems
 
-What each feature area of Odysseus is, what it owns, where its code and data
+What each feature area of Agamemnon is, what it owns, where its code and data
 live, and what it depends on. This is a map, not a tutorial: every entry points
 at the files that hold the real answer.
 
@@ -377,7 +377,7 @@ or over SSH on another box — then wire the result into the model picker.
 
 A serve is a **tmux session running a generated shell script** (a PowerShell
 background process on Windows), started locally or over SSH. It is not a managed
-subprocess: stopping Odysseus does not stop the model server, and output is read
+subprocess: stopping Agamemnon does not stop the model server, and output is read
 by tailing the tmux log rather than from a pipe.
 
 Serving writes a `ModelEndpoint` row so the model appears in the picker
@@ -502,14 +502,14 @@ the admin gate.
 ## Lotus (wellbeing)
 
 Private daily mood check-ins with descriptive summaries and reminders, backed by
-a vendored MCP project rather than by Odysseus's own database.
+a vendored MCP project rather than by Agamemnon's own database.
 
 | | |
 |---|---|
 | Routes | `routes/lotus_routes.py` (`/api/lotus/overview`, `/checkins`, `/preferences`, `/access-policy`) |
 | Server | `src/lotus_checkins.py` (`LotusCheckinStore`), `src/lotus_insights.py`, `src/lotus_access.py`, `src/lotus_notifications.py`, `src/reminder_personas.py` |
 | Frontend | `static/js/lotus.js` |
-| Data | per-owner SQLite at `<lotus data root>/users/<owner key>/mood.db`, plus `lotus_preferences` and `lotus_notifications` tables Odysseus creates in the same file |
+| Data | per-owner SQLite at `<lotus data root>/users/<owner key>/mood.db`, plus `lotus_preferences` and `lotus_notifications` tables Agamemnon creates in the same file |
 | Agent tools | `manage_wellbeing` (`src/tools/wellbeing.py`); also the bundled `mcp_servers/lotus_server.py` |
 
 Schema, models and query services are imported at runtime from the vendored
@@ -587,7 +587,7 @@ on.
 
 `AuthMiddleware.dispatch` tries, in order: genuine CORS preflight, the exempt
 path list, the in-process internal-tool header (loopback clients only, with
-optional `X-Odysseus-Owner` attribution), a direct-localhost bypass, a bearer
+optional transitional `X-Odysseus-Owner` attribution), a direct-localhost bypass, a bearer
 API token, then the session cookie. Token verification uses an in-memory cache
 keyed by token prefix and invalidated on create/revoke, because bcrypt-checking
 every active token on every request did not scale.

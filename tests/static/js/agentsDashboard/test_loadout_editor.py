@@ -113,11 +113,16 @@ def test_choosing_a_loadout_applies_it_on_the_server_instead_of_copying_it_in_th
     assert fleet.saves == []
 
 
-def test_applying_a_plugin_changes_capabilities_and_keeps_unsaved_personality(open_app):
+@pytest.mark.parametrize("catalog_name", ["AgamemnonPluginCatalog", "OdysseusPluginCatalog"])
+def test_applying_a_plugin_changes_capabilities_and_keeps_unsaved_personality(open_app, catalog_name):
     page = open_app(1440)
     fleet = Fleet(page, {"tool_access": "all", "agent_instructions": "Stored instructions"})
     # The plugin catalog is its own widget; stand in for it and press "Apply" the way it does.
-    page.evaluate("window.OdysseusPluginCatalog = {mount: (el, opts) => { window.__plugin = opts; }}")
+    page.evaluate("""name => {
+      delete window.AgamemnonPluginCatalog;
+      delete window.OdysseusPluginCatalog;
+      window[name] = {mount: (el, opts) => { window.__plugin = opts; }};
+    }""", catalog_name)
     open_editor(page)
     instructions = page.locator('[data-config="agent_instructions"]')
     instructions.fill("Be terse and cite files")

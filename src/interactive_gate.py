@@ -205,7 +205,7 @@ def should_track_interactive_request(path: str, method: str = "GET", headers=Non
         return False
     if headers is not None and verb in {"GET", "HEAD"}:
         try:
-            if str(headers.get(POLL_HEADER) or "").strip().lower() in _TRUTHY:
+            if str(headers.get("x-agamemnon-poll") or headers.get(POLL_HEADER) or "").strip().lower() in _TRUTHY:
                 return False
         except Exception:
             pass

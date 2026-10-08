@@ -795,7 +795,7 @@ register_all([
         help=(
             "Where notes are written, relative to the vault folder. Notes are "
             "Markdown files with YAML frontmatter, so they are readable and "
-            "editable outside Odysseus. Changing this moves where new notes "
+            "editable outside Agamemnon. Changing this moves where new notes "
             "land; it does not move existing ones."
         ),
         group="Knowledge",
@@ -959,7 +959,7 @@ register_all([
     SettingSpec(
         key="shell_sandbox_network", type="bool", label="Sandbox network access",
         help=("Whether the sandboxed shell may use the network (pip, npm, git fetch). Off also "
-              "stops it reaching services next to Odysseus, such as ChromaDB, whose index "
+              "stops it reaching services next to Agamemnon, such as ChromaDB, whose index "
               "holds vault excerpts."),
         group="Agents", advanced=True,
     ),
@@ -1011,8 +1011,9 @@ register_all([
     ),
     SettingSpec(
         key="agent_base_branch", type="string", label="Default target branch",
-        help="Branch used as the base for agent diffs and draft pull requests.",
-        group="Agents", placeholder="dev", env_override="ODYSSEUS_AGENT_BASE_BRANCH",
+        help=("Branch used as the base for agent diffs and draft pull requests. Leave "
+              "empty to use the repository's default branch."),
+        group="Agents", placeholder="repository default", env_override="ODYSSEUS_AGENT_BASE_BRANCH",
     ),
     SettingSpec(
         key="agent_input_token_budget", type="int", label="Agent context budget",
@@ -1283,7 +1284,7 @@ register_all([
     ),
     SettingSpec(
         key="imap_timeout_seconds", type="int", label="Mail server timeout",
-        help="How long Odysseus waits for an IMAP mail server before treating it as unavailable.",
+        help="How long Agamemnon waits for an IMAP mail server before treating it as unavailable.",
         group="Email", min_value=5, max_value=300, unit="seconds",
         env_override="ODYSSEUS_IMAP_TIMEOUT_SECONDS", advanced=True,
     ),

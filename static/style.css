@@ -93,6 +93,21 @@
 /* ── Reset & Base ── */
 
 * { box-sizing: border-box; }
+/* One UI typeface. --font-family is the user's explicit choice (theme.js
+   sets it, or leaves it unset for "Theme default"); otherwise the page style
+   supplies the face. --ui-chrome-font is tool-window chrome on desktop, where
+   Classic has always used Inter. Code and machine output use --mono-font. */
+:root {
+  --theme-font: 'Fira Code', monospace;
+  --theme-chrome-font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --mono-font: 'Fira Code', ui-monospace, monospace;
+  --ui-font: var(--font-family, var(--theme-font));
+  --ui-chrome-font: var(--font-family, var(--theme-chrome-font));
+}
+html[data-style="agamemnon"] {
+  --theme-font: 'Space Grotesk', system-ui, sans-serif;
+  --theme-chrome-font: 'Space Grotesk', system-ui, sans-serif;
+}
 html, body { overflow-x: hidden; height: 100%; margin: 0; overscroll-behavior: none; }
 body {
   background-color: var(--bg);
@@ -102,7 +117,7 @@ body {
      below so left + right docks can coexist without skewing the whole body. */
   transition: padding-left 160ms cubic-bezier(0.22, 0.61, 0.36, 1),
               padding-right 160ms cubic-bezier(0.22, 0.61, 0.36, 1);
-  font-family: var(--font-family, 'Fira Code', monospace);
+  font-family: var(--ui-font);
   display: flex;
   height: 100%;
   height: 100dvh; /* dynamic viewport height — adapts when mobile keyboard opens */
@@ -5829,7 +5844,7 @@ body.bg-pattern-aurora {
       border:1px solid var(--border);
       width:min(520px, 92vw); max-height:85vh; padding:10px;
       box-sizing:border-box; font-size:14px;
-      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-family: var(--ui-chrome-font);
       letter-spacing: -0.015em;
       display:flex; flex-direction:column;
       position:relative;
@@ -6422,7 +6437,7 @@ body.bg-pattern-aurora {
       border-radius: 4px;
       background: var(--bg);
       color: var(--fg);
-      font-family: 'Fira Code', monospace;
+      font-family: var(--ui-font);
       font-size: 10.2px; /* 15% smaller than 12px */
       cursor: pointer;
       transition: all 0.2s ease;
@@ -7157,7 +7172,7 @@ pre { background: var(--code-bg, var(--hl-bg, #282c34)) !important; }
       outline: none;
       color: var(--fg);
       font-size: 16px;
-      font-family: 'Fira Code', monospace;
+      font-family: var(--ui-font);
       padding: 14px 16px;
       box-sizing: border-box;
     }
@@ -12010,7 +12025,7 @@ textarea.memory-add-input {
   cursor: pointer;
   border: 1px solid transparent;
   line-height: 16px;
-  font-family: 'Fira Code', monospace;
+  font-family: var(--ui-font);
   transition: transform 0.12s ease, border-color 0.12s ease, background 0.12s ease, filter 0.12s ease;
   user-select: none;
 }
@@ -14795,7 +14810,7 @@ mark.doc-find-mark.current {
   box-shadow: 4px 0 16px rgba(0,0,0,0.35);
   animation: version-slide-in 0.2s ease-out;
   /* Match the app modal aesthetic so nothing inherits the large body font. */
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family: var(--ui-chrome-font);
   font-size: 12px;
   letter-spacing: -0.01em;
 }
@@ -17492,7 +17507,7 @@ body:not(.email-doc-split-active) #email-lib-modal.email-lib-fullscreen:not(.mod
   display: none;
   position: relative;
   padding: 8px 12px;
-  font-family: 'Berkeley Mono', 'SF Mono', 'Fira Code', monospace;
+  font-family: var(--mono-font);
   font-size: 9.5px;
   line-height: 1.5;
   color: var(--code-fg, var(--hl-fg, var(--fg)));
@@ -17558,15 +17573,15 @@ body:not(.email-doc-split-active) #email-lib-modal.email-lib-fullscreen:not(.mod
   cursor: pointer;
   /* These buttons live inside .doclib-card-preview, which forces a
      monospace font. The chat/research footer buttons instead inherit the
-     modal font, which is the app font (Fira Code) on mobile and Inter on
-     desktop (.modal-content's Inter rule is inside @media min-width:769px).
+     modal font, which is the app font on mobile and the chrome font on
+     desktop (.modal-content's rule is inside @media min-width:769px).
      Mirror that here so all three footers match in both contexts. */
-  font-family: var(--font-family, 'Fira Code', monospace);
+  font-family: var(--ui-font);
   transition: border-color 0.15s, color 0.15s;
 }
 @media (min-width: 769px) {
   .doclib-card-action-btn {
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-family: var(--ui-chrome-font);
     letter-spacing: -0.015em;
   }
 }
@@ -21798,7 +21813,7 @@ body.gallery-selecting .gallery-dl-btn,
   border-radius: 4px;
   border-top-left-radius: 0;
   border-top-right-radius: 0;
-  font-family: 'Berkeley Mono', 'SF Mono', 'Fira Code', monospace;
+  font-family: var(--mono-font);
   font-size: 10px;
   white-space: pre;
   word-break: normal;
@@ -24105,7 +24120,7 @@ body.gallery-selecting .gallery-dl-btn,
 }
 .hwfit-panel-advanced summary:hover, .hwfit-panel-settings summary:hover { color: var(--fg); }
 .hwfit-panel-cmd {
-  font-family: 'Berkeley Mono', 'SF Mono', 'Fira Code', monospace;
+  font-family: var(--mono-font);
   font-size: 10px; padding: 6px 8px; border-radius: 4px;
   background: var(--bg); border: 1px solid var(--border);
   white-space: pre-wrap; word-break: break-all; max-height: 60px; overflow-y: auto;
@@ -25989,7 +26004,7 @@ details.hwfit-serve-advanced > .hwfit-serve-checks:last-of-type {
   flex-shrink: 0;
   min-width: 35px;
   text-align: right;
-  font-family: 'Berkeley Mono', 'SF Mono', 'Fira Code', monospace;
+  font-family: var(--mono-font);
 }
 
 /* Cookbook serve param hints */
@@ -26027,7 +26042,7 @@ details.hwfit-serve-advanced > .hwfit-serve-checks:last-of-type {
   padding: 1px 5px;
   border-radius: 3px;
   margin-left: 4px;
-  font-family: 'Berkeley Mono', 'SF Mono', 'Fira Code', monospace;
+  font-family: var(--mono-font);
 }
 
 /* Cookbook output copy — show only on hover */
@@ -26126,7 +26141,7 @@ details.hwfit-serve-advanced > .hwfit-serve-checks:last-of-type {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-family: 'Berkeley Mono', 'SF Mono', monospace;
+  font-family: var(--mono-font);
 }
 .cookbook-modeldir-default {
   opacity: 0.5;
@@ -34823,7 +34838,7 @@ body.notes-drag-mode .note-card-pin svg {
   height: min(80vh, 820px);
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
   box-sizing: border-box;
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family: var(--ui-chrome-font);
   letter-spacing: -0.015em;
   /* Smooth open: scale up + fade in from the centre. */
   animation: notes-pane-enter 200ms cubic-bezier(0.22, 0.61, 0.36, 1) both;
@@ -34956,7 +34971,7 @@ body.notes-drag-mode .note-card-pin svg {
 }
 .notes-pane-title {
   /* Match the other tool headers (.modal-header h4). */
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family: var(--ui-chrome-font);
   font-size: 1rem;
   font-weight: 600;
   letter-spacing: -0.03em;

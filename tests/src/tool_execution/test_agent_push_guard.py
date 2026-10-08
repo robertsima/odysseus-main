@@ -129,7 +129,7 @@ def test_a_push_in_a_third_party_repo_is_not_sent_to_the_worktree_tool(odysseus_
     assert blocked["repository"] == str(foreign_repo)
     text = blocked["error"]
     assert "cannot publish it" in text
-    assert "Do not start an Odysseus worktree" in text
+    assert "Do not start an Agamemnon worktree" in text
     assert "github.com/robertsima/Umni.git" in text
     # Committing locally is still the way forward, and the hunt is closed off.
     assert "commit" in text

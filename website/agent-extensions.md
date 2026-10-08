@@ -59,9 +59,9 @@ npm run promptscript -- compile --dry-run
 ```
 
 Initializing/compiling foreign instruction files does **not** automatically
-replace Odysseus's system prompt, install hooks, or load a plugin.
+replace Agamemnon's system prompt, install hooks, or load a plugin.
 
-## Import a portable skill into Odysseus
+## Import a portable skill into Agamemnon
 
 In **Memory → Skills → Add Skill**, paste a specific GitHub skill folder or
 `https://skills.sh/<owner>/<repo>/<skill>`. Preview every file, then choose
@@ -89,7 +89,7 @@ boundary. Never expose it as a multi-user API. Select a single real directory;
 symlinks/junctions, oversized and unsupported binary resources fail clearly.
 The ordinary import UI supports text resources only; binary-backed skills need
 operator review/setup. Original upstream SKILL.md is retained as
-`IMPORTED_SOURCE.md` when Odysseus normalizes its metadata/body.
+`IMPORTED_SOURCE.md` when Agamemnon normalizes its metadata/body.
 
 ## Declarative plugins (v1)
 
@@ -128,7 +128,7 @@ of already-applied snapshots; remove it from each agent or use the existing
 global tool/connection disable controls for immediate revocation.
 
 This first version deliberately accepts no executable entrypoints, install
-commands, hooks or arbitrary remote packages. It is an Odysseus capability-bundle
+commands, hooks or arbitrary remote packages. It is an Agamemnon capability-bundle
 format, not a claim of compatibility with every vendor's plugin format.
 
 ## Plugins as integration packages (schema v2)
@@ -206,14 +206,14 @@ selected-allowlist rules as a v1 server reference.
 ### Safety stance
 
 No code runs in-process and nothing installs packages. An `stdio` command is
-whatever the administrator approves after reading it verbatim; Odysseus spawns
+whatever the administrator approves after reading it verbatim; Agamemnon spawns
 it as it would any hand-added server. Skill, template and instruction text from
 a package is untrusted: skills land as drafts, and instructions are shown only
 as labelled context (below).
 
 ### Server instructions
 
-An MCP server can send `instructions` when it initialises. Odysseus keeps up to
+An MCP server can send `instructions` when it initialises. Agamemnon keeps up to
 4 KB of it per server and prints it, with a plugin's `instructions`, directly
 under that server's name in the MCP tool block of the prompt, labelled as
 untrusted text and only while the server's tools are offered that turn. A server

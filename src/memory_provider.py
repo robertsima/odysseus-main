@@ -97,7 +97,7 @@ class NativeMemoryProvider(MemoryProvider):
     """Provider adapter for Odysseus' built-in memory manager and vector store."""
 
     provider_id = "native"
-    display_name = "Odysseus native memory"
+    display_name = "Agamemnon native memory"
 
     _CORE_FIELDS = {
         "id",

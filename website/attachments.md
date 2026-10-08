@@ -4,7 +4,7 @@ layout: default
 
 # Attachment References and Upload Storage
 
-Odysseus stores uploaded bytes once under the configured upload directory and
+Agamemnon stores uploaded bytes once under the configured upload directory and
 passes stable references through chat history, tools, and future artifact work.
 The goal is to avoid duplicating large inline media payloads in
 `chat_messages.content` or the SQLite FTS index.

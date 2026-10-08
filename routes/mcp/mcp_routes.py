@@ -609,7 +609,7 @@ def setup_mcp_routes(mcp_manager: McpManager):
         if resolve_pending(state, code):
             return HTMLResponse(_oauth_result_page(
                 "Authorization Successful",
-                "The MCP server is connecting. You can close this window and return to Odysseus.",
+                "The MCP server is connecting. You can close this window and return to Agamemnon.",
                 success=True,
             ))
         # Legacy Google path: state is the server_id
@@ -635,7 +635,7 @@ def setup_mcp_routes(mcp_manager: McpManager):
         if state and resolve_pending(state, code):
             return HTMLResponse(_oauth_result_page(
                 "Authorization Successful",
-                "The MCP server is connecting. You can close this window and return to Odysseus.",
+                "The MCP server is connecting. You can close this window and return to Agamemnon.",
                 success=True,
             ))
 
@@ -743,7 +743,9 @@ def _oauth_authorize_page(
     redirect_uri = html.escape(redirect_uri, quote=True)
     return f"""<!DOCTYPE html>
 <html><head>
-<meta charset="UTF-8"><title>Authorize — Odysseus</title>
+<meta charset="UTF-8"><title>Authorize — Agamemnon</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="/static/standalone-theme.css">
 <style>
   body {{ font-family: 'Fira Code', monospace; background: #0f0f0f; color: #e0e0e0;
     display: flex; justify-content: center; align-items: center; min-height: 100vh; }}
@@ -808,6 +810,8 @@ def _oauth_result_page(title: str, message: str, success: bool = False) -> str:
     return f"""<!DOCTYPE html>
 <html><head>
 <meta charset="UTF-8"><title>{safe_title}</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="/static/standalone-theme.css">
 <style>
   body {{ font-family: 'Fira Code', monospace; background: #0f0f0f; color: #e0e0e0;
     display: flex; justify-content: center; align-items: center; min-height: 100vh; }}

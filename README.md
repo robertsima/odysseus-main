@@ -1,6 +1,4 @@
-<p align="center">
-  <img src="assets/branding/odysseus-wordmark.png" alt="Odysseus" width="238">
-</p>
+<h1 align="center">Agamemnon</h1>
 
 <p align="center">
   A self-hosted AI workspace for chat, agents, research, documents, email, notes, calendar, and local model workflows.
@@ -17,10 +15,6 @@
 
 <p align="center">
   <a href="https://repology.org/project/odysseus-ai/versions"><img src="https://repology.org/badge/vertical-allrepos/odysseus-ai.svg" alt="Packaging status"></a>
-</p>
-
-<p align="center">
-  <img src="assets/branding/odysseus-browser.jpg" alt="Odysseus interface">
 </p>
 
 ---
@@ -53,7 +47,7 @@ Native installs, GPU notes, Windows/macOS instructions, and HTTPS live in the [s
 
 ## Demo
 
-A full hover-to-play tour lives on the [Odysseus landing page](https://odysseus-dev.github.io/odysseus/). Its source lives under [`website/`](website/).
+A full hover-to-play tour lives on the [Agamemnon landing page](https://odysseus-dev.github.io/odysseus/). Its source lives under [`website/`](website/).
 
 ## Contributing
 
@@ -70,7 +64,7 @@ keeps its context bounded), and [design patterns](website/design-patterns.md)
 
 ## Security
 
-Odysseus is a self-hosted workspace with powerful local tools. Keep auth enabled, keep private data out of Git, and do not expose raw model/service ports publicly.
+Agamemnon is a self-hosted workspace with powerful local tools. Keep auth enabled, keep private data out of Git, and do not expose raw model/service ports publicly.
 
 - Keep `AUTH_ENABLED=true` for any network-accessible deployment.
 - Keep `LOCALHOST_BYPASS=false` outside local development.

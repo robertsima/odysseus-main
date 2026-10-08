@@ -39,7 +39,7 @@ def _user(request: Request) -> Optional[str]:
     if getattr(request.state, "current_user", None) == INTERNAL_TOOL_USER:
         raise HTTPException(403, "Agents cannot see or decide publish requests here")
     if getattr(request.state, "api_token", False):
-        raise HTTPException(403, "Publish requests are decided in the Odysseus UI, not with an API token")
+        raise HTTPException(403, "Publish requests are decided in the Agamemnon UI, not with an API token")
     user = getattr(request.state, "current_user", None)
     if not user and not auth_disabled():
         raise HTTPException(401, "Log in to review publish requests")

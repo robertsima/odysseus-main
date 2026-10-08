@@ -1,8 +1,8 @@
-# Odysseus Harness Operating Model
+# Agamemnon Harness Operating Model
 
 ## Purpose
 
-Odysseus is a self-hosted personal AI workspace and agent harness. It should
+Agamemnon is a self-hosted personal AI workspace and agent harness. It should
 help the user retrieve trusted personal context, choose the smallest suitable
 tool set, execute bounded actions, and leave an auditable result. It is not
 just a chat front end and it is not an autonomous replacement for user
@@ -53,7 +53,7 @@ judgment.
 
 ## Coding-agent delegation (Claude Code)
 
-- Claude Code is a coding agent that Odysseus runs as a local subprocess of
+- Claude Code is a coding agent that Agamemnon runs as a local subprocess of
   the unmodified `claude` binary. It is **not a chat model**: `chat_with_model`
   and `list_models` never reach it. The only route is `delegate_to_claude_code`
   (chat) or `POST /api/claude-code/tasks` (automation).
@@ -72,12 +72,12 @@ judgment.
   `permission_denials` from the reply; verify the diff with the workspace file
   tools; publish only through `manage_agent_worktree`.
 - **Cloud runner.** When nobody should sign in inside the container, Claude
-  Code runs in GitHub Actions instead (`src/claude_cloud.py`). Odysseus
+  Code runs in GitHub Actions instead (`src/claude_cloud.py`). Agamemnon
   dispatches `clients/claude/github/odysseus-claude.yml` in an
   allowlisted repository (`claude_cloud_repositories`). Anthropic's official
   action runs Claude with the operator's credential from the repository's
   secrets, on a `claude/odysseus-<id>` branch. The workflow itself commits,
-  pushes and opens a draft PR, and Odysseus follows the run and reports the
+  pushes and opens a draft PR, and Agamemnon follows the run and reports the
   result, branch and PR. Delegate with `repository: "owner/repo"` or
   `via: "cloud"` (no repository: the workspace's github.com `origin`);
   `start` + `poll` as usual, and `status` includes a `cloud` section.
@@ -180,7 +180,7 @@ Verified against the code; fixes are in `specs/prompt-prefix-stability.md`,
   and was rejected without saying which paths are approved. The tool now
   discovers checkouts under the approved roots, defaults to one, and lists
   them in every rejection.
-- `GET /api/claude/plugin.zip` returned 200: the Claude → Odysseus half
+- `GET /api/claude/plugin.zip` returned 200: the Claude → Agamemnon half
   (the bundled skill and scoped token) was already healthy.
 - The ChatGPT subscription stream error at 17:33:52 ("peer closed connection
   without sending complete message body") is a transient upstream disconnect

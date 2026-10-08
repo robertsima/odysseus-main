@@ -115,7 +115,7 @@ test('a refused approval comes back lapsed and leaves the mode alone', async () 
   assert.ok(approvalCard().textContent.includes(detail), "the card carries the server's reason");
   assert.ok(document.getElementById('mode-agent-btn').classList.contains('active'), 'Agent stays selected');
   assert.ok(!document.getElementById('mode-chat-btn').classList.contains('active'));
-  assert.equal(JSON.parse(localStorage.getItem('odysseus-toggles')).mode, 'agent');
+  assert.equal(JSON.parse(localStorage.getItem('agamemnon-toggles')).mode, 'agent');
 });
 
 test('a model that cannot use tools does switch the chat to Chat mode', async () => {
@@ -125,5 +125,5 @@ test('a model that cannot use tools does switch the chat to Chat mode', async ()
   await page.send('list my files');
 
   assert.ok(document.getElementById('mode-chat-btn').classList.contains('active'));
-  assert.equal(JSON.parse(localStorage.getItem('odysseus-toggles')).mode, 'chat');
+  assert.equal(JSON.parse(localStorage.getItem('agamemnon-toggles')).mode, 'chat');
 });

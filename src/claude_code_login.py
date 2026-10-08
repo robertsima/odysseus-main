@@ -554,7 +554,7 @@ async def ashutdown() -> None:
     if session is None:
         return
     if session.state not in TERMINAL:
-        session._set(CANCELLED, error="Odysseus is shutting down.")
+        session._set(CANCELLED, error="Agamemnon is shutting down.")
     await _stop(session)
 
 

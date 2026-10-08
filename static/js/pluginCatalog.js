@@ -136,5 +136,7 @@ ${line}` : ''}`)) return;
     }
   }
 
-  window.OdysseusPluginCatalog = {mount};
+  window.AgamemnonPluginCatalog = {mount};
+  // Compatibility for installed extensions upgrading independently.
+  window.OdysseusPluginCatalog = window.AgamemnonPluginCatalog;
 })();

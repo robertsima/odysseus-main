@@ -1,10 +1,10 @@
 # Delegation log policy
 
-Applies only when the owner keeps a delegation log: a folder of the knowledge base that `ODYSSEUS_PI_DOCUMENTATION_ROOT` points `record_pi_task` at (the owner's setup uses an `AI Mind` folder). Without one, skip the record.
+Applies only when the owner keeps a delegation log: a folder of the knowledge base that `AGAMEMNON_PI_DOCUMENTATION_ROOT` (legacy `ODYSSEUS_PI_DOCUMENTATION_ROOT`) points `record_pi_task` at. Without one, skip the record.
 
 ## Boundary
 
-Write accepted delegation records only to that folder. Other vault content (for example `Vault Mind` and `Journal`) is never written, moved or deleted.
+Write accepted delegation records only to that folder. Unrelated vault content is never written, moved or deleted.
 
 The folder sits inside the personal-documents tree that `search_documents` indexes. It is not a bound workspace and not under `/app/workspace`. `record_pi_task` already knows where it is. For another note in the folder that you update yourself, take the path from a `search_documents` result, never from the folder name.
 

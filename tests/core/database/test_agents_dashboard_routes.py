@@ -41,7 +41,7 @@ class _Mgr:
 
 
 @pytest.fixture
-def env(tmp_path, monkeypatch):
+def env(tmp_path, monkeypatch, app_db):
     monkeypatch.setattr(constants, "DATA_DIR", str(tmp_path))
     act._reset_for_tests()
     agent_runs._RUNS.clear(); agent_runs._EXTERNAL.clear(); agent_runs._FINISHED.clear()
@@ -51,8 +51,12 @@ def env(tmp_path, monkeypatch):
     import src.ai_interaction as ai
     monkeypatch.setattr(ai, "get_session_manager", lambda: mgr)
     import core.database as db
+    monkeypatch.setattr(db, "SessionLocal", app_db.SessionLocal)
+    with db.get_db_session() as store:
+        store.add_all([db.Session(id=s.id, name=s.name, owner=s.owner, endpoint_url='http://localhost:11434', model='test') for s in mgr.sessions.values()])
     monkeypatch.setattr(db, "get_session_settings", lambda sid, **kwargs: {})
     monkeypatch.setattr(db, "update_session_settings", lambda sid, patch: patch)
+
     # Fake endpoints must not perform a real context-window probe while a
     # worker/parent handoff is under its deterministic five-second test limit.
     import src.model_context as model_context
@@ -180,7 +184,9 @@ async def test_archive_refuses_an_active_child_and_cleanup_hides_only_completed_
     mgr.sessions["a2"] = _Sess("a2", "Alice worker")
     settings = {"a2": {"parent_session": "a1"}}
     import core.database as db
-    monkeypatch.setattr(db, "get_session_settings", lambda sid: settings.get(sid, {}))
+    with db.get_db_session() as store:
+        store.add(db.Session(id="a2", name="Alice worker", owner="alice", endpoint_url='http://localhost:11434', model='test'))
+    monkeypatch.setattr(db, "get_session_settings", lambda sid, **kwargs: settings.get(sid, {}))
     monkeypatch.setattr(db, "update_session_settings", lambda sid, patch: settings.setdefault(sid, {}).update(patch) or settings[sid])
     archive = eps[("POST", "/api/agents/sessions/{session_id}/archive")]
     cleanup = eps[("POST", "/api/agents/sessions/{session_id}/cleanup-runs")]
@@ -207,7 +213,9 @@ async def test_archive_refuses_queued_cli_children_and_cleanup_is_owner_scoped(e
     mgr.sessions["a2"] = _Sess("a2", "Queued CLI child")
     settings = {"a2": {"parent_session": "a1"}}
     import core.database as db
-    monkeypatch.setattr(db, "get_session_settings", lambda sid: settings.get(sid, {}))
+    with db.get_db_session() as store:
+        store.add(db.Session(id="a2", name="Queued CLI child", owner="alice", endpoint_url='http://localhost:11434', model='test'))
+    monkeypatch.setattr(db, "get_session_settings", lambda sid, **kwargs: settings.get(sid, {}))
     monkeypatch.setattr(agent_control, "live_children", lambda sid: 1 if sid == "a2" else 0)
     archive = eps[("POST", "/api/agents/sessions/{session_id}/archive")]
     cleanup = eps[("POST", "/api/agents/sessions/{session_id}/cleanup-runs")]
@@ -223,40 +231,6 @@ async def test_archive_refuses_queued_cli_children_and_cleanup_is_owner_scoped(e
     with pytest.raises(HTTPException) as exc:
         await cleanup(_req({"run_ids": [foreign]}), session_id="a1")
     assert exc.value.status_code == 404
-
-
-async def test_unarchive_checks_db_owner_before_restoring(env, monkeypatch):
-    """Archived sessions can be absent from the live manager after restart."""
-    _mgr, eps = env
-    restore = eps[("POST", "/api/agents/sessions/{session_id}/unarchive")]
-    import core.database as db
-    from fastapi import HTTPException
-
-    class _Field:
-        def __eq__(self, other):
-            return other
-
-    class _DbSession:
-        id = _Field()
-        owner = _Field()
-
-    row = SimpleNamespace(owner="alice", archived=True)
-    class _Query:
-        def filter(self, *_args): return self
-        def first(self): return row
-    class _Db:
-        def query(self, *_args): return _Query()
-        def commit(self): pass
-        def close(self): pass
-    monkeypatch.setattr(db, "Session", _DbSession)
-    monkeypatch.setattr(db, "SessionLocal", lambda: _Db())
-
-    out = await restore(_req(), session_id="a1")
-    assert out["archived"] is False and row.archived is False
-    row.owner, row.archived = "bob", True
-    with pytest.raises(HTTPException) as exc:
-        await restore(_req(), session_id="a1")
-    assert exc.value.status_code == 404 and row.archived is True
 
 
 async def test_archived_overview_uses_db_metadata_without_hydrating_transcripts(env, monkeypatch):

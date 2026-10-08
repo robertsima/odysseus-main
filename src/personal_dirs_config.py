@@ -10,7 +10,7 @@ to reproduce a working install.
 
 Format (comma-separated, ``path:label`` pairs)::
 
-    ODYSSEUS_PERSONAL_DIRS=Vault Mind:public,AI Mind:public,Journal:private
+    ODYSSEUS_PERSONAL_DIRS=Knowledge:public,Projects:public,Journal:private
 
 Paths are relative to PERSONAL_DIR (absolute paths are accepted but must resolve
 inside it — same confinement the HTTP route applies). Labels are the

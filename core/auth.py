@@ -502,7 +502,9 @@ class AuthManager:
     def totp_get_provisioning_uri(self, username: str, secret: str) -> str:
         """Get the otpauth:// URI for QR code generation."""
         totp = pyotp.TOTP(secret)
-        return totp.provisioning_uri(name=username, issuer_name="Odysseus")
+        # Only new enrolments read the issuer; existing authenticator entries
+        # keep the label they were added with and their codes stay valid.
+        return totp.provisioning_uri(name=username, issuer_name="Agamemnon")
 
     def totp_confirm_enable(self, username: str, code: str) -> bool:
         """Verify a TOTP code against the pending secret, then enable 2FA."""

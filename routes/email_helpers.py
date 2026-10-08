@@ -295,7 +295,7 @@ def _friendly_email_auth_error(protocol: str, host: str, error: object) -> str:
     if microsoft_basic_auth_failure:
         return (
             "Microsoft no longer accepts normal mailbox passwords for "
-            "Outlook/Office 365 IMAP/SMTP in most accounts. Odysseus "
+            "Outlook/Office 365 IMAP/SMTP in most accounts. Agamemnon "
             "does not support Microsoft OAuth/Graph mail yet, so Outlook "
             "accounts cannot be added with this password form."
         )

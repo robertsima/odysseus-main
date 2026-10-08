@@ -27,9 +27,10 @@ def _resolve_redirect_base() -> str:
     for Google clients), so changing the host invalidates registrations that
     already exist.
     """
+    from src.settings import get_setting_or_env
     return (
         os.environ.get("OAUTH_REDIRECT_BASE_URL")
-        or os.environ.get("APP_PUBLIC_URL")
+        or get_setting_or_env("app_public_url", "APP_PUBLIC_URL", "")
         or f"http://localhost:{os.environ.get('APP_PORT', '7000')}"
     ).rstrip("/")
 
@@ -165,8 +166,8 @@ def build_provider(server_id: str, url: str, on_redirect=None):
     from mcp.shared.auth import OAuthClientMetadata
 
     client_metadata = OAuthClientMetadata(
-        client_name="Odysseus",
-        redirect_uris=[REDIRECT_URI],
+        client_name="Agamemnon",
+        redirect_uris=[f"{_resolve_redirect_base()}/api/mcp/oauth/callback"],
         grant_types=["authorization_code", "refresh_token"],
         response_types=["code"],
         # Leave scope unset: the SDK applies the MCP scope-selection strategy and

@@ -1,6 +1,6 @@
 # Markdown vault retrieval
 
-How Odysseus indexes and retrieves an Obsidian-style `.md` knowledge base, and
+How Agamemnon indexes and retrieves an Obsidian-style `.md` knowledge base, and
 which knobs change it.
 
 Nothing here needs configuring to work. The defaults are the intended
@@ -20,7 +20,7 @@ wall of text (`src/vault_markdown.py`):
 | File mtime | the note's date, as a last resort — and discounted, because a re-sync moves it |
 | `#inline-tags` in the body | additional tags (code fences and headings excluded) |
 | `[[wikilinks]]` | the vault's link graph, used for multi-source retrieval |
-| Headings | a breadcrumb (`Odysseus > Deployment > NAS`) on every chunk |
+| Headings | a breadcrumb (`Agamemnon > Deployment > NAS`) on every chunk |
 
 Frontmatter is removed from the indexed prose — it used to be embedded as
 `---`/`tags:` noise in each note's first chunk.

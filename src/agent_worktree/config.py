@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from src import constants
+from src.github_credentials import github_api_base
 from src.settings import get_setting_or_env
 from src.agent_worktree.validation import (
     is_valid_repo_slug,
@@ -132,9 +133,10 @@ def load_config() -> WorktreeConfig:
     )
     state_dir = os.path.realpath(os.path.expanduser(state_dir))
 
+    # Empty means the repository's own default branch (service._default_base).
     base_branch = normalize_branch(str(get_setting_or_env(
-        "agent_base_branch", "ODYSSEUS_AGENT_BASE_BRANCH", "dev"
-    ) or "")) or "dev"
+        "agent_base_branch", "ODYSSEUS_AGENT_BASE_BRANCH", ""
+    ) or ""))
 
     fallback_env = "ODYSSEUS_AGENT_GITHUB_TOKEN"
 
@@ -146,7 +148,9 @@ def load_config() -> WorktreeConfig:
         state_dir=state_dir,
         base_branch=base_branch,
         approval_ttl_s=_approval_ttl(),
-        api_base=(_text("ODYSSEUS_GITHUB_API_BASE") or "https://api.github.com").rstrip("/"),
+        # GITHUB_HOST already points the GitHub MCP servers and git at an
+        # Enterprise install; publishing follows it unless told otherwise.
+        api_base=(_text("ODYSSEUS_GITHUB_API_BASE") or github_api_base()).rstrip("/"),
         app_id=_text("ODYSSEUS_GITHUB_APP_ID"),
         installation_id=_text("ODYSSEUS_GITHUB_APP_INSTALLATION_ID"),
         private_key_path=_text("ODYSSEUS_GITHUB_APP_PRIVATE_KEY_PATH"),

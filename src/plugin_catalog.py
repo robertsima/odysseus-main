@@ -69,7 +69,7 @@ _FORBIDDEN_ENV_PREFIXES = (
 def _forbidden_env_name(name: str) -> bool:
     upper = name.upper()
     return upper in _FORBIDDEN_ENV or upper.startswith(_FORBIDDEN_ENV_PREFIXES)
-_TEMPLATE_FORMAT = "odysseus-agent-profiles"
+_TEMPLATE_FORMAT = "agamemnon-agent-profiles"
 
 
 class PluginManifestError(ValueError):
@@ -238,7 +238,7 @@ def _templates(raw: Any) -> list[dict[str, Any]]:
     if not isinstance(raw, list) or len(raw) > MAX_TEMPLATES:
         raise PluginManifestError(f"integration.loadout_templates must be a list of at most {MAX_TEMPLATES}")
     for doc in raw:
-        if (not isinstance(doc, dict) or doc.get("format") != _TEMPLATE_FORMAT
+        if (not isinstance(doc, dict) or doc.get("format") not in (_TEMPLATE_FORMAT, "odysseus-agent-profiles")
                 or doc.get("version") != 1 or not isinstance(doc.get("profiles"), list)):
             raise PluginManifestError(
                 f"each loadout template must be an {_TEMPLATE_FORMAT} version 1 document")

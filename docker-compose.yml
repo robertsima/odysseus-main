@@ -27,6 +27,22 @@ services:
     # See website/configuration.md ("Docker: how the environment reaches the
     # container").
     environment:
+      # Canonical names are forwarded only when explicitly set.
+      - AGAMEMNON_ADMIN_USER
+      - AGAMEMNON_ADMIN_PASSWORD
+      - AGAMEMNON_GITHUB_MCP_WRITE
+      - AGAMEMNON_STT_DEVICE
+      - AGAMEMNON_STT_COMPUTE_TYPE
+      - AGAMEMNON_STT_CONCURRENCY
+      - AGAMEMNON_TOOL_EXTRA_ROOTS
+      - AGAMEMNON_PERSONAL_DIRS
+      - AGAMEMNON_INPROCESS_POLLERS
+      - AGAMEMNON_INPROCESS_TASKS
+      - AGAMEMNON_SCRIPT_HOST
+      - AGAMEMNON_PI_WORKER_HOST
+      - AGAMEMNON_PI_WORKER_IDENTITY_FILE
+      - AGAMEMNON_PI_WORKER_SCRIPT
+      - AGAMEMNON_PI_WORKER_ROOT
       - LLM_HOST=${LLM_HOST:-localhost}
       - LLM_HOSTS=${LLM_HOSTS:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
@@ -77,9 +93,9 @@ services:
       - ODYSSEUS_SCRIPT_HOST=${ODYSSEUS_SCRIPT_HOST:-localhost}
       - ODYSSEUS_PI_WORKER_HOST=${ODYSSEUS_PI_WORKER_HOST:-}
       - ODYSSEUS_PI_WORKER_IDENTITY_FILE=${ODYSSEUS_PI_WORKER_IDENTITY_FILE:-}
-      # Bare names on purpose: the Pi worker treats an EMPTY script/root as an
-      # invalid path rather than "use the default", so these are passed only
-      # when .env or the shell actually sets them.
+      # Bare names: passed only when .env or the shell sets them. The Pi
+      # worker assumes no drive or script of its own and names whichever of
+      # these is missing when a task is delegated.
       - ODYSSEUS_PI_WORKER_SCRIPT
       - ODYSSEUS_PI_WORKER_ROOT
       - DATA_BRAVE_API_KEY=${DATA_BRAVE_API_KEY:-}
@@ -87,6 +103,10 @@ services:
       - GOOGLE_PSE_CX=${GOOGLE_PSE_CX:-}
       - GOOGLE_OAUTH_CLIENT_ID=${GOOGLE_OAUTH_CLIENT_ID:-}
       - GOOGLE_OAUTH_CLIENT_SECRET=${GOOGLE_OAUTH_CLIENT_SECRET:-}
+      # The one address people reach this install at. It builds the Google
+      # sign-in redirects below (which only pin a different address) and the
+      # MCP OAuth callback when OAUTH_REDIRECT_BASE_URL is unset.
+      - APP_PUBLIC_URL=${APP_PUBLIC_URL:-}
       - GOOGLE_OAUTH_REDIRECT_URI=${GOOGLE_OAUTH_REDIRECT_URI:-}
       - GOOGLE_CALENDAR_OAUTH_REDIRECT_URI=${GOOGLE_CALENDAR_OAUTH_REDIRECT_URI:-}
       # Externally reachable origin for MCP OAuth callbacks. The container
