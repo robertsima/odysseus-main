@@ -877,6 +877,39 @@ def wrap_up(run_id: str, *, owner: Optional[str] = None) -> dict:
 
 _WORKERS: Dict[str, asyncio.Task] = {}
 
+# ── automatic resume after an upstream failure ────────────────────────────
+# 2026-10-07/08: five worker runs on the ChatGPT backend ended on upstream
+# errors (two 502 protocol errors, three 500s after ~181 s of silence). Nothing
+# resumed them: the admin model sent the worker back twice and then gave up,
+# and nothing happened for 15 minutes until the user asked. A worker whose run
+# fails on a transient upstream error now resumes in the same chat, after a
+# pause, a bounded number of times; only then does the parent get the failure.
+# Not resumed: a request the provider refused (400/401/403/429, validation),
+# a stop, or any failure that is not an upstream answer.
+_AUTO_RESUME_STATUSES = frozenset({500, 502, 503, 504, 520, 521, 522, 523, 524, 529})
+_AUTO_RESUME_DELAYS = (30.0, 120.0)
+_RESUME_NOTE = ("[Harness] Your previous turn was cut off by an upstream model error, not by anything "
+                "you did. Your work so far is in the work trail above. Continue the task from where it "
+                "stopped; do not redo steps that already finished.")
+
+
+def _auto_resume_limit() -> int:
+    try:
+        from src.settings import get_setting
+
+        return max(0, min(5, int(get_setting("agent_worker_auto_resume_limit", 2))))
+    except Exception:
+        return 2
+
+
+def _resumable_failure(exc: BaseException) -> bool:
+    """Whether a worker run that raised ``exc`` is worth resuming on its own."""
+    from src.headless_agent import HeadlessStreamError
+
+    if not isinstance(exc, HeadlessStreamError):
+        return False
+    return bool(exc.upstream_drop) or exc.status in _AUTO_RESUME_STATUSES
+
 # True while an agent turn runs as somebody's child: a launched worker (which
 # covers every orchestrate_agents / workflow child) or a send_to_session
 # sub-agent exchange. `run_headless` drains the loop in a task of its own, so
@@ -1065,37 +1098,88 @@ async def _launch_worker(*, owner: Optional[str], task: str, profile_name: Optio
     async def _run():
         from core.models import ChatMessage
 
-        outcome: Dict[str, Any] = {}
-        status, text, events, error_detail = "completed", "", [], ""
-        try:
-            with agent_runs.track_external(sess.id, source="worker", owner=owner), child_run_scope():
-                text, events = await run_headless(
-                    sess, list(context),
-                    max_rounds=rounds,
-                    disabled_tools=set(profile.get("disabled_tools") or []) if profile else frozenset(),
-                    activity_session_id=sess.id, run_id=run_id, source="session", owner=owner,
-                    outcome=outcome,
-                    workspace=checked.workspace if checked else None,
-                    forced_tools=checked.forced_tools if checked else None,
-                    wrap_up_round=wrap_up_round,
-                )
-            if outcome.get("stopped"):
+        run_context: List[Dict[str, Any]] = list(context)
+        resumes = 0
+        while True:
+            outcome: Dict[str, Any] = {}
+            status, text, events, error_detail = "completed", "", [], ""
+            failure: Optional[BaseException] = None
+            try:
+                with agent_runs.track_external(sess.id, source="worker", owner=owner), child_run_scope():
+                    text, events = await run_headless(
+                        sess, run_context,
+                        max_rounds=rounds,
+                        disabled_tools=set(profile.get("disabled_tools") or []) if profile else frozenset(),
+                        activity_session_id=sess.id, run_id=run_id, source="session", owner=owner,
+                        outcome=outcome,
+                        workspace=checked.workspace if checked else None,
+                        forced_tools=checked.forced_tools if checked else None,
+                        wrap_up_round=wrap_up_round,
+                    )
+                if outcome.get("stopped"):
+                    status = "cancelled"
+                elif outcome.get("awaiting_approval"):
+                    # Ended on an approval card in the worker's chat: paused, not done.
+                    status = "waiting_approval"
+                elif outcome.get("rounds_exhausted"):
+                    # Every leg was spent and it is still not done. Reporting that
+                    # as "completed" is what let a cut-off worker hand the parent an
+                    # empty result that read like a finished one; `run_headless` has
+                    # already appended the "here is where I got to" line to `text`.
+                    status = "incomplete"
+            except asyncio.CancelledError:
                 status = "cancelled"
-            elif outcome.get("awaiting_approval"):
-                # Ended on an approval card in the worker's chat: paused, not done.
-                status = "waiting_approval"
-            elif outcome.get("rounds_exhausted"):
-                # Every leg was spent and it is still not done. Reporting that
-                # as "completed" is what let a cut-off worker hand the parent an
-                # empty result that read like a finished one; `run_headless` has
-                # already appended the "here is where I got to" line to `text`.
-                status = "incomplete"
-        except asyncio.CancelledError:
-            status = "cancelled"
-        except Exception as exc:
-            status, text = "failed", f"Worker failed: {exc}"
-            error_detail = str(exc)[:2000]
-            logger.warning("worker %s failed: %s", sess.id, exc, exc_info=True)
+            except Exception as exc:
+                failure = exc
+                status = "failed"
+                # Keep what the run did before it failed (headless_agent puts it
+                # on the error), so the work trail renders and the next turn's
+                # context has it.
+                events = list(getattr(exc, "tool_events", None) or [])
+                partial = str(getattr(exc, "partial_text", "") or "").strip()
+                text = f"Worker failed: {exc}" + (f"\n\nOutput before the failure:\n{partial}" if partial else "")
+                error_detail = str(exc)[:2000]
+                logger.warning("worker %s failed: %s", sess.id, exc, exc_info=True)
+            if failure is None or resumes >= _auto_resume_limit() or not _resumable_failure(failure):
+                break
+            delay = _AUTO_RESUME_DELAYS[min(resumes, len(_AUTO_RESUME_DELAYS) - 1)]
+            resumes += 1
+            try:
+                sess.add_message(ChatMessage(
+                    "assistant",
+                    ((partial + "\n\n") if partial else "")
+                    + f"(cut off by an upstream model error: {failure}; resuming in {delay:g}s)",
+                    {"source": "worker", "model": sess.model, "run_id": run_id, "status": "interrupted",
+                     "error": error_detail, "auto_resume": resumes, **(run_metadata or {}),
+                     **({"tool_events": events} if events else {})}))
+                manager.save_sessions()
+            except Exception:
+                logger.debug("worker interrupted-turn persist failed", exc_info=True)
+            # Saved above; if no resume follows, the closing message is just the line.
+            text, events = f"Worker failed: {failure}", []
+            logger.warning("worker %s: upstream failure, automatic resume %d/%d in %gs",
+                           sess.id, resumes, _auto_resume_limit(), delay)
+            # Back to running, so the Stop controls still reach this run while
+            # it waits (stop_run only stops a run that is "running").
+            note = f"Upstream model error; resuming in {delay:g}s ({resumes}/{_auto_resume_limit()})"
+            activity.publish(sess.id, "status", note, source="session", run_id=run_id, owner=owner,
+                             detail=error_detail or None, level="warning",
+                             data={"status": "running", "auto_resume": resumes})
+            if parent_session:
+                activity.publish(parent_session, "note", f"Worker {sess.name}: {note}", source="session",
+                                 run_id=run_id, owner=owner, level="warning")
+            from src.headless_agent import wait_unless_stopped
+
+            stopped_by = await wait_unless_stopped(run_id, delay)
+            if stopped_by is not None:
+                status, text, events, error_detail = "cancelled", f"(stopped {stopped_by} before finishing)", [], ""
+                break
+            if agent_runs.is_busy(sess.id):
+                # Someone else is working in this chat now (the person, or the
+                # parent sending the worker back by hand): leave it to them.
+                logger.info("worker %s: chat busy, automatic resume skipped", sess.id)
+                break
+            run_context = sess.get_context_messages() + [{"role": "user", "content": _RESUME_NOTE}]
         # The turn is over: release the workspace before the hand-off, whose
         # continuation lets the parent write to it again.
         from src import worktree_writers as _ww

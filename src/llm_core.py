@@ -341,6 +341,39 @@ def _is_headers_timeout_chunk(chunk: str) -> bool:
     return False
 
 
+# 2026-10-07/08: two workers died on "502 Upstream protocol error" from the
+# ChatGPT backend, and the read-timeout path (504) had the same gap: neither
+# was ever replayed, and the exception text was not logged, so a stale pooled
+# connection the server had closed could not be told from a stream cut in the
+# middle. The chunk says which drop it was (`upstream_drop`), so stream_llm
+# can replay one that came before any output. Marked where the exception is
+# caught, not matched on status: a local connection-pool timeout is also a
+# 504 and must still fall through to the next route at once.
+_UPSTREAM_DROPS = {
+    # kind: (status, error text, fallback_eligible)
+    "protocol": (502, "Upstream protocol error", False),
+    "disconnect": (502, "Network error", False),
+    "read_timeout": (504, "Read timeout", None),
+}
+
+
+def _upstream_drop_chunk(kind: str, exc: BaseException, target_url: str) -> str:
+    """SSE error for an upstream that dropped or went silent mid-request."""
+    status, text, fallback_eligible = _UPSTREAM_DROPS[kind]
+    reason = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+    logger.warning("[agent-timing] upstream %s from %s: %s", kind, _host_key(target_url), reason[:500])
+    payload: Dict = {"error": text, "status": status, "upstream_drop": kind, "detail": reason[:500]}
+    if fallback_eligible is not None:
+        payload["fallback_eligible"] = fallback_eligible
+    return f'event: error\ndata: {json.dumps(payload)}\n\n'
+
+
+def _upstream_drop_kind(chunk: str) -> Optional[str]:
+    data = _sse_error_data(chunk) if isinstance(chunk, str) else None
+    kind = (data or {}).get("upstream_drop")
+    return kind if kind in _UPSTREAM_DROPS else None
+
+
 # Cache for LLM responses
 def _cache_header_identity(headers) -> str:
     """Return a non-secret identity for credential-distinct request routes."""
@@ -3910,6 +3943,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
         allowed_tools = None
     auth_retry_used = False
     status_retries = 0
+    drop_retry_used = False
     if chatgpt_subscription:
         headers, presend_error = await _chatgpt_presend_headers(headers, session_id)
         if presend_error:
@@ -3924,6 +3958,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
             headers_retry = False
             auth_retry = False
             status_retry = None
+            drop_retry = None
             inner = _stream_llm_inner(
                 url,
                 model,
@@ -3961,6 +3996,19 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                     and not _is_host_dead(target_url)
                 ):
                     retry_delay = LLMConfig.STREAM_CONNECT_RETRY_DELAY * (attempt + 1)
+                    await inner.aclose()
+                    break
+                elif (
+                    not emitted
+                    and not drop_retry_used
+                    and _upstream_drop_kind(chunk)
+                    and not _is_host_dead(target_url)
+                ):
+                    # The connection dropped or went silent before anything
+                    # was streamed (see _UPSTREAM_DROPS): one replay, which
+                    # usually lands on a fresh connection.
+                    drop_retry_used = True
+                    drop_retry = _upstream_drop_kind(chunk)
                     await inner.aclose()
                     break
                 elif (
@@ -4013,6 +4061,16 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                 lo, hi = _CHATGPT_AUTH_RETRY_DELAY
                 if hi > 0:
                     await asyncio.sleep(random.uniform(lo, hi))
+                continue
+            if drop_retry is not None:
+                lo, hi = _STREAM_STATUS_RETRY_DELAY
+                pause = random.uniform(lo, hi) if hi > 0 else 0.0
+                logger.warning(
+                    "[agent-timing] upstream %s from %s model=%s before any output; retrying once in %.2fs",
+                    drop_retry, _host_key(target_url), model, pause,
+                )
+                if pause > 0:
+                    await asyncio.sleep(pause)
                 continue
             if status_retry is not None:
                 lo, hi = _STREAM_STATUS_RETRY_DELAY
@@ -4436,14 +4494,16 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             yield _connect_error_chunk(target_url)
         except _StreamHeadersTimeout as e:
             yield _headers_timeout_chunk(target_url, e)
-        except httpx.ReadTimeout:
-            yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
+        except httpx.ReadTimeout as e:
+            yield _upstream_drop_chunk("read_timeout", e, target_url)
         except httpx.PoolTimeout:
             yield f'event: error\ndata: {json.dumps({"error": "Connection pool timeout", "status": 504})}\n\n'
         except httpx.WriteTimeout:
             yield f'event: error\ndata: {json.dumps({"error": "Upstream timeout", "status": 504, "fallback_eligible": False})}\n\n'
-        except httpx.ProtocolError:
-            yield f'event: error\ndata: {json.dumps({"error": "Upstream protocol error", "status": 502, "fallback_eligible": False})}\n\n'
+        except httpx.ProtocolError as e:
+            yield _upstream_drop_chunk("protocol", e, target_url)
+        except httpx.ReadError as e:
+            yield _upstream_drop_chunk("disconnect", e, target_url)
         except httpx.NetworkError:
             yield f'event: error\ndata: {json.dumps({"error": "Network error", "status": 502, "fallback_eligible": False})}\n\n'
         except Exception as e:
@@ -4536,14 +4596,16 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             yield _connect_error_chunk(target_url)
         except _StreamHeadersTimeout as e:
             yield _headers_timeout_chunk(target_url, e)
-        except httpx.ReadTimeout:
-            yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
+        except httpx.ReadTimeout as e:
+            yield _upstream_drop_chunk("read_timeout", e, target_url)
         except httpx.PoolTimeout:
             yield f'event: error\ndata: {json.dumps({"error": "Connection pool timeout", "status": 504})}\n\n'
         except httpx.WriteTimeout:
             yield f'event: error\ndata: {json.dumps({"error": "Upstream timeout", "status": 504, "fallback_eligible": False})}\n\n'
-        except httpx.ProtocolError:
-            yield f'event: error\ndata: {json.dumps({"error": "Upstream protocol error", "status": 502, "fallback_eligible": False})}\n\n'
+        except httpx.ProtocolError as e:
+            yield _upstream_drop_chunk("protocol", e, target_url)
+        except httpx.ReadError as e:
+            yield _upstream_drop_chunk("disconnect", e, target_url)
         except httpx.NetworkError:
             yield f'event: error\ndata: {json.dumps({"error": "Network error", "status": 502, "fallback_eligible": False})}\n\n'
         except Exception as e:
@@ -4701,14 +4763,16 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             yield _connect_error_chunk(target_url)
         except _StreamHeadersTimeout as e:
             yield _headers_timeout_chunk(target_url, e)
-        except httpx.ReadTimeout:
-            yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
+        except httpx.ReadTimeout as e:
+            yield _upstream_drop_chunk("read_timeout", e, target_url)
         except httpx.PoolTimeout:
             yield f'event: error\ndata: {json.dumps({"error": "Connection pool timeout", "status": 504})}\n\n'
         except httpx.WriteTimeout:
             yield f'event: error\ndata: {json.dumps({"error": "Upstream timeout", "status": 504, "fallback_eligible": False})}\n\n'
-        except httpx.ProtocolError:
-            yield f'event: error\ndata: {json.dumps({"error": "Upstream protocol error", "status": 502, "fallback_eligible": False})}\n\n'
+        except httpx.ProtocolError as e:
+            yield _upstream_drop_chunk("protocol", e, target_url)
+        except httpx.ReadError as e:
+            yield _upstream_drop_chunk("disconnect", e, target_url)
         except httpx.NetworkError:
             yield f'event: error\ndata: {json.dumps({"error": "Network error", "status": 502, "fallback_eligible": False})}\n\n'
         except Exception as e:
@@ -5035,14 +5099,16 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         yield _connect_error_chunk(target_url)
     except _StreamHeadersTimeout as e:
         yield _headers_timeout_chunk(target_url, e)
-    except httpx.ReadTimeout:
-        yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
+    except httpx.ReadTimeout as e:
+        yield _upstream_drop_chunk("read_timeout", e, target_url)
     except httpx.PoolTimeout:
         yield f'event: error\ndata: {json.dumps({"error": "Connection pool timeout", "status": 504})}\n\n'
     except httpx.WriteTimeout:
         yield f'event: error\ndata: {json.dumps({"error": "Upstream timeout", "status": 504, "fallback_eligible": False})}\n\n'
-    except httpx.ProtocolError:
-        yield f'event: error\ndata: {json.dumps({"error": "Upstream protocol error", "status": 502, "fallback_eligible": False})}\n\n'
+    except httpx.ProtocolError as e:
+        yield _upstream_drop_chunk("protocol", e, target_url)
+    except httpx.ReadError as e:
+        yield _upstream_drop_chunk("disconnect", e, target_url)
     except httpx.NetworkError:
         yield f'event: error\ndata: {json.dumps({"error": "Network error", "status": 502, "fallback_eligible": False})}\n\n'
     except Exception as e:

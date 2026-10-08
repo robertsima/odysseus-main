@@ -73,6 +73,11 @@ DEFAULT_SETTINGS = {
     # the fix, or start another. 0 = report and wait for the user (the
     # behaviour before 2026-09-29). src/agent_control._continuation_budget.
     "agent_auto_continue_limit": 3,
+    # Times a worker whose run failed on a transient upstream error (5xx, a
+    # dropped connection, a read timeout) resumes itself in the same chat
+    # before the failure goes to the chat that started it. 0 = hand the
+    # failure back at once. src/agent_control._auto_resume_limit.
+    "agent_worker_auto_resume_limit": 2,
 
     # Agent email safety: when True, the MCP send_email / reply_to_email
     # tools don't SMTP directly. They stage the composed message into the

@@ -42,9 +42,19 @@ _STEER_RUNS: Dict[str, Set[str]] = {}
 class HeadlessStreamError(RuntimeError):
     """Terminal upstream stream failure that a detached caller must not lose."""
 
-    def __init__(self, message: str, *, status: Optional[int] = None, retryable: bool = False):
+    def __init__(self, message: str, *, status: Optional[int] = None, retryable: bool = False,
+                 upstream_drop: Optional[str] = None):
         self.status = status
         self.retryable = bool(retryable)
+        # "protocol" / "disconnect" / "read_timeout" when the connection dropped
+        # or went silent (llm_core._UPSTREAM_DROPS), else None.
+        self.upstream_drop = upstream_drop
+        # What the run had done when it failed, filled in by run_headless so
+        # the caller can save it (2026-10-08: a worker's 74 rounds and 135 tool
+        # calls were dropped with the error, and its resume started from the
+        # task alone).
+        self.partial_text = ""
+        self.tool_events: List[Dict[str, Any]] = []
         prefix = f"Upstream model request failed with HTTP {status}" if status else "Upstream model request failed"
         super().__init__(f"{prefix}: {str(message or 'unknown error')[:1000]}")
 
@@ -58,7 +68,9 @@ def _stream_error(payload: Dict[str, Any]) -> HeadlessStreamError:
     message = payload.get("text") or payload.get("error") or payload.get("message") or "unknown error"
     if isinstance(message, (dict, list)):
         message = json.dumps(message, ensure_ascii=False)
-    return HeadlessStreamError(str(message), status=status, retryable=bool(payload.get("retryable")))
+    drop = payload.get("upstream_drop")
+    return HeadlessStreamError(str(message), status=status, retryable=bool(payload.get("retryable")),
+                               upstream_drop=str(drop) if drop else None)
 
 
 def _sse_error_payload(chunk: str) -> Optional[Dict[str, Any]]:
@@ -93,6 +105,26 @@ def request_stop(run_id: str, *, by: str = _DEFAULT_STOP_SOURCE) -> bool:
     logger.info("[agent-stop] run=%s stopped %s", run_id, _STOP_SOURCES[run_id])
     event.set()
     return True
+
+
+async def wait_unless_stopped(run_id: str, seconds: float) -> Optional[str]:
+    """Wait ``seconds`` with ``run_id`` stoppable, between two runs of one task.
+
+    Returns where a stop came from (as :func:`request_stop` records it), or
+    None when the wait ran out. Used by a worker waiting to resume after an
+    upstream failure, so Stop during that pause cancels the resume.
+    """
+    event = asyncio.Event()
+    _STOP_EVENTS[run_id] = event
+    try:
+        try:
+            await asyncio.wait_for(event.wait(), timeout=max(0.0, float(seconds)))
+        except asyncio.TimeoutError:
+            return None
+        return _STOP_SOURCES.pop(run_id, _DEFAULT_STOP_SOURCE)
+    finally:
+        if _STOP_EVENTS.get(run_id) is event:
+            _STOP_EVENTS.pop(run_id, None)
 
 
 def running_ids() -> Set[str]:
@@ -592,6 +624,10 @@ async def run_headless(
                                      data={"status": "cancelled"}, level="warning")
     except asyncio.CancelledError:
         drain.cancel()
+        raise
+    except HeadlessStreamError as exc:
+        exc.partial_text = state["full"]
+        exc.tool_events = list(state["tool_events"])
         raise
     finally:
         if run_id:

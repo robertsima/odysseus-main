@@ -934,6 +934,22 @@ register_all([
         max_value=10,
         unit="follow-ups",
     ),
+    SettingSpec(
+        key="agent_worker_auto_resume_limit",
+        type="int",
+        label="Automatic resumes after a model outage",
+        help=(
+            "When a worker's model request fails on a temporary provider error "
+            "(a 5xx answer, a dropped connection, a timeout), the worker picks up "
+            "where it stopped, after 30 seconds and then 2 minutes, this many "
+            "times before the failure is reported. 0 means report it at once."
+        ),
+        group="Agents",
+        min_value=0,
+        max_value=5,
+        unit="resumes",
+        advanced=True,
+    ),
 
     SettingSpec(
         key="agent_approval_mode", type="choice", label="Approval prompts",

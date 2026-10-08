@@ -754,6 +754,23 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
             activity.run_finished(session_id, "session", run_id,
                                   f"Sub-agent · {sess.name or target_sid} failed", status="failed",
                                   owner=owner, data={"target_session": target_sid, "error": str(exc)[:400]})
+            # 2026-10-08: a worker sent back by hand failed again on an upstream
+            # error and its rounds were dropped with the exception. Keep them in
+            # the target chat, so a later turn there starts from that work.
+            partial_events = list(getattr(exc, "tool_events", None) or [])
+            partial_text = str(getattr(exc, "partial_text", "") or "").strip()
+            if partial_events or partial_text:
+                try:
+                    origin = {"source": "agent", "from_session": session_id or "",
+                              "from_session_name": _session_display_name(_session_manager, session_id)}
+                    sess.add_message(ChatMessage("user", message, {**origin, "direction": "inbound"}))
+                    sess.add_message(ChatMessage(
+                        "assistant", ((partial_text + "\n\n") if partial_text else "") + f"(failed: {exc})",
+                        {**origin, "direction": "reply", "model": sess.model, "status": "failed",
+                         "error": str(exc)[:2000], **({"tool_events": partial_events} if partial_events else {})}))
+                    _session_manager.save_sessions()
+                except Exception:
+                    logger.debug("send_to_session: partial work persist failed", exc_info=True)
             raise
 
         # Save both messages to session, tagged with their origin. Without the

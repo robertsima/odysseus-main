@@ -879,6 +879,21 @@ Headless runs add their tokens to the chat's totals and the usage ledger
 (`headless_agent._record_usage`), as the chat route does for foreground turns.
 Before that, worker chats showed 0 tokens.
 
+**A run that fails keeps its work.** When the model request fails,
+`run_headless` puts the run's text and `tool_events` on the
+`HeadlessStreamError` it raises (`partial_text`, `tool_events`), and the
+worker launcher and `send_to_session` save them on the failed reply, in the
+same metadata a finished turn has. The work trail renders and the next turn's
+context includes it. On 2026-10-08 only "Worker failed: …" was saved, so a
+worker resumed after 74 rounds started again from the task at 15k tokens.
+
+Before any output, `stream_llm` replays a dropped connection (httpx
+`ProtocolError` or `ReadError`) or an upstream read timeout once, and logs the
+exception class and text (`[agent-timing] upstream protocol from …`). The
+handler marks the error chunk `upstream_drop` where it catches the exception,
+so a local connection-pool timeout, also a 504, still goes straight to the
+next route. Nothing is replayed once output has gone out.
+
 **Nesting.** A worker may start workers of its own (a lead engineer starting
 implementors) down to `agent_max_worker_depth` hops below the chat a person
 started (default 2: chat → lead → implementors). Above the limit a worker keeps
@@ -934,6 +949,20 @@ A follow-up now carries on the **request** behind the chain, within a budget:
 - A worker's hand-back quoting its task ("inspect the current repo") no longer
   trips the "No active workspace is set" short-circuit, which on 2026-09-29
   replaced a finished worker's successful result.
+
+**Automatic resume after an upstream failure.** A worker whose run fails on a
+transient upstream error (HTTP 500, 502, 503, 504, 520-524 or 529, a dropped
+connection, a read timeout) resumes in the same chat on its own: after 30 s,
+then after 2 min, at most `agent_worker_auto_resume_limit` times (default 2,
+0 = off). Each cut-off turn is saved with status `interrupted` and its work
+trail; the resumed run reads the chat's history plus a short harness note
+saying the turn was cut off and to continue from the trail without redoing
+finished steps. The run stays `running` during the pause, so Stop cancels the
+resume; if someone else starts a turn in the worker's chat meanwhile, the
+resume is skipped. Only when the resumes are spent does the parent get the
+failure hand-back. A request the provider refused (400, 401, 403, 429) is
+never resumed. On 2026-10-07/08 five worker runs ended this way, and the admin
+model resumed by hand twice and then stopped; nothing ran for 15 min.
 
 **Publishing is a pause.** Approving a publish request in the browser pushes
 and writes `[Publish approved by …]` into the chat that asked; nothing ran
