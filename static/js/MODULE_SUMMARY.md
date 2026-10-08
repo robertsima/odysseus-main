@@ -1,5 +1,9 @@
 # Frontend Module Organization Summary
 
+See [APPEARANCE.md](APPEARANCE.md) before changing themes, fonts or a
+composition-specific control. The two appearances skin shared features;
+they are not parallel renderers.
+
 > **Scope:** This document describes the architecture of the Odysseus no-build
 > frontend. The app is a collection of native ES6 modules loaded from
 > `static/`. The authoritative source is the current `static/js/` tree and the

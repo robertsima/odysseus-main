@@ -56,19 +56,9 @@ const CUSTOM_THEMES_STAMP_KEY = 'odysseus-custom-themes-updated';
 // (--theme-font in style.css). An explicit choice overrides it everywhere.
 // Before `auto`, the Agamemnon stylesheet pinned Space Grotesk on the body,
 // so picking a font changed only the few rules that read --font-family.
-const FONT_MAP = {
-  auto: null,
-  mono: "'Fira Code', monospace",
-  grotesk: "'Space Grotesk', system-ui, sans-serif",
-  sans: "system-ui, -apple-system, 'Segoe UI', sans-serif",
-  serif: "Georgia, 'Times New Roman', serif",
-  humanist: "'Trebuchet MS', 'Segoe UI', sans-serif",
-  editorial: "Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif",
-  classic: "'Times New Roman', Times, serif",
-  code: "'Cascadia Code', 'SFMono-Regular', Consolas, 'Liberation Mono', monospace",
-  rounded: "ui-rounded, 'Arial Rounded MT Bold', system-ui, sans-serif",
-  opendyslexic: "'OpenDyslexic', sans-serif",
-};
+import './appearancePreferences.js';
+import { placeChatTitle } from './chatHeader.js';
+const { fontFamily, pageStyle } = globalThis.AgamemnonAppearance;
 const DEFAULT_FONT = 'auto';
 const DEFAULT_DENSITY = 'comfortable';
 const MAX_CUSTOM_THEMES = 8;
@@ -294,15 +284,15 @@ export function applyThemeIdentity(name) {
 // Style is a separate account preference. Legacy installations had no style
 // field: preserve their explicitly chosen palette's former page composition.
 export function readPageStyle() {
+  let entry = null;
   try {
-    const entry = JSON.parse(localStorage.getItem(STYLE_KEY) || 'null');
-    if (entry?.value === 'agamemnon' || entry?.value === 'classic') return entry.value;
+    entry = JSON.parse(localStorage.getItem(STYLE_KEY) || 'null');
   } catch (_) {}
-  const saved = getSaved();
-  return !saved || saved.name === 'dark' ? 'agamemnon' : 'classic';
+  return pageStyle(entry, getSaved());
 }
 export function applyPageStyle(style) {
   document.documentElement.setAttribute('data-style', style === 'classic' ? 'classic' : 'agamemnon');
+  placeChatTitle(style);
   const toggle = document.getElementById('theme-style-toggle');
   if (toggle) toggle.checked = style !== 'classic';
 }
@@ -453,15 +443,10 @@ function _injectFontFace(familyName, variants) {
 export function applyFontDensity(font, density) {
   const f = font || DEFAULT_FONT;
   const d = density || DEFAULT_DENSITY;
-  let family = FONT_MAP[f];
-  if (!family && _customFonts[f]) {
+  const family = fontFamily(f);
+  if (_customFonts[f]) {
     // It's a custom font from the local folder
     _injectFontFace(f, _customFonts[f]);
-    family = "'" + f + "', sans-serif";
-  } else if (!family && !(f in FONT_MAP)) {
-    // A custom font before /api/fonts/custom has answered: keep the family
-    // index.html painted; initThemeUI re-applies it once the face is known.
-    family = "'" + String(f).replace(/'/g, '') + "', sans-serif";
   }
   if (family) document.documentElement.style.setProperty('--font-family', family);
   else document.documentElement.style.removeProperty('--font-family');
@@ -812,7 +797,9 @@ export function initThemeUI() {
         sw.classList.add('active');
         syncPickers(colors);
         const ct = sw.dataset.custom ? customThemes[name] : null;
-        const f = ct && ct.font ? ct.font : DEFAULT_FONT;
+        // Stock swatches change colors, not the user's typeface. A saved
+        // custom theme can intentionally bundle its own font.
+        const f = ct && ct.font ? ct.font : (_getOpts().font || DEFAULT_FONT);
         const d = ct && ct.density ? ct.density : DEFAULT_DENSITY;
         const p = ct && ct.bgPattern ? ct.bgPattern : (THEME_DEFAULT_PATTERN[name] || 'none');
         const ec = ct && ct.bgEffectColor ? ct.bgEffectColor : (THEME_DEFAULT_EFFECT_COLOR[name] || '');
