@@ -95,18 +95,18 @@
 * { box-sizing: border-box; }
 /* One UI typeface. --font-family is the user's explicit choice (theme.js
    sets it, or leaves it unset for "Theme default"); otherwise the page style
-   supplies the face. --ui-chrome-font is tool-window chrome on desktop, where
-   Classic has always used Inter. Code and machine output use --mono-font. */
+   supplies the face. Chrome, controls and content share that choice. Code
+   and machine output use --mono-font, never the UI font preference. */
 :root {
   --theme-font: 'Fira Code', monospace;
-  --theme-chrome-font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+
   --mono-font: 'Fira Code', ui-monospace, monospace;
   --ui-font: var(--font-family, var(--theme-font));
-  --ui-chrome-font: var(--font-family, var(--theme-chrome-font));
+  --ui-chrome-font: var(--ui-font);
 }
 html[data-style="agamemnon"] {
   --theme-font: 'Space Grotesk', system-ui, sans-serif;
-  --theme-chrome-font: 'Space Grotesk', system-ui, sans-serif;
+
 }
 html, body { overflow-x: hidden; height: 100%; margin: 0; overscroll-behavior: none; }
 body {
@@ -43741,5 +43741,9 @@ details.admin-ep-advanced[open] > summary { opacity: 0.8; }
 }
 
 /* Combined agent turn wall time, visible after delivery in both chat themes. */
-.agent-turn-duration{display:inline-flex;align-items:center;margin-inline-start:8px;padding:2px 7px;border:1px solid currentColor;border-radius:999px;font-size:11px;font-weight:600;opacity:.8;white-space:nowrap;vertical-align:middle}
+/* A completed-turn badge is shared by both skins. Font changes can make the
+   header wider than its message, so wrap the real header instead of clipping
+   elapsed time or adding a second skin-specific timer. */
+.msg .role:has(>.agent-turn-duration){max-width:100%;box-sizing:border-box;flex-wrap:wrap;white-space:normal;row-gap:4px}
+.agent-turn-duration{display:inline-flex;align-items:center;flex-shrink:0;margin-inline-start:8px;padding:2px 7px;border:1px solid currentColor;border-radius:999px;font-size:11px;font-weight:600;opacity:.8;white-space:nowrap;vertical-align:middle}
 .agent-thread>.agent-turn-duration{margin:6px 8px;color:var(--text-secondary,var(--fg));}

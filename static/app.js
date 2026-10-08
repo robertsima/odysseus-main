@@ -434,7 +434,11 @@ function initializeEventListeners() {
       } else {
         // Move menu to body so it's not affected by ancestor transforms
         if (exportMenu.parentElement !== document.body) document.body.appendChild(exportMenu);
-        const rect = exportDlBtn.getBoundingClientRect();
+        // Agamemnon moves the shared session title into its heading and
+        // hides the legacy arrow. Anchor to the visible trigger, not a
+        // display:none button's all-zero rectangle.
+        const anchor = exportDlBtn.getClientRects().length ? exportDlBtn : el('current-meta');
+        const rect = anchor.getBoundingClientRect();
         exportMenu.style.top = (rect.bottom + 4) + 'px';
         exportMenu.style.left = 'auto';
         exportMenu.style.right = (window.innerWidth - rect.right) + 'px';
@@ -463,7 +467,19 @@ function initializeEventListeners() {
     const currentMeta = el('current-meta');
     if (currentMeta) {
       currentMeta.style.cursor = 'pointer';
+      currentMeta.tabIndex = 0;
+      currentMeta.setAttribute('role', 'button');
+      currentMeta.setAttribute('aria-label', 'Session actions');
+      currentMeta.addEventListener('keydown', (e) => {
+        // The inline rename editor owns its own Space/Enter behavior.
+        if (e.target !== currentMeta) return;
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          currentMeta.click();
+        }
+      });
       currentMeta.addEventListener('click', (e) => {
+        if (e.target !== currentMeta) return;
         e.stopPropagation();
         exportDlBtn.click();
       });
@@ -1358,6 +1374,8 @@ function initializeEventListeners() {
     .then(r => r.json())
     .then(d => {
       window._isAdmin = !!d.is_admin;
+      // Settings may already be open while this request is in flight.
+      settingsModule.syncAdminVisibility();
       if (d.is_admin && userBarAdmin) userBarAdmin.style.display = '';
       const userBarName = el('user-bar-name');
       const userBarAvatar = el('user-bar-avatar');

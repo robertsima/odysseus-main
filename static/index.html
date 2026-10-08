@@ -15,6 +15,7 @@
        browser-default styling that didn't match the Odysseus theme. -->
   <meta name="format-detection" content="telephone=no, date=no, address=no, email=no">
   <link rel="apple-touch-icon" href="/static/icons/icon-192.png">
+  <script nonce="{{CSP_NONCE}}" src="/static/js/appearancePreferences.js"></script>
   <script nonce="{{CSP_NONCE}}">
   window._odysseusLoadTime = Date.now();
   (function(){
@@ -28,7 +29,7 @@
       var t = JSON.parse(localStorage.getItem('odysseus-theme'));
       if (t && t.name) document.documentElement.setAttribute('data-theme', t.name);
       var style = JSON.parse(localStorage.getItem('odysseus-page-style-v1') || 'null');
-      document.documentElement.setAttribute('data-style', style && (style.value === 'classic' || style.value === 'agamemnon') ? style.value : (t && t.name && t.name !== 'dark' ? 'classic' : 'agamemnon'));
+      document.documentElement.setAttribute('data-style', AgamemnonAppearance.pageStyle(style, t));
       // An absent local preference gets the Agamemnon first-paint palette
       // (THEMES.dark in theme.js, so the gold does not shift once it boots);
       // explicit saved/server themes continue through the existing sync path.
@@ -94,12 +95,10 @@
         }
       }
       // Apply font early
-      // Mirrors FONT_MAP in theme.js; `auto` leaves the page style's typeface.
+      // One resolver for first paint and runtime, including custom families.
       if (t && t.font && t.font !== 'auto') {
-        var fm = {mono:"'Fira Code', monospace",grotesk:"'Space Grotesk', system-ui, sans-serif",sans:"system-ui, -apple-system, 'Segoe UI', sans-serif",serif:"Georgia, 'Times New Roman', serif",humanist:"'Trebuchet MS', 'Segoe UI', sans-serif",editorial:"Palatino, 'Palatino Linotype', 'Book Antiqua', Georgia, serif",classic:"'Times New Roman', Times, serif",code:"'Cascadia Code', 'SFMono-Regular', Consolas, 'Liberation Mono', monospace",rounded:"ui-rounded, 'Arial Rounded MT Bold', system-ui, sans-serif",opendyslexic:"'OpenDyslexic', sans-serif"};
         var fs = document.documentElement.style;
-        if (fm[t.font]) { fs.setProperty('--font-family', fm[t.font]); }
-        else { fs.setProperty('--font-family', "'" + t.font.replace(/'/g,'') + "', sans-serif"); }
+        fs.setProperty('--font-family', AgamemnonAppearance.fontFamily(t.font));
       }
       // Apply density class on html
       if (t && t.density && t.density !== 'comfortable') {
