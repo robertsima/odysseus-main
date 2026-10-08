@@ -148,6 +148,12 @@ async def _run_followup(rec: dict) -> bool:
 
     context = sess.get_context_messages()
     context.append(_background_result_message(rec))
+    # Other jobs of this chat that finished too go into the same turn. On
+    # 2026-10-07 three test runs that ended together each started a turn of
+    # their own, and each turn wrote the worker's hand-back again.
+    others = bg_jobs.take_finished(str(sess.id), exclude=(rec["id"],))
+    for other in others:
+        context.append(_background_result_message(other))
 
     from src import agent_activity as activity
 
@@ -161,8 +167,17 @@ async def _run_followup(rec: dict) -> bool:
     from src import agent_runs
 
     # The chat is working again: every sidebar should show it.
-    with agent_runs.track_external(sess.id, source="bg_job", owner=getattr(sess, "owner", None)):
-        full, tool_events = await _drain_agent(sess, context, run_id=job_run)
+    try:
+        with agent_runs.track_external(sess.id, source="bg_job", owner=getattr(sess, "owner", None)):
+            full, tool_events = await _drain_agent(sess, context, run_id=job_run)
+    except BaseException:
+        bg_jobs.release([other["id"] for other in others])
+        raise
+    for other in others:
+        try:
+            _close_job_run(other, f"read with job {rec['id']}")
+        except Exception:
+            logger.debug("bg job run close failed", exc_info=True)
     activity.run_finished(sess.id, "bg_job", job_run, f"Background job {rec['id']}: chat continued",
                           status="failed" if rec.get("status") == "failed" else "completed",
                           owner=getattr(sess, "owner", None),
@@ -185,8 +200,8 @@ async def _run_followup(rec: dict) -> bool:
         },
     ))
     sm.save_sessions()
-    logger.info("bg-followup: auto-continued session %s for job %s (%d chars, %d tools)",
-                sess.id, rec["id"], len(full), len(tool_events))
+    logger.info("bg-followup: auto-continued session %s for job %s%s (%d chars, %d tools)",
+                sess.id, rec["id"], f" and {len(others)} more" if others else "", len(full), len(tool_events))
     # In a worker chat this reply is the worker's latest result. Without the
     # hand-up it stayed in the worker chat and the parent (and the person) never
     # heard that the work had finished.

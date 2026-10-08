@@ -870,7 +870,8 @@ wait for the turn to end. The loop reads it between rounds
 (`bg_monitor.deliver_to_live_turn`), and so does a `manage_bg_jobs` output read
 of a finished job. Either way the job is marked followed up, so the monitor
 starts no second turn for it. A follow-up turn runs only when the job finishes
-after the turn has ended. On 2026-10-07 two test runs finished mid-turn; each
+after the turn has ended, and one follow-up reads every job of that chat that
+has finished by then. On 2026-10-07 two test runs finished mid-turn; each
 later started its own follow-up turn, and the worker wrote its hand-back three
 times.
 

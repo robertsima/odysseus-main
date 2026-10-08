@@ -724,8 +724,15 @@ _STREAM_STATUS_RETRY_BACKOFF = 5.0
 # "overloaded": like 502/503, nothing was produced, so a replay is safe.
 # 504 stays out: a local connection-pool timeout is reported as 504 and must
 # fall through to the next route at once, not replay the same one.
-_STREAM_RETRY_STATUSES = frozenset({502, 503, 520, 521, 522, 523, 524, 529})
+_STREAM_RETRY_STATUSES = frozenset({500, 502, 503, 520, 521, 522, 523, 524, 529})
 _STREAM_STATUS_RETRIES = 3
+# 2026-10-08: three ChatGPT-backend 500s ("An error occurred while processing
+# your request. You can retry your request"), each the first event after
+# ~181 s, killed a 74-round worker and then both attempts to resume it, while
+# other requests to the same host succeeded. A 500 can also be a local server
+# failing the same request every time (a model that will not load), so it gets
+# one replay, not three.
+_STREAM_ONCE_STATUSES = frozenset({500})
 
 
 def _is_retryable_upstream_status_chunk(chunk: str) -> bool:
@@ -794,7 +801,8 @@ def is_transient_upstream_error(err: BaseException) -> bool:
     if isinstance(err, socket.gaierror):
         return True
     status = getattr(err, "status_code", None)
-    if isinstance(status, int) and (status == 504 or status in _STREAM_RETRY_STATUSES):
+    if isinstance(status, int) and (
+            status == 504 or (status in _STREAM_RETRY_STATUSES and status not in _STREAM_ONCE_STATUSES)):
         return True
     text = str(getattr(err, "detail", "") or err).lower()
     return any(marker in text for marker in _TRANSIENT_UPSTREAM_MARKERS)
@@ -2210,6 +2218,13 @@ def _sse_error_data(chunk: str) -> Optional[Dict]:
                 return None
             return data if isinstance(data, dict) else None
     return None
+
+
+def _sse_error_status(chunk: str) -> Optional[int]:
+    try:
+        return int((_sse_error_data(chunk) or {}).get("status"))
+    except (TypeError, ValueError):
+        return None
 
 
 def _chatgpt_error_chunk(status: int, text: str, **extra) -> str:
@@ -3952,6 +3967,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                     not emitted
                     and status_retries < _STREAM_STATUS_RETRIES
                     and _is_retryable_upstream_status_chunk(chunk)
+                    and not (status_retries >= 1 and _sse_error_status(chunk) in _STREAM_ONCE_STATUSES)
                     and not _is_host_dead(target_url)
                 ):
                     # A 502/503 before any output ("upstream connect error or

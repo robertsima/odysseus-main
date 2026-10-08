@@ -271,7 +271,7 @@ def mark_followed_up(job_id: str) -> None:
         _save(jobs)
 
 
-def take_finished(session_id: str) -> List[Dict[str, Any]]:
+def take_finished(session_id: str, exclude: tuple = ()) -> List[Dict[str, Any]]:
     """Claim this chat's finished, not yet followed-up jobs for its live turn.
 
     Each claimed job is marked followed_up in the same save, so the monitor
@@ -281,7 +281,7 @@ def take_finished(session_id: str) -> List[Dict[str, Any]]:
         return []
     jobs = refresh()
     taken = [rec for rec in jobs.values()
-             if rec.get("session_id") == session_id
+             if rec.get("session_id") == session_id and rec.get("id") not in exclude
              and rec.get("status") in ("done", "failed") and not rec.get("followed_up")]
     if not taken:
         return []
@@ -289,6 +289,18 @@ def take_finished(session_id: str) -> List[Dict[str, Any]]:
         rec["followed_up"] = True
     _save(jobs)
     return [dict(rec) for rec in taken]
+
+
+def release(job_ids) -> None:
+    """Undo a claim whose follow-up failed, so the monitor retries those jobs."""
+    jobs = _load()
+    changed = False
+    for job_id in job_ids:
+        if job_id in jobs:
+            jobs[job_id]["followed_up"] = False
+            changed = True
+    if changed:
+        _save(jobs)
 
 
 def is_followed_up(job_id: str) -> bool:

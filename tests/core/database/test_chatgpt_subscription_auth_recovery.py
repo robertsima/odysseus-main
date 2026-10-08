@@ -651,6 +651,7 @@ def test_status_retry_classification():
     assert not llm_core._is_retryable_upstream_status_chunk(
         chunk(status=502, error="Network error", fallback_eligible=False))
     assert llm_core._is_retryable_upstream_status_chunk(chunk(status=520, text="outage"))
-    for status in (400, 401, 429, 500, 504):
+    assert llm_core._is_retryable_upstream_status_chunk(chunk(status=500, text="You can retry your request"))
+    for status in (400, 401, 429, 504):
         assert not llm_core._is_retryable_upstream_status_chunk(chunk(status=status, text="x"))
     assert not llm_core._is_retryable_upstream_status_chunk('data: {"delta": "503"}\n\n')
