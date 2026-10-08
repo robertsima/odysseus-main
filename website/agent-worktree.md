@@ -54,8 +54,10 @@ unchanged. Vault directories, symlinks, submodules,
 filter-dependent checkouts and other remote hosts are refused. This is **not**
 a general Git/test sandbox. It does not execute hooks or credential helpers.
 Arbitrary commands, unconditional force-push, interactive rebase, remote URL
-changes, and conflict-resolving merges remain unavailable; they cannot be
-smuggled through arbitrary arguments.
+changes, and conflict-resolving merges remain unavailable here; they cannot be
+smuggled through arbitrary arguments. To bring a base branch into one of
+`manage_agent_worktree`'s worktrees, conflicts included, use its `sync` action
+(see "Keeping a branch up to date with its base" below).
 
 **Linked worktrees** (created with `git worktree add`; their `.git` is a file
 reading `gitdir: <main>/.git/worktrees/<name>`) support the read-only actions
@@ -173,9 +175,74 @@ create a worktree, edit, run tests and commit — it simply cannot push.
 5. **You** paste the code to the agent, which calls `publish`. Agamemnon
    re-derives the change from git, spends the code, pushes the branch, and opens
    a **draft** pull request.
+6. **Agent**, when the base branch moves on, calls `sync`. A clean merge goes
+   out with `publish_sync` and no new code; a merge with resolved conflicts
+   goes back through `request_publish`.
 
 The agent has no action that grants an approval. The code exists only in your
 terminal and in the agent's message from you.
+
+## Keeping a branch up to date with its base
+
+Until 2026-10-08 an agent could not bring the base branch into its worktree:
+`manage_git` refuses writes in linked worktrees and merges fast-forward only.
+Every "PR is behind / has conflicts" episode then stalled 35-70 minutes until a
+person finished it on GitHub.
+
+- `{"action": "sync", "name": "<task>"}` fetches the base branch the worktree
+  was started from (its PR target) from the repository's GitHub remote, then
+  runs `git merge --no-edit <remote>/<base>` in the worktree on the host, with
+  hooks off and the bot identity. The tree must be clean and no merge may be in
+  progress; `expected_head` (full SHA) makes it refuse when HEAD moved. The
+  result is `already_up_to_date`, `merged` (new `head_sha`), or `conflicted`.
+- `conflicted` leaves the merge in progress and lists each conflicted file with
+  its kind (both modified, deleted by us...) and its conflict hunks inline,
+  three lines of context each, numbered. Hunks are capped at 4,000 characters
+  a file and 24,000 in all, 40 files at most; `truncated` says when something
+  was cut.
+- The agent resolves with ordinary file edits, then calls `commit`. While a
+  merge is in progress, `commit` refuses any changed file that still holds a
+  conflict marker line (`<<<<<<<`, `=======`, `>>>>>>>`), naming file and line,
+  and otherwise concludes the merge with both parents, also when the
+  resolution kept HEAD's content exactly.
+- `{"action": "sync", "name": "<task>", "abort": true}` runs `git merge --abort`.
+
+### Pushing a base sync without a new approval
+
+A branch whose request was approved and published may push a base sync with
+`{"action": "publish_sync", "name": "<task>"}`, without a new code, only when
+all of these hold:
+
+- HEAD is a merge commit with exactly two parents;
+- its first parent is the head an approval last pushed for this branch: the
+  approved head, or the merge of an earlier sync push recorded on it;
+- that approval verifies (HMAC), was spent on a recorded push, and was made by
+  the same person for the same repository slug, local checkout and branch;
+- its second parent is the base branch's tip on the remote at push time
+  (`ls-remote`), so merging any other ref needs approval;
+- its tree equals what `git merge-tree --write-tree` makes of the two parents
+  with no conflicts, so a merge with hand-resolved conflicts or extra edits
+  needs approval;
+- the remote branch is still at the first parent; the push is lease-bound to it;
+- the original grant expired less than 72 hours ago
+  (`approval.SYNC_EXEMPTION_WINDOW_S`).
+
+Each sync push is appended to the request record with its own HMAC and moves
+the chain forward, so the same step cannot be pushed twice and a hand-edited
+chain entry is rejected. Every exemption is logged at WARNING
+("approval exemption (base sync)"). Anything else gets `SYNC_NEEDS_APPROVAL`
+and goes through `request_publish`.
+
+### Waiting on CI
+
+`checks` reports the PR's `mergeable_state` (`behind`, `dirty`, `blocked`,
+`clean`, ...) with what to do about it. When the required status checks of the
+PR's base branch can be read (repository rulesets and branch protection, both
+readable or absent), a wait ends once every required check has finished; checks
+that are not required and still running are listed under
+`non_blocking_in_progress`. When they cannot be read, or none are required, the
+wait lasts until every check finishes, as before. On 2026-10-08 a report-only
+job held a wait 31 minutes after the required checks had passed.
 
 ## Worktrees of other repositories
 

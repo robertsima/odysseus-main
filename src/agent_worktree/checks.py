@@ -94,6 +94,37 @@ def _summary(grouped: Dict[str, Any], *, total: int, complete: bool, base_ref: s
     return " ".join(parts)
 
 
+# What the PR's mergeable_state means for the agent. 2026-10-07/08: checks
+# never said a PR was behind or conflicted, so agents waited on CI for a PR
+# that could not merge anyway.
+_MERGEABLE_HINTS = {
+    "behind": "The branch is behind its base: call sync, then publish_sync.",
+    "dirty": "The branch conflicts with its base: call sync, resolve the listed conflicts, commit, "
+             "then request_publish.",
+    "blocked": "Merging is blocked by a required check or review.",
+    "clean": "The PR can be merged.",
+    "unstable": "The PR can be merged, but some non-required checks did not pass.",
+    "draft": "The PR is a draft.",
+}
+
+
+async def _required_checks(rcfg: WorktreeConfig, token: str, base_ref: str) -> Optional[set]:
+    try:
+        return await gh.required_check_names(rcfg, token, base_ref)
+    except Exception:  # noqa: BLE001 - unknown requirements keep the full wait
+        logger.info("agent worktree: required checks unavailable for %s", base_ref, exc_info=True)
+        return None
+
+
+def _required_done(runs: List[Dict[str, Any]], required: Optional[set]) -> bool:
+    """Every required check has a run and none of those runs is still going."""
+    if not required:
+        return False
+    seen = {r.get("name") for r in runs}
+    return required <= seen and not any(
+        r.get("name") in required and _bucket(r) == "in_progress" for r in runs)
+
+
 async def _base_runs(rcfg: WorktreeConfig, token: str, base_ref: str, cache: Dict[str, Any]):
     """(base sha, runs) for the PR's base; runs is None when unavailable.
 
@@ -134,6 +165,11 @@ async def branch_checks(
     head_sha = str((pr.get("head") or {}).get("sha") or "")
     base_ref = str((pr.get("base") or {}).get("ref") or "")
     base_cache: Dict[str, Any] = {}
+    # 2026-10-08: a report-only job held a wait 31 minutes after every required
+    # check had finished. With the base's required checks known, the wait ends
+    # when those are done; the rest are listed as non-blocking.
+    required = await _required_checks(rcfg, token, base_ref)
+    runs: List[Dict[str, Any]] = []
 
     started = _monotonic()
     deadline = started + wait
@@ -158,13 +194,21 @@ async def branch_checks(
             base_sha, base_runs = await _base_runs(rcfg, token, base_ref, base_cache)
         grouped = group_checks(runs, base_runs)
         remaining = deadline - _monotonic()
-        if (total > 0 and not grouped["in_progress"]) or remaining <= 0:
+        if (total > 0 and not grouped["in_progress"]) or _required_done(runs, required) or remaining <= 0:
             break
         if await agent_control.wait_or_steer(session_id, min(POLL_INTERVAL_S, remaining)):
             steered = True
             break
 
     complete = total > 0 and not grouped["in_progress"]
+    mergeable_state = pr.get("mergeable_state")
+    if mergeable_state in (None, "unknown"):
+        # GitHub computes it lazily; the first read of a PR often says unknown.
+        try:
+            mergeable_state = (await gh.get_pull_request(rcfg, token, int(found["number"]))).get(
+                "mergeable_state") or mergeable_state
+        except gh.GitHubError:
+            pass
     out: Dict[str, Any] = {
         "exit_code": 0,
         "branch": branch,
@@ -177,7 +221,20 @@ async def branch_checks(
         "waited_s": round(_monotonic() - started, 1) if wait else 0.0,
         "summary": _summary(grouped, total=total, complete=complete, base_ref=base_ref,
                             base_checked=base_runs is not None or not grouped["failed"]),
+        "mergeable_state": mergeable_state or "unknown",
     }
+    if mergeable_state in _MERGEABLE_HINTS:
+        out["mergeable_hint"] = _MERGEABLE_HINTS[mergeable_state]
+        out["summary"] = f"{out['summary']} {_MERGEABLE_HINTS[mergeable_state]}".strip()
+    if required:
+        out["required_checks"] = sorted(required)
+        out["required_complete"] = _required_done(runs, required)
+        waiting_on = [row for row in grouped["in_progress"] if row.get("name") not in required]
+        if out["required_complete"] and waiting_on:
+            out["non_blocking_in_progress"] = waiting_on
+            out["summary"] += (f" All required checks finished; {len(waiting_on)} non-required "
+                               "still running and do not block merging: "
+                               + ", ".join(str(r.get("name")) for r in waiting_on) + ".")
     if grouped["failed"]:
         out["base"] = {"ref": base_ref, "sha": base_sha, "checked": base_runs is not None}
     if poll_error:

@@ -299,10 +299,12 @@ async def _api(cfg: WorktreeConfig, token: str, method: str, path: str, *,
         resp = await client.request(method, url, params=params, json=json_body,
                                     headers=_api_headers(token, accept))
     if resp.status_code >= 400:
-        raise GitHubError(
+        err = GitHubError(
             f"GitHub {method} {path.split('?', 1)[0]} failed ({resp.status_code}): "
             f"{scrub(resp.text, token)[:300]}"
         )
+        err.status = resp.status_code
+        raise err
     if accept != "application/vnd.github+json":
         return resp.text
     try:
@@ -435,6 +437,43 @@ async def branch_head_sha(cfg: WorktreeConfig, token: str, branch: str) -> str:
     data = await _api(cfg, token, "GET", f"/repos/{cfg.repo_slug}/branches/{quote(name, safe='/')}")
     sha = str(((data or {}).get("commit") or {}).get("sha") or "") if isinstance(data, dict) else ""
     return sha if sha and all(ch in "0123456789abcdefABCDEF" for ch in sha) else ""
+
+
+async def required_check_names(cfg: WorktreeConfig, token: str, branch: str) -> Optional[set]:
+    """Names of the status checks a merge into ``branch`` requires, or None.
+
+    Read from both the repository rulesets and classic branch protection. None
+    means "not known": either lookup failed (protection needs admin rights to
+    read), or nothing is required. A 404 means that kind of rule is absent.
+    """
+    from urllib.parse import quote
+
+    name = normalize_branch(branch)
+    if not name:
+        return None
+    names: set = set()
+    try:
+        rules = await _api(cfg, token, "GET",
+                           f"/repos/{cfg.repo_slug}/rules/branches/{quote(name, safe='')}")
+        for rule in rules if isinstance(rules, list) else []:
+            if isinstance(rule, dict) and rule.get("type") == "required_status_checks":
+                for check in ((rule.get("parameters") or {}).get("required_status_checks") or []):
+                    if isinstance(check, dict) and check.get("context"):
+                        names.add(str(check["context"]))
+    except GitHubError as exc:
+        if getattr(exc, "status", None) != 404:
+            return None
+    try:
+        data = await _api(cfg, token, "GET", f"/repos/{cfg.repo_slug}/branches/"
+                          f"{quote(name, safe='')}/protection/required_status_checks")
+        if isinstance(data, dict):
+            names.update(str(c) for c in (data.get("contexts") or []) if c)
+            names.update(str(c["context"]) for c in (data.get("checks") or [])
+                         if isinstance(c, dict) and c.get("context"))
+    except GitHubError as exc:
+        if getattr(exc, "status", None) != 404:
+            return None
+    return names or None
 
 
 async def pull_request_diff(cfg: WorktreeConfig, token: str, number: int) -> Dict:

@@ -626,6 +626,154 @@ def consume(
     return record
 
 
+# ── base-sync pushes without a new code ──────────────────────────────────────
+#
+# 2026-10-07/08: every push needed a fresh code bound to head_sha, including a
+# push that only merged the base into an approved, published branch: 3-4
+# approvals per PR, one wait 21 minutes. Such a push adds nothing the person
+# has not approved (the approved commit plus commits already on the base), so
+# it may go without a code. The git checks (merge parents, the merge tree
+# equal to a clean automatic merge, the base's remote tip) live in
+# service.publish_sync; this module decides which approval it continues and
+# records each step, MAC'd like a grant, so editing the state directory cannot
+# extend the chain.
+
+# How long after the original grant expired its branch may still take sync
+# pushes. A PR waiting on review for days keeps its approval this long.
+SYNC_EXEMPTION_WINDOW_S = 72 * 3600
+
+
+def _sync_mac(cfg: WorktreeConfig, request_id: str, entry: Dict) -> str:
+    payload = {"id": request_id, "sync": {k: entry.get(k) for k in ("from", "to", "base_sha")}}
+    message = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hmac.new(_mac_key(cfg), message, hashlib.sha256).hexdigest()
+
+
+def _same_repository(a: Optional[str], b: Optional[str]) -> bool:
+    if not a or not b:
+        return not a and not b
+    return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+
+
+def _sync_chain_head(
+    cfg: WorktreeConfig,
+    record: Dict,
+    *,
+    repo: str,
+    repository: Optional[str],
+    branch: str,
+    owner: Optional[str],
+) -> str:
+    """The head a sync push of this record may start from, or raise.
+
+    That is the approved head, or the head of the last sync push recorded on
+    it. The record must be a verified grant that was spent on a recorded push,
+    for this repository, branch and owner, inside the window.
+    """
+    if _effective_status(record, cfg=cfg) != STATUS_USED or not record.get("published"):
+        raise ApprovalError("its approval was not spent on a recorded push")
+    grant_rec = _verified_grant(cfg, record)
+    bound = grant_rec["bound"]
+    if not hmac.compare_digest(str(bound.get("repo") or ""), str(repo or "")):
+        raise ApprovalError("it was approved for a different repository")
+    if not hmac.compare_digest(str(bound.get("branch") or ""), str(branch or "")):
+        raise ApprovalError("it was approved for a different branch")
+    if not _same_repository(record.get("repository"), repository):
+        raise ApprovalError("it was approved for a different local checkout")
+    if (record.get("requested_by") or None) != (owner or None):
+        raise ApprovalError("it was requested by a different person")
+    if float(grant_rec.get("expires_at") or 0) + SYNC_EXEMPTION_WINDOW_S <= _now():
+        raise ApprovalError("its approval is too old to carry a sync push")
+    head = str(bound["head_sha"])
+    for entry in record.get("sync_pushes") or []:
+        if (not isinstance(entry, dict) or entry.get("from") != head
+                or not hmac.compare_digest(str(entry.get("mac") or ""),
+                                           _sync_mac(cfg, str(record.get("id") or ""), entry))):
+            logger.warning("agent worktree: sync push chain of %s failed its integrity check",
+                           record.get("id"))
+            raise ApprovalError("its sync push history failed its integrity check")
+        head = str(entry.get("to") or "")
+    return head
+
+
+def find_sync_approval(
+    *,
+    repo: str,
+    repository: Optional[str],
+    branch: str,
+    owner: Optional[str],
+    from_sha: str,
+    cfg: Optional[WorktreeConfig] = None,
+) -> str:
+    """The id of the spent approval whose chain head is ``from_sha``, or raise."""
+    cfg = cfg or load_config()
+    try:
+        names = sorted(os.listdir(_requests_dir(cfg)))
+    except OSError:
+        names = []
+    reasons: List[str] = []
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        try:
+            record = _load(cfg, name[: -len(".json")])
+        except ApprovalError:
+            continue
+        if record.get("branch") != branch:
+            continue
+        try:
+            head = _sync_chain_head(cfg, record, repo=repo, repository=repository,
+                                    branch=branch, owner=owner)
+        except ApprovalError as exc:
+            reasons.append(f"{record.get('id')}: {exc}")
+            continue
+        if head == from_sha:
+            return str(record["id"])
+        reasons.append(f"{record.get('id')}: its last pushed head is {head[:12]}, not {from_sha[:12]}")
+    raise ApprovalError(
+        "no approved and published request of this branch ends at the merge's first parent "
+        f"{from_sha[:12]}" + (" (" + "; ".join(reasons[:5]) + ")" if reasons else "")
+    )
+
+
+def record_sync_push(
+    request_id: str,
+    *,
+    repo: str,
+    repository: Optional[str],
+    branch: str,
+    owner: Optional[str],
+    from_sha: str,
+    to_sha: str,
+    base_sha: str,
+    cfg: Optional[WorktreeConfig] = None,
+) -> Dict:
+    """Append one verified sync push to an approval's chain.
+
+    Re-verifies under the lock; the chain head must still be ``from_sha``, so
+    the same step cannot be recorded twice.
+    """
+    cfg = cfg or load_config()
+    with file_lock(_lock_path(cfg)):
+        record = _load(cfg, request_id)
+        head = _sync_chain_head(cfg, record, repo=repo, repository=repository,
+                                branch=branch, owner=owner)
+        if head != from_sha:
+            raise ApprovalError("the approval's pushed head moved; this sync push was already used")
+        entry = {"from": from_sha, "to": to_sha, "base_sha": base_sha, "at": _now()}
+        entry["mac"] = _sync_mac(cfg, request_id, entry)
+        record["sync_pushes"] = [*(record.get("sync_pushes") or []), entry]
+        published = dict(record.get("published") or {})
+        published["head_sha"] = to_sha
+        record["published"] = published
+        _save(cfg, record)
+    logger.warning(
+        "agent worktree: approval exemption (base sync) id=%s branch=%s %s -> %s base=%s",
+        request_id, branch, from_sha[:12], to_sha[:12], base_sha[:12],
+    )
+    return public_view(record, cfg=cfg)
+
+
 def mark_failed(request_id: str, reason: str, cfg: Optional[WorktreeConfig] = None) -> Dict:
     """Record that a consumed grant did not end in a push and pull request.
 

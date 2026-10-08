@@ -3,8 +3,11 @@
 ``manage_agent_worktree`` is the only way the agent can reach the publishing
 flow, and it is deliberately narrow. It cannot approve its own work: the
 ``publish`` action requires an approval code that only exists after a human ran
-the operator CLI on the host. Everything else it exposes (start, commit, diff,
-status) is local and side-effect-free outside the worktree directory.
+the operator CLI on the host. Everything else it exposes (start, sync, commit,
+diff, status) is local and side-effect-free outside the worktree directory, apart
+from sync's fetch of the base. The one push without a code, ``publish_sync``,
+only carries a clean merge of the base tip onto a head a person already
+approved and published (service.publish_sync).
 
 ``read_app_logs`` is read-only and returns redacted lines — see src/agent_logs.py.
 """
@@ -20,8 +23,8 @@ from src.tool_utils import _parse_tool_args
 
 logger = logging.getLogger(__name__)
 
-_ACTIONS = ("status", "diagnose", "start", "commit", "diff", "request_publish",
-            "publish", "list_requests", "show_request", "checks", "cleanup",
+_ACTIONS = ("status", "diagnose", "start", "sync", "commit", "diff", "request_publish",
+            "publish", "publish_sync", "list_requests", "show_request", "checks", "cleanup",
             "repo_list", "repo_status", "repo_pull")
 
 # Refused by policy rather than merely unknown: `remove` runs
@@ -159,7 +162,8 @@ def _similar_request_hint(request_id: str, cfg, ctx: Dict[str, Any] | None = Non
 
 
 # Actions that work on one named worktree, in the order an agent needs them.
-_BRANCH_ACTIONS = ("diagnose", "commit", "diff", "request_publish", "checks", "cleanup")
+_BRANCH_ACTIONS = ("diagnose", "sync", "commit", "diff", "request_publish", "publish_sync",
+                   "checks", "cleanup")
 
 
 def _next_step(code: str, action: str, branch: str, repository: str = "",
@@ -189,6 +193,17 @@ def _next_step(code: str, action: str, branch: str, repository: str = "",
                          "changes unless the person's own words in this chat allow it"
                          + ("; they do here: retry cleanup with discard_uncommitted=true, which saves "
                             "a recovery snapshot ref first." if can_discard else "."))}
+    if code == "MERGE_IN_PROGRESS":
+        return {"code": code, "next_action": {"action": "diff", "name": branch, **where},
+                "hint": ("Resolve the listed conflicts and call commit, or call sync with "
+                         "abort=true to drop the merge.")}
+    if code == "CONFLICT_MARKERS":
+        return {"code": code, "hint": ("Edit the named files to the intended content (no "
+                                       "<<<<<<< ======= >>>>>>> lines left), then commit again.")}
+    if code == "SYNC_NEEDS_APPROVAL":
+        return {"code": code, "next_action": {"action": "request_publish", "name": branch, **where},
+                "hint": ("Only a clean merge of the base's remote tip into an approved, published "
+                         "head goes without approval. Ask for approval with request_publish.")}
     if code == "MISSING_BRANCH":
         return {"code": code, "required_fields": ["name"],
                 "next_action": {"action": "status"},
@@ -400,6 +415,26 @@ class AgentWorktreeTool:
                         repository=repository or None,
                     ),
                 }
+
+            if action == "sync":
+                # 2026-10-08: agents had no way to bring the base into a managed
+                # worktree; "behind / conflicts" episodes ended with a person on GitHub.
+                abort = args.get("abort") in (True, "true", "True", 1)
+                result = await service.sync(
+                    branch, cfg=cfg, repository=repository or None,
+                    expected_head=None if abort else args.get("expected_head"), abort=abort,
+                    token=None if abort else _repository_read_token(ctx))
+                return {"exit_code": 0, "sync": result}
+
+            if action == "publish_sync":
+                result = await service.publish_sync(
+                    branch, owner=str(ctx.get("owner") or "") or None, cfg=cfg,
+                    repository=repository or None)
+                logger.warning(
+                    "manage_agent_worktree: base sync pushed without a new approval session=%s "
+                    "branch=%s request=%s head=%s", ctx.get("session_id"), result.get("branch"),
+                    result.get("request_id"), result.get("head_sha"))
+                return {"exit_code": 0, "published": result}
 
             if action == "diff":
                 return {"exit_code": 0, "diff": await service.diff_summary(

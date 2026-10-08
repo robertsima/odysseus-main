@@ -70,6 +70,7 @@ MAX_CHANGED_FILES = 500
 __all__ = [
     "WorktreeError", "ensure_worktree", "status", "diagnose", "commit", "diff_summary",
     "request_publish", "publish", "cleanup", "remove_worktree", "repository_config",
+    "sync", "publish_sync",
 ]
 
 
@@ -1102,15 +1103,35 @@ async def commit(
                 raise WorktreeError(
                     f"worktree is on {current or 'a detached HEAD'}, expected {resolved}"
                 )
-            if not await _is_dirty(rcfg, path):
+            # 2026-10-08: a merge started by `sync` is concluded here. While one
+            # is in progress, a file that still holds conflict markers is not
+            # committed, and a resolution identical to HEAD still commits (the
+            # merge commit is what records the base as a parent).
+            merging = await _merge_head(rcfg, path)
+            if merging:
+                marked = await _conflict_marker_files(rcfg, path)
+                if marked:
+                    raise WorktreeError(
+                        "the merge is not resolved: conflict markers remain in "
+                        + "; ".join(marked[:20]) + (" ..." if len(marked) > 20 else "")
+                        + ". Edit those files to the intended content and commit again, or "
+                        "call sync with abort=true to drop the merge.", code="CONFLICT_MARKERS")
+            elif not await _is_dirty(rcfg, path):
                 return {"committed": False, "reason": "nothing to commit",
                         "head_sha": await _head_sha(rcfg, path)}
             await _git(rcfg, ["add", "-A", "--", "."], cwd=path)
             # -- separates the message from anything that could look like a flag.
             await _git(rcfg, ["commit", "-m", text[:4000], "--no-verify"], cwd=path,
                        timeout_s=300)
-            return {"committed": True, "head_sha": await _head_sha(rcfg, path),
-                    "repository": rcfg.source_repo, "branch": resolved}
+            out = {"committed": True, "head_sha": await _head_sha(rcfg, path),
+                   "repository": rcfg.source_repo, "branch": resolved}
+            if merging:
+                out["merge_concluded"] = True
+                out["parents"] = await _parents(rcfg, path, out["head_sha"])
+                out["note"] = ("Merge committed with both parents. A merge with hand-resolved "
+                               "conflicts is published through request_publish and a person's "
+                               "approval; publish_sync only covers a clean automatic merge.")
+            return out
     except LockBusy as exc:
         raise WorktreeError(str(exc))
     except GitError as exc:
@@ -1190,6 +1211,244 @@ def _porcelain_paths(entries: List[str]) -> List[str]:
         if rest and rest not in paths:
             paths.append(rest)
     return paths[:MAX_CHANGED_FILES]
+
+
+# ── base sync ────────────────────────────────────────────────────────────────
+#
+# 2026-10-07/08 diagnostics: agents could not bring the base branch into a
+# managed worktree (manage_git refuses writes in linked worktrees and merges
+# fast-forward only), so every "PR is behind / has conflicts" stalled 35-70
+# minutes until a person finished it on GitHub. `sync` merges the base on the
+# host; a conflicted merge stays in progress for normal edits plus `commit`.
+
+SYNC_FILE_HUNK_CHARS = 4_000
+SYNC_TOTAL_HUNK_CHARS = 24_000
+SYNC_MAX_CONFLICT_FILES = 40
+_MARKER_SCAN_MAX_BYTES = 2_000_000
+# A conflict marker is a whole line: seven '<' or '>' alone or followed by a
+# label, or exactly seven '='. Eight of a kind (a Markdown rule) is not one.
+_MARKER_RE = re.compile(rb"^(?:<{7}(?:[ \t][^\n]*)?|={7}|>{7}(?:[ \t][^\n]*)?)\r?$", re.MULTILINE)
+_CONFLICT_KINDS = {
+    "UU": "both modified", "AA": "both added", "DU": "deleted by us",
+    "UD": "deleted by them", "AU": "added by us", "UA": "added by them", "DD": "both deleted",
+}
+
+
+async def _merge_head(cfg: WorktreeConfig, worktree: str) -> str:
+    """MERGE_HEAD's commit while a merge is in progress, else ""."""
+    res = await _git(cfg, ["rev-parse", "-q", "--verify", "MERGE_HEAD^{commit}"],
+                     cwd=worktree, check=False)
+    sha = res.stdout.strip() if res.ok else ""
+    return sha if is_valid_sha(sha) else ""
+
+
+async def _parents(cfg: WorktreeConfig, worktree: str, sha: str) -> List[str]:
+    res = await _git(cfg, ["rev-list", "--parents", "-n", "1", sha], cwd=worktree)
+    return res.stdout.split()[1:]
+
+
+async def _z_paths(cfg: WorktreeConfig, worktree: str, args: List[str]) -> List[str]:
+    res = await _git(cfg, args, cwd=worktree)
+    return [p for p in res.stdout.split("\0") if p]
+
+
+def _read_text_file(worktree: str, relative: str) -> Optional[bytes]:
+    """A regular file inside the worktree, or None (missing, link, binary, huge)."""
+    full = os.path.join(worktree, *relative.split("/"))
+    if not is_inside(full, worktree) or os.path.islink(full) or not os.path.isfile(full):
+        return None
+    try:
+        if os.path.getsize(full) > _MARKER_SCAN_MAX_BYTES:
+            return None
+        with open(full, "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return None
+    return None if b"\0" in data[:8000] else data
+
+
+async def _conflict_marker_files(cfg: WorktreeConfig, worktree: str) -> List[str]:
+    """``path:line`` of the first conflict marker in each file the commit would take."""
+    paths = await _z_paths(cfg, worktree, ["diff", "--name-only", "-z", "HEAD"])
+    paths += await _z_paths(cfg, worktree, ["ls-files", "--others", "--exclude-standard", "-z"])
+    found: List[str] = []
+    for relative in dict.fromkeys(paths):
+        data = _read_text_file(worktree, relative)
+        match = _MARKER_RE.search(data) if data else None
+        if match:
+            line = data.count(b"\n", 0, match.start()) + 1
+            found.append(f"{relative}:{line}")
+    return found
+
+
+def _conflict_hunks(data: bytes, budget: int) -> Tuple[str, bool]:
+    """The conflict regions of one file with three lines around each, numbered."""
+    lines = data.decode("utf-8", errors="replace").splitlines()
+    spans: List[Tuple[int, int]] = []
+    i = 0
+    while i < len(lines):
+        if lines[i].startswith("<<<<<<<"):
+            j = i + 1
+            while j < len(lines) and not lines[j].startswith(">>>>>>>"):
+                j += 1
+            spans.append((max(0, i - 3), min(len(lines) - 1, j + 3)))
+            i = j + 1
+        else:
+            i += 1
+    text = "\n...\n".join(
+        "\n".join(f"{n + 1}: {lines[n]}" for n in range(a, b + 1)) for a, b in spans)
+    if len(text) > budget:
+        return text[:max(0, budget)], True
+    return text, False
+
+
+async def _conflict_report(cfg: WorktreeConfig, worktree: str) -> Dict[str, Any]:
+    status = await _git(cfg, ["status", "--porcelain", "-z", "--untracked-files=no"], cwd=worktree)
+    kinds: Dict[str, str] = {}
+    for entry in status.stdout.split("\0"):
+        if len(entry) > 3 and entry[:2] in _CONFLICT_KINDS:
+            kinds[entry[3:]] = _CONFLICT_KINDS[entry[:2]]
+    paths = await _z_paths(cfg, worktree, ["diff", "--name-only", "-z", "--diff-filter=U"])
+    files: List[Dict[str, Any]] = []
+    left = SYNC_TOTAL_HUNK_CHARS
+    truncated = len(paths) > SYNC_MAX_CONFLICT_FILES
+    for relative in paths[:SYNC_MAX_CONFLICT_FILES]:
+        row: Dict[str, Any] = {"path": relative, "kind": kinds.get(relative, "conflicted")}
+        data = _read_text_file(worktree, relative)
+        if data is None:
+            row["hunks"] = ""
+            row["note"] = "no text conflict markers to show (deleted, binary or too large)"
+        else:
+            row["hunks"], row["truncated"] = _conflict_hunks(data, min(SYNC_FILE_HUNK_CHARS, left))
+            left -= len(row["hunks"])
+            truncated = truncated or row["truncated"]
+        files.append(row)
+    return {"conflicted_files": files, "conflicted_paths": paths, "truncated": truncated}
+
+
+async def _fetch_base(cfg: WorktreeConfig, base_branch: str, token: Optional[str]) -> Dict[str, str]:
+    """Fetch the base branch from the repository's GitHub remote.
+
+    The same exact-ref fetch manage_git's fetch_branch runs (https GitHub
+    remotes only, token bound to its host), updating refs/remotes/<remote>/<base>.
+    """
+    from src.agent_worktree import repository_remote
+    from src.agent_worktree.repository_sync import RepositorySyncError
+
+    try:
+        result = await asyncio.to_thread(
+            repository_remote._fetch_branch_sync, cfg.source_repo, token, None, base_branch)
+    except RepositorySyncError as exc:
+        raise WorktreeError(f"fetching {base_branch} failed: {exc}", code="FETCH_FAILED")
+    return {"remote": str(result["remote"]), "sha": str(result["after"])}
+
+
+async def _sync_preflight(cfg: WorktreeConfig, resolved: str, path: str,
+                          expected: Optional[str]) -> str:
+    current = await _current_branch(cfg, path)
+    if current != resolved:
+        raise WorktreeError(f"worktree is on {current or 'a detached HEAD'}, expected {resolved}")
+    if await _merge_head(cfg, path):
+        raise WorktreeError(
+            "a merge is already in progress; resolve the conflicts and commit, or call sync "
+            "with abort=true", code="MERGE_IN_PROGRESS")
+    dirty = await _dirty_entries(cfg, path)
+    if dirty:
+        raise WorktreeError(
+            f"worktree has {len(dirty)} uncommitted or untracked path(s); commit them before "
+            "syncing so the merge starts from a known commit", code="WORKTREE_DIRTY")
+    head = await _head_sha(cfg, path)
+    if expected and head != expected:
+        raise WorktreeError(f"registered worktree HEAD is {head}, not {expected}; nothing was "
+                            "merged", code="HEAD_MISMATCH")
+    return head
+
+
+async def sync(
+    branch: str,
+    *,
+    cfg: Optional[WorktreeConfig] = None,
+    repository: Optional[str] = None,
+    expected_head: Optional[str] = None,
+    abort: bool = False,
+    token: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Merge the base branch's remote tip into the worktree, or abort that merge.
+
+    Returns ``result`` = already_up_to_date, merged (new head), conflicted (the
+    merge stays in progress; files and hunks are listed), aborted, or
+    no_merge_in_progress. ``token`` is a read credential for the fetch.
+    """
+    cfg = cfg or load_config()
+    expected = _expected_head(expected_head)
+    rcfg, resolved, path = await _started(cfg, branch, repository)
+    try:
+        if abort:
+            with file_lock(_lock_path(cfg)):
+                if not await _merge_head(rcfg, path):
+                    return {"result": "no_merge_in_progress", "branch": resolved,
+                            "head_sha": await _head_sha(rcfg, path)}
+                await _git(rcfg, ["merge", "--abort"], cwd=path, timeout_s=120)
+                logger.info("agent worktree: sync merge aborted branch=%s", resolved)
+                return {"result": "aborted", "branch": resolved,
+                        "head_sha": await _head_sha(rcfg, path)}
+
+        base_branch = _publish_cfg(rcfg, resolved).base_branch
+        if not base_branch:
+            raise WorktreeError("no base branch is recorded for this worktree to sync with",
+                                code="BASE_REQUIRED")
+        # Local refusals come before the network.
+        with file_lock(_lock_path(cfg)):
+            before = await _sync_preflight(rcfg, resolved, path, expected)
+        fetched = await _fetch_base(rcfg, base_branch, token)
+        target = f"refs/remotes/{fetched['remote']}/{base_branch}"
+        label = f"{fetched['remote']}/{base_branch}"
+        with file_lock(_lock_path(cfg)):
+            if await _sync_preflight(rcfg, resolved, path, expected) != before:
+                raise WorktreeError("HEAD moved while the base was fetched; call sync again",
+                                    code="HEAD_MISMATCH")
+            tip = (await _git(rcfg, ["rev-parse", "--verify", "--quiet", f"{target}^{{commit}}"],
+                              cwd=path, check=False)).stdout.strip()
+            if tip != fetched["sha"]:
+                raise WorktreeError(f"{label} moved while it was fetched; call sync again")
+            out: Dict[str, Any] = {"branch": resolved, "base": label, "base_sha": tip,
+                                   "previous_head": before}
+            if await _is_ancestor(rcfg, tip, before):
+                return {**out, "result": "already_up_to_date", "head_sha": before}
+            # Hooks are off (_hardened_env sets core.hooksPath; --no-verify skips
+            # the merge-commit hooks too), and the bot identity commits.
+            res = await _git(rcfg, ["merge", "--no-edit", "--no-verify", target], cwd=path,
+                             check=False, timeout_s=300)
+            if res.ok:
+                head = await _head_sha(rcfg, path)
+                logger.info("agent worktree: sync merged %s into %s: %s -> %s",
+                            label, resolved, before[:12], head[:12])
+                return {**out, "result": "merged", "head_sha": head,
+                        "fast_forward": len(await _parents(rcfg, path, head)) < 2,
+                        "next_step": (
+                            "Run the affected tests. If this branch was published before, "
+                            "publish_sync pushes this merge without a new approval; otherwise "
+                            "call request_publish.")}
+            if not await _merge_head(rcfg, path):
+                raise WorktreeError(f"merging {label} failed and nothing was merged: "
+                                    f"{(res.stderr or res.stdout).strip()[:400]}")
+            report = await _conflict_report(rcfg, path)
+            if not report["conflicted_paths"]:
+                await _git(rcfg, ["merge", "--abort"], cwd=path, check=False)
+                raise WorktreeError(f"merging {label} stopped without listing conflicts and was "
+                                    f"aborted: {(res.stderr or res.stdout).strip()[:400]}")
+            logger.info("agent worktree: sync of %s into %s conflicted in %d file(s)",
+                        label, resolved, len(report["conflicted_paths"]))
+            return {**out, "result": "conflicted", "head_sha": before, **report,
+                    "next_step": (
+                        "The merge is in progress. Edit each listed file to the intended content "
+                        "(remove every <<<<<<< ======= >>>>>>> line), run the tests, then call "
+                        "commit to conclude the merge. sync with abort=true drops it. A merge "
+                        "with hand-resolved conflicts needs request_publish and approval.")}
+    except LockBusy as exc:
+        raise WorktreeError(str(exc))
+    except GitError as exc:
+        raise WorktreeError(str(exc))
 
 
 # ── publishing ───────────────────────────────────────────────────────────────
@@ -1521,6 +1780,133 @@ async def _push_approved(
         cfg.repo_slug, branch, live["head_sha"][:12], pr.get("number"),
     )
     return {"request_id": request_id, **details}
+
+
+# ── pushing a base sync without a new approval ───────────────────────────────
+
+
+class SyncNotExempt(WorktreeError):
+    """The push is not a clean base sync of an approved head; it needs approval."""
+
+    def __init__(self, message: str):
+        super().__init__(message, code="SYNC_NEEDS_APPROVAL")
+
+
+async def _clean_merge_tree(cfg: WorktreeConfig, worktree: str, ours: str, theirs: str) -> str:
+    """The tree a conflict-free automatic merge of the two commits produces, else ""."""
+    res = await _git(cfg, ["merge-tree", "--write-tree", "--no-messages", ours, theirs],
+                     cwd=worktree, check=False, timeout_s=300)
+    if res.code != 0:
+        # 1 means conflicts; anything else (an old git without --write-tree)
+        # cannot prove the merge clean, so it is not exempt either.
+        return ""
+    tree = res.stdout.strip().splitlines()[0].strip() if res.stdout.strip() else ""
+    return tree if is_valid_sha(tree) else ""
+
+
+async def publish_sync(
+    branch: str,
+    *,
+    owner: Optional[str],
+    cfg: Optional[WorktreeConfig] = None,
+    repository: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Push a base-sync merge of an approved, published head without a new code.
+
+    Exempt only when HEAD is a merge whose first parent is the head an
+    approval of this owner, repository and branch last pushed, whose second
+    parent is the base branch's tip on the remote right now, and whose tree is
+    exactly what a clean automatic merge of the two produces. Anything else
+    (an extra commit, a hand-resolved conflict, another ref merged) raises
+    SyncNotExempt and goes through request_publish.
+    """
+    cfg = cfg or load_config()
+    rcfg, resolved, path = await _started(cfg, branch, repository)
+    pcfg = _publish_cfg(rcfg, resolved)
+    blockers = publish_blockers(pcfg) + _foreign_publish_blockers(pcfg)
+    if not pcfg.base_branch:
+        blockers.append("no base branch is recorded for this worktree")
+    if blockers:
+        raise WorktreeError("publishing is not available: " + "; ".join(blockers))
+    try:
+        lock = file_lock(_lock_path(cfg))
+        lock.__enter__()
+    except LockBusy as exc:
+        raise WorktreeError(str(exc))
+    try:
+        return await _publish_sync_locked(pcfg, resolved, path, owner)
+    except GitError as exc:
+        raise WorktreeError(str(exc))
+    finally:
+        lock.__exit__(None, None, None)
+
+
+async def _publish_sync_locked(
+    cfg: WorktreeConfig, branch: str, path: str, owner: Optional[str]
+) -> Dict[str, Any]:
+    from src.agent_worktree.github import GitHubError, forget_token, resolve_token
+
+    current = await _current_branch(cfg, path)
+    if current != branch:
+        raise WorktreeError(f"worktree is on {current or 'a detached HEAD'}, expected {branch}")
+    if await _merge_head(cfg, path) or await _is_dirty(cfg, path):
+        raise WorktreeError("worktree has an unfinished merge or uncommitted changes; commit first",
+                            code="WORKTREE_DIRTY")
+    head = await _head_sha(cfg, path)
+    parents = await _parents(cfg, path, head)
+    if len(parents) != 2:
+        raise SyncNotExempt(f"HEAD {head[:12]} is not a merge of the base; the commits since the "
+                            "approval need request_publish")
+    approved, merged_in = parents
+    repository = cfg.source_repo if cfg.repository_key else None
+    try:
+        request_id = approval_mod.find_sync_approval(
+            repo=cfg.repo_slug, repository=repository, branch=branch, owner=owner,
+            from_sha=approved, cfg=cfg)
+    except approval_mod.ApprovalError as exc:
+        raise SyncNotExempt(str(exc))
+    expected_tree = await _clean_merge_tree(cfg, path, approved, merged_in)
+    actual_tree = (await _git(cfg, ["rev-parse", f"{head}^{{tree}}"], cwd=path)).stdout.strip()
+    if not expected_tree or expected_tree != actual_tree:
+        raise SyncNotExempt(
+            "the merge is not identical to a clean automatic merge (hand-resolved conflicts or "
+            "extra edits); publish it through request_publish")
+
+    token = None
+    try:
+        token = await resolve_token(cfg)
+        base_tip = await _remote_head(cfg, cfg.base_branch, token)
+        if not base_tip or merged_in != base_tip:
+            raise SyncNotExempt(
+                f"the merged commit {merged_in[:12]} is not the tip of {cfg.base_branch} on the "
+                f"remote ({(base_tip or 'absent')[:12]}); call sync again, or request_publish")
+        remote = await _remote_head(cfg, branch, token)
+        if remote != approved:
+            raise WorktreeError(
+                f"the remote branch is at {(remote or 'absent')[:12]}, not the approved head "
+                f"{approved[:12]}; nothing was pushed", code="REMOTE_MOVED")
+        await _git(
+            cfg,
+            ["push", "--no-verify", f"--force-with-lease=refs/heads/{branch}:{approved}",
+             cfg.remote_url, f"{head}:refs/heads/{branch}"],
+            cwd=cfg.source_repo,  # never the worktree: this command carries a credential
+            extra_env=auth_env(token, cfg.remote_url),
+            secrets=(token,),
+            timeout_s=300,
+        )
+    except GitError as exc:
+        forget_token(cfg)
+        raise WorktreeError(f"git operation failed: {exc}")
+    except GitHubError as exc:
+        raise WorktreeError(str(exc))
+    finally:
+        token = None
+    approval_mod.record_sync_push(
+        request_id, repo=cfg.repo_slug, repository=repository, branch=branch, owner=owner,
+        from_sha=approved, to_sha=head, base_sha=merged_in, cfg=cfg)
+    return {"pushed": True, "approval_exempt": "base_sync", "request_id": request_id,
+            "branch": branch, "head_sha": head, "approved_head": approved,
+            "base_sha": merged_in, "base_branch": cfg.base_branch}
 
 
 # ── approving in the browser ─────────────────────────────────────────────────

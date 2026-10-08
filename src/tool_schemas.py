@@ -429,16 +429,16 @@ FUNCTION_TOOL_SCHEMAS = [
             "name": "manage_agent_worktree",
             "strict": False,
             "description": (
-                "Isolated, human-gated publishing worktree for a repository; send only the fields the chosen action uses. start (name = task name, base = origin/main, a branch or a SHA) makes branch agent/<repo>/<name>; status, diff and commit work in it; request_publish freezes the change; a person approves it in the Agamemnon UI (pushes nothing); show_request and list_requests follow it; checks reads the open PR's CI (wait_seconds waits for it to finish in one call), marking failures that also fail on the base; cleanup removes a clean worktree and refuses one with uncommitted work unless the person said in this chat to discard it (discard_uncommitted). Pass `repository` (absolute path from manage_git repositories) for any project, and the same value on later calls; omit it only for the Agamemnon source checkout. publish needs a request_id and an approval_code a person gives you; you cannot approve your own change. repo_list, repo_status and repo_pull are legacy: use manage_git."
+                "Isolated, human-gated publishing worktree for a repository; send only the fields the chosen action uses. start (name = task name, base = origin/main, a branch or a SHA) makes branch agent/<repo>/<name>; status, diff and commit work in it; sync fetches the base and merges it in (already_up_to_date, merged, or conflicted with files and hunks and the merge left open: edit the files, then commit concludes it and refuses leftover conflict markers; abort=true drops it); request_publish freezes the change; a person approves it in the Agamemnon UI (pushes nothing); show_request and list_requests follow it; checks reads the open PR's CI and mergeable_state (behind: sync; dirty: sync and resolve) (wait_seconds waits for it to finish in one call, or only for the required checks when those are known), marking failures that also fail on the base; cleanup removes a clean worktree and refuses one with uncommitted work unless the person said in this chat to discard it (discard_uncommitted). Pass `repository` (absolute path from manage_git repositories) for any project, and the same value on later calls; omit it only for the Agamemnon source checkout. publish needs a request_id and an approval_code a person gives you; you cannot approve your own change. publish_sync pushes a clean sync merge of the base tip onto a branch a person already approved and published, without a new approval; anything else needs request_publish. repo_list, repo_status and repo_pull are legacy: use manage_git."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["status", "diagnose", "start", "commit", "diff", "request_publish",
-                                 "publish", "list_requests", "show_request", "checks", "cleanup",
-                                 "repo_list", "repo_status", "repo_pull"],
+                        "enum": ["status", "diagnose", "start", "sync", "commit", "diff", "request_publish",
+                                 "publish", "publish_sync", "list_requests", "show_request", "checks",
+                                 "cleanup", "repo_list", "repo_status", "repo_pull"],
                         "description": "Default status; name a branch for one worktree. diagnose is local and read-only. repo_* are legacy; use manage_git for repository discovery/sync."
                     },
                     "repository": {"type": "string", "description": "Absolute checkout path from manage_git repositories, not a URL. Omit only for the Agamemnon source checkout."},
@@ -448,7 +448,8 @@ FUNCTION_TOOL_SCHEMAS = [
                     "wait_seconds": {"type": "integer", "description": "checks only: wait up to this many seconds (0-900, default 0) for running checks to finish; ends early when the user writes"},
                     "base": {"type": "string", "description": "start only: existing ref or commit the new branch starts from (origin/main, a branch, or a SHA). Default: the configured base (Agamemnon) or origin/HEAD"},
                     "expected_base": {"type": "string", "description": "start only: full commit SHA base must resolve to; start refuses on mismatch"},
-                    "expected_head": {"type": "string", "description": "request_publish/diagnose: full tested HEAD SHA. Refuse a different registered HEAD before network; diagnose explains clone drift and metadata blockers."},
+                    "abort": {"type": "boolean", "description": "sync only: abort the merge sync left in progress"},
+                    "expected_head": {"type": "string", "description": "request_publish/diagnose/sync: full tested HEAD SHA. Refuse a different registered HEAD before network; diagnose explains clone drift and metadata blockers."},
                     "message": {"type": "string", "description": "Commit message (action=commit)"},
                     "title": {"type": "string", "description": "Draft PR title (action=request_publish)"},
                     "body": {"type": "string", "description": "Draft PR body (action=request_publish)"},
