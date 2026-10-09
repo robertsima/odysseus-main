@@ -234,6 +234,23 @@ def test_atmosphere_effects_animate_customize_reload_and_respect_motion(open_app
     assert page.evaluate(CANVASES) == 0
 
 
+def test_atmosphere_is_composited_below_opaque_code_blocks(open_app):
+    page = open_app(1440)
+    set_select(page, "#theme-bg-pattern-select", "fog")
+    page.wait_for_function("!!document.querySelector('.bg-atmosphere-canvas')")
+    # A solid diagnostic canvas makes even subtle foreground compositing
+    # visible. Compare rendered pixels, not merely numeric z-index values.
+    page.evaluate("""() => {
+        const c = document.querySelector('.bg-atmosphere-canvas');
+        c.style.background = '#ff00ff'; c.style.visibility = 'hidden';
+    }""")
+    code = page.locator('#chat-history pre').first
+    before = code.screenshot()
+    page.evaluate("document.querySelector('.bg-atmosphere-canvas').style.visibility = 'visible'")
+    unchanged = code.screenshot() == before
+    assert unchanged, "background canvas paints over an opaque reading surface"
+
+
 def test_agamemnon_text_is_legible(open_app):
     page = open_app(1440)
 
