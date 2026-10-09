@@ -196,6 +196,44 @@ def test_animated_effects_replace_each_other_and_classic_rain_stays_behind(open_
     assert classic.evaluate("getComputedStyle(document.querySelector('#rain-canvas')).zIndex") == "0"
 
 
+@pytest.mark.parametrize("width", [1440, 700, 390])
+def test_atmosphere_effects_animate_customize_reload_and_respect_motion(open_app, width):
+    page = open_app(width)
+    for effect in ("fog", "waves", "fireflies", "snowfall", "ripples"):
+        set_select(page, "#theme-bg-pattern-select", effect)
+        page.wait_for_function("(id) => !!document.getElementById(id)", arg=f"{effect}-canvas")
+        page.wait_for_function("(id) => { const c = document.getElementById(id);"
+                               " return c.getContext('2d').getImageData(0, 0, c.width, c.height)"
+                               ".data.some((n, i) => i % 4 === 3 && n > 0); }", arg=f"{effect}-canvas")
+        assert page.evaluate(CANVASES) == 1
+        before = page.evaluate("(id) => document.getElementById(id).toDataURL()", f"{effect}-canvas")
+        page.wait_for_function("([id, before]) => document.getElementById(id).toDataURL() !== before",
+                               arg=[f"{effect}-canvas", before])
+        page.emulate_media(reduced_motion="reduce")
+        page.wait_for_function("!document.querySelector('.bg-atmosphere-canvas')")
+        assert page.evaluate("(p) => document.body.classList.contains('bg-pattern-' + p)", effect)
+        page.emulate_media(reduced_motion="no-preference")
+        page.wait_for_function("!!document.querySelector('.bg-atmosphere-canvas')")
+    page.evaluate("""() => {
+        for (const [id, value] of [['theme-bg-effect-color', '#88aaff'],
+                                  ['theme-bg-size', '200'], ['theme-bg-intensity', '35']]) {
+            const el = document.getElementById(id); el.value = value;
+            el.dispatchEvent(new Event('input', {bubbles: true}));
+        }
+    }""")
+    page.reload()
+    wait_ready(page)
+    assert page.evaluate("document.getElementById('theme-bg-pattern-select').value") == "ripples"
+    assert page.evaluate("getComputedStyle(document.querySelector('.bg-atmosphere-canvas')).opacity") == "0.35"
+    assert page.evaluate("document.getElementById('theme-bg-size').value") == "200"
+    assert page.evaluate("document.getElementById('theme-bg-effect-color').value") == "#88aaff"
+    page.evaluate("document.getElementById('theme-style-toggle').click()")
+    assert style_of(page) == "classic"
+    assert page.evaluate("getComputedStyle(document.querySelector('.bg-atmosphere-canvas')).zIndex") == "0"
+    set_select(page, "#theme-bg-pattern-select", "none")
+    assert page.evaluate(CANVASES) == 0
+
+
 def test_agamemnon_text_is_legible(open_app):
     page = open_app(1440)
 

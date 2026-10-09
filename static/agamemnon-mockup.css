@@ -35,7 +35,7 @@ html[data-style="agamemnon"] body{font-family:var(--ui-font);background-color:va
 html[data-style="agamemnon"] body[class*="bg-pattern-"] .chat-container{background:color-mix(in srgb,var(--ag-bg) 76%,transparent)}
 /* Canvases sit behind Scribe text and all tool windows. Floating windows
    overlap Scribe and each other, so only the chat backdrop is translucent. */
-html[data-style="agamemnon"] body[class*="bg-pattern-"] :is(#synapse-canvas,#rain-canvas,#constellations-canvas,#perlin-flow-canvas,#petals-canvas,#sparkles-canvas,#embers-canvas){z-index:1!important;pointer-events:none}
+html[data-style="agamemnon"] body[class*="bg-pattern-"] :is(#synapse-canvas,#rain-canvas,#constellations-canvas,#perlin-flow-canvas,#petals-canvas,#sparkles-canvas,#embers-canvas,.bg-atmosphere-canvas){z-index:1!important;pointer-events:none}
 html[data-style="agamemnon"] body[class*="bg-pattern-"] #chat-history{background:color-mix(in srgb,var(--ag-panel) 89%,transparent)}
 html[data-style="agamemnon"] .ody-brand-name,html[data-style="agamemnon"] .ody-page-title{display:none!important}
 html[data-style="agamemnon"] .sidebar{width:240px!important;min-width:240px!important;background:var(--ag-rail)!important;border-right:2px solid var(--ag-border)}
