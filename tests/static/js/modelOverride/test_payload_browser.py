@@ -17,7 +17,7 @@ def test_stt_local_endpoint_custom_default_and_locked_controls(open_app):
             payloads.append(route.request.post_data_json)
         route.fulfill(json={'enabled': True, 'provider': 'local', 'model': 'base'})
     page.route('**/api/stt/preferences', preferences)
-    page.route('**/api/models', lambda r: r.fulfill(json={'items': [
+    page.route('**/api/models*', lambda r: r.fulfill(json={'items': [
         {'endpoint_name': 'voice', 'url': 'http://voice/v1', 'model_type': 'stt', 'models': ['whisper-1']}]}))
     page.reload()
     page.wait_for_function('!!window.agentsDashboard')
@@ -53,7 +53,7 @@ def test_stt_local_endpoint_custom_default_and_locked_controls(open_app):
 
 def test_task_model_custom_catalog_default_payloads(open_app):
     page = open_app(1440, height=920)
-    page.route('**/api/models', lambda r: r.fulfill(json={'items': [
+    page.route('**/api/models*', lambda r: r.fulfill(json={'items': [
         {'endpoint_name': 'local', 'url': 'http://local/v1', 'models': ['qwen']}
     ]}))
     payloads = []
@@ -83,6 +83,66 @@ def test_task_model_custom_catalog_default_payloads(open_app):
         page.wait_for_timeout(150)
         assert payloads[-1]['model'] == model
         assert payloads[-1]['endpoint_url'] == endpoint
+
+
+def test_custom_chat_group_compare_routes_reach_session_api(open_app):
+    """An unlisted ID must retain its configured endpoint through each consumer."""
+    page = open_app(1440, height=920)
+    page.route('**/api/models*', lambda r: r.fulfill(json={'items': [
+        {'endpoint_name': 'local', 'url': 'http://local/v1', 'models': ['qwen', 'other']}]}))
+    page.reload()
+    page.wait_for_function('!!window.agentsDashboard')
+    bodies = []
+    def session(route):
+        if route.request.post_data:
+            bodies.append(route.request.post_data)
+        route.fulfill(json={'id': 'custom-session-' + str(len(bodies)), 'ok': True})
+    page.route('**/api/session/**', session)
+    page.route('**/api/session', session)
+    page.locator('#model-picker-btn:visible').click()
+    custom = page.locator('#model-picker-menu:visible .custom-model-route')
+    custom.locator('summary').click()
+    custom.locator('input').fill('private/chat')
+    custom.get_by_role('button', name='Use custom model').click()
+    page.wait_for_timeout(150)
+    assert any('private/chat' in b and 'http://local/v1' in b for b in bodies)
+    page.evaluate('() => { window.groupModule.showModelPicker().then(models => window.groupModule.startGroup(models)); }')
+    group = page.locator('#group-model-picker')
+    group.locator('.custom-model-route summary').click()
+    group.locator('.custom-model-route input').fill('private/group')
+    group.get_by_role('button', name='Use custom model').click()
+    group.locator('.memory-item').filter(has_text='private/group').locator('input').check()
+    group.locator('.memory-item').filter(has_text='qwen').locator('input').check()
+    group.get_by_role('button', name='Start Group Chat').click()
+    group.get_by_role('button', name='Start Group Chat').click()
+    page.wait_for_timeout(250)
+    assert any('private/group' in b and 'http://local/v1' in b for b in bodies)
+    page.evaluate('() => { window.groupModule.stopGroup(); window.compareModule.toggleMode(); }')
+    compare = page.locator('#compare-model-overlay')
+    custom = compare.locator('.custom-model-route').first
+    custom.locator('summary').click()
+    custom.locator('input').fill('private/compare')
+    custom.get_by_role('button', name='Use custom model').click()
+    page.evaluate("async () => { const {default:s} = await import('/static/js/compare/state.js'); s._probed.add('private/compare'); s._probed.add('other'); s._probed.add('qwen'); }")
+    compare.get_by_role('button', name='Start', exact=True).click()
+    page.wait_for_timeout(250)
+    assert any('private/compare' in b and 'http://local/v1' in b for b in bodies)
+    page.route('**/api/search/providers', lambda r: r.fulfill(json=[{'id': 'web', 'label': 'Web', 'available': True}]))
+    page.route('**/api/chat_stream', lambda r: r.fulfill(body='data: [DONE]\n\n', content_type='text/event-stream'))
+    page.reload()
+    page.wait_for_function('!!window.agentsDashboard')
+    page.evaluate('() => { window.compareModule.toggleMode(); }')
+    compare.locator('[data-mode="search"]').click()
+    custom = compare.locator('.custom-model-route').first
+    custom.locator('summary').click()
+    custom.locator('input').fill('private/synthesis')
+    custom.get_by_role('button', name='Use custom model').click()
+    page.evaluate("""async () => {
+      const {default:s} = await import('/static/js/compare/state.js');
+      const {_runSynthForPane} = await import('/static/js/compare/stream.js');
+      await _runSynthForPane(s._searchSynthModels[0], 'Summarize', document.createElement('div'), null, document.createElement('div'));
+    }""")
+    assert any('private/synthesis' in b and 'http://local/v1' in b for b in bodies)
 
 
 def test_assistant_model_custom_and_default_payloads(open_app):
