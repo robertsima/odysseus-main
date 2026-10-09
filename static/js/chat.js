@@ -543,6 +543,7 @@ function _personaNameForTurn() {
     if (!roleEl) return;
     opts = opts || {};
     const tsSpan = roleEl.querySelector('.role-timestamp');
+    const durationBadge = roleEl.querySelector(':scope > .agent-turn-duration');
     const req = requestedModel || actualModel || '';
     const actual = actualModel || requestedModel || '';
     let label = _modelRouteLabel(
@@ -570,6 +571,7 @@ function _personaNameForTurn() {
       roleEl.removeAttribute('title');
     }
     if (tsSpan) roleEl.appendChild(tsSpan);
+    if (durationBadge) roleEl.appendChild(durationBadge);
   }
 
   function _bestKnownStreamModel(routeSnapshot) {
