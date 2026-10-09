@@ -712,6 +712,30 @@ def _record_usage(sess, state: Dict[str, Any], owner: Optional[str]) -> None:
 _PROGRESS_EVENTS = frozenset({"agent_step", "tool_start", "tool_output", "round_usage"})
 
 
+def _tool_target(command: Any) -> Optional[str]:
+    """What a tool call works on, short enough for one line of the agent strip:
+    the path, pattern, query or command head out of its arguments. "round 74 ·
+    read_file" said nothing about where a worker was (2026-10-08)."""
+    text = str(command or "").strip()
+    if not text:
+        return None
+    if text.startswith("{"):
+        try:
+            args = json.loads(text)
+        except (ValueError, TypeError):
+            args = None
+        if isinstance(args, dict):
+            for key in ("path", "file_path", "pattern", "query", "command", "url", "action", "name"):
+                value = args.get(key)
+                if isinstance(value, str) and value.strip():
+                    text = value.strip()
+                    break
+            else:
+                return None
+    text = " ".join(text.split())
+    return text if len(text) <= 60 else text[:57] + "..."
+
+
 def _track_progress(run_id: str, d: Dict[str, Any], state: Dict[str, Any]) -> None:
     """Fold one loop frame into the run's live ``progress`` record.
 
@@ -726,13 +750,16 @@ def _track_progress(run_id: str, d: Dict[str, Any], state: Dict[str, Any]) -> No
     if kind not in _PROGRESS_EVENTS:
         return
     p = state.setdefault("progress", {"round": 1, "tool_calls": 0, "current_tool": None,
+                                      "current_target": None, "waiting": None,
                                       "input_tokens": 0, "cached_tokens": 0, "output_tokens": 0})
     if kind == "agent_step":
         p["round"] = d.get("round", p["round"])
     elif kind == "tool_start":
         p["current_tool"] = d.get("tool")
+        p["current_target"] = _tool_target(d.get("command"))
     elif kind == "tool_output":
         p["current_tool"] = None
+        p["current_target"] = None
         p["tool_calls"] += 1
     else:
         for key, total in (("input", "input_tokens"), ("cached", "cached_tokens"), ("output", "output_tokens")):

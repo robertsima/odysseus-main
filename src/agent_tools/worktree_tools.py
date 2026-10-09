@@ -162,6 +162,23 @@ def _similar_request_hint(request_id: str, cfg, ctx: Dict[str, Any] | None = Non
 
 
 # Actions that work on one named worktree, in the order an agent needs them.
+def _sync_summary(result: Dict[str, Any], abort: bool) -> str:
+    """One plain line on top of a sync result, for the chat's tool card."""
+    result = result or {}
+    if abort:
+        return f"Dropped the unfinished merge on {result.get('branch') or 'the branch'}."
+    outcome, base = result.get("result"), result.get("base") or "the base"
+    if outcome == "already_up_to_date":
+        return f"Already up to date with {base}."
+    if outcome == "merged":
+        return f"Merged {base} into {result.get('branch')} cleanly."
+    if outcome == "conflicted":
+        paths = result.get("conflicted_paths") or []
+        shown = ", ".join(str(p) for p in paths[:5]) + (f" and {len(paths) - 5} more" if len(paths) > 5 else "")
+        return f"Merging {base} conflicts in {len(paths)} file(s): {shown}. The merge is open for resolving."
+    return f"Sync finished: {outcome}."
+
+
 _BRANCH_ACTIONS = ("diagnose", "sync", "commit", "diff", "request_publish", "publish_sync",
                    "checks", "cleanup")
 
@@ -424,7 +441,7 @@ class AgentWorktreeTool:
                     branch, cfg=cfg, repository=repository or None,
                     expected_head=None if abort else args.get("expected_head"), abort=abort,
                     token=None if abort else _repository_read_token(ctx))
-                return {"exit_code": 0, "sync": result}
+                return {"exit_code": 0, "output": _sync_summary(result, abort), "sync": result}
 
             if action == "publish_sync":
                 result = await service.publish_sync(
@@ -434,7 +451,10 @@ class AgentWorktreeTool:
                     "manage_agent_worktree: base sync pushed without a new approval session=%s "
                     "branch=%s request=%s head=%s", ctx.get("session_id"), result.get("branch"),
                     result.get("request_id"), result.get("head_sha"))
-                return {"exit_code": 0, "published": result}
+                return {"exit_code": 0, "output": (
+                    f"Pushed {result.get('branch')} @ {str(result.get('head_sha') or '')[:12]}: a clean merge "
+                    f"of {result.get('base_branch') or 'the base'} onto the approved branch, so no new "
+                    "approval was needed."), "published": result}
 
             if action == "diff":
                 return {"exit_code": 0, "diff": await service.diff_summary(

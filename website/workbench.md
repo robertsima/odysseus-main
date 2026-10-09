@@ -98,7 +98,7 @@ Settings → Tools → Workbench:
 
 ## API
 
-All routes require an admin session.
+All routes require an admin session, except the run routes behind the chat's agent strip: the owner of a chat may list, read, stop and wrap up that chat's runs. The strip line names the current tool's target ("read_file static/js/theme.js") and, while a worker waits to resume after a provider error, says so ("Upstream model error; resuming in 30s (1/2)").
 
 | Route | Purpose |
 |---|---|

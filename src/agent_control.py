@@ -1165,6 +1165,9 @@ async def _launch_worker(*, owner: Optional[str], task: str, profile_name: Optio
             activity.publish(sess.id, "status", note, source="session", run_id=run_id, owner=owner,
                              detail=error_detail or None, level="warning",
                              data={"status": "running", "auto_resume": resumes})
+            # The agent strip shows this instead of a run that looks stuck; the
+            # resumed run's first frame clears it.
+            activity.note_progress(run_id, waiting=note, current_tool=None, current_target=None)
             if parent_session:
                 activity.publish(parent_session, "note", f"Worker {sess.name}: {note}", source="session",
                                  run_id=run_id, owner=owner, level="warning")

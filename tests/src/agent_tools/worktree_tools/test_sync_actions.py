@@ -49,3 +49,14 @@ async def test_publish_sync_without_an_approval_points_to_request_publish(cfg, u
     out = await tool(action="publish_sync", name="task")
     assert out["exit_code"] == 1 and out["code"] == "SYNC_NEEDS_APPROVAL"
     assert out["next_action"]["action"] == "request_publish"
+
+
+async def test_the_tool_card_leads_with_a_plain_line(cfg, upstream, local_fetch, tool):
+    # The chat shows the tool's output; raw JSON alone said nothing at a glance.
+    await start_with_change(cfg, "README.md", "one\nbranch\nthree\n")
+    upstream_commit(upstream, "README.md", "one\ndev\nthree\n")
+
+    out = await tool(action="sync", name="task")
+
+    assert out["output"].startswith("Merging ")
+    assert "conflicts in 1 file(s): README.md" in out["output"]

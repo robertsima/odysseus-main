@@ -486,7 +486,10 @@ Everything under `/api/workbench` is admin-only for cookie sessions — its
 `_admin()` helper calls both `require_user` and `require_admin` — because it
 exposes host checkouts and can write to GitHub. `/api/workspace/browse` is gated
 the same way, since enumerating the server filesystem is the same capability as
-the file tools.
+the file tools. The exception is the chat's agent strip: the person who owns a
+chat may list (`GET /runs?session_id=`), read, stop and wrap up that chat's runs
+(`_chat_viewer`, `_run_viewer`), so a regular user can see and stop their own
+workers. Listing every run stays admin-only.
 
 `src/agent_worktree/config.py` is fail-closed: a missing or malformed value
 counts as "not configured" and blocks publishing, and it re-reads on every call

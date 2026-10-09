@@ -1005,11 +1005,10 @@ register_all([
     ),
     SettingSpec(
         key="agent_core_toolset", type="bool", label="Fixed core tools for workspace agent turns",
-        help=("When a chat has a workspace, every round offers the same core coding tools (files, "
-              "shell, search, web, plan, ask) plus the tools the agent enables and the ones the chat "
-              "already used, instead of picking tools from each message's wording. The model reaches "
-              "anything else with discover_tools. A fixed list keeps the prompt cached and avoids "
-              "rounds lost to a tool the selection missed. Off restores per-turn selection."),
+        help=("In a chat with a project folder, the agent always has the same coding tools (files, "
+              "shell, search, web, memory, plan), plus any its profile adds, instead of a set picked "
+              "from each message. It can still ask for other tools when it needs them. Faster and "
+              "more predictable; turn off to pick tools per message as before."),
         group="Agents", advanced=True,
     ),
     SettingSpec(

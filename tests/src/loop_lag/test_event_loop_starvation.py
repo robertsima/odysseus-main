@@ -208,6 +208,7 @@ async def test_workbench_runs_poll_does_not_block_the_loop_behind_a_slow_registr
     from routes import workbench_routes as wr
 
     monkeypatch.setattr(wr, "_admin", lambda request: "alice")
+    monkeypatch.setattr(wr, "_chat_viewer", lambda request, session_id: None)
     calls = []
 
     def slow_list_runs(**kw):

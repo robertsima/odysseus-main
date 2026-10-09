@@ -28,6 +28,10 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(constants, "DATA_DIR", str(tmp_path / "data"))
     act._reset_for_tests()
     monkeypatch.setattr(wr, "_admin", lambda request: "alice")
+    # The run routes also admit a chat's owner (_chat_viewer / _run_viewer);
+    # these tests are about what the routes answer, as an admin.
+    monkeypatch.setattr(wr, "require_user", lambda request: "alice")
+    monkeypatch.setattr(wr, "require_admin", lambda request: None)
     yield tmp_path
     act._reset_for_tests()
 

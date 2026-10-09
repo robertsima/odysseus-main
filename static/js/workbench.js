@@ -173,7 +173,12 @@ export function fmtProgress(progress, { startedAt = 0, finishedAt = 0, maxRounds
     parts.push(`${fmtTokens(input)} in${cached ? ` (${Math.round((100 * cached) / input)}% cached)` : ''}`);
   }
   if (Number(p.output_tokens)) parts.push(`${fmtTokens(p.output_tokens)} out`);
-  if (p.current_tool) parts.push(String(p.current_tool));
+  if (p.current_tool) {
+    parts.push(p.current_target ? `${p.current_tool} ${p.current_target}` : String(p.current_tool));
+  }
+  // A worker cut off by a provider error waits before it resumes on its own
+  // (agent_control auto-resume); say so rather than look stuck.
+  if (p.waiting) return { text: [...parts, String(p.waiting)].join(' · '), warn: true };
   const warn = !maxRounds && (round > PROGRESS_WARN_ROUNDS || elapsed > PROGRESS_WARN_S);
   return { text: parts.join(' · '), warn };
 }
@@ -186,7 +191,8 @@ function progressHtml(run, cls) {
     startedAt: run.started_at, finishedAt: run.finished_at, maxRounds: Number(d.max_rounds) || 0,
   });
   if (!text) return '';
-  const hint = warn ? 'No round limit and still going; consider Wrap up' : 'Live counters for this run';
+  const hint = progress.waiting ? 'The model provider failed; this worker resumes on its own'
+    : warn ? 'No round limit and still going; consider Wrap up' : 'Live counters for this run';
   return `<span class="${cls}${warn ? ' wb-text-warn' : ''}" title="${esc(hint)}">${esc(text)}</span>`;
 }
 /** A path as dimmed directory + emphasised file name; the directory is what

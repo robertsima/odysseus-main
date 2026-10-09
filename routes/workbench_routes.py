@@ -19,6 +19,7 @@ and workspace routes: it exposes host checkouts and can write to GitHub.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import subprocess
@@ -84,6 +85,52 @@ def _admin(request: Request) -> str:
     return owner
 
 
+def _is_admin(request: Request) -> bool:
+    try:
+        require_admin(request)
+        return True
+    except HTTPException as exc:
+        if exc.status_code == 403:
+            return False
+        raise
+
+
+# The agent strip above the composer is a chat affordance: it shows the
+# workers a chat started and lets the person stop them. It was admin-only with
+# the rest of the Workbench, so on a shared install a regular user could not
+# see or stop the workers of their own chat (2026-10-08). The person who owns
+# the chat may now list, stop and wrap up that chat's runs; everything else
+# here stays admin-only.
+def _chat_viewer(request: Request, session_id: Optional[str]) -> Optional[str]:
+    """None for an admin (sees every run), else the owner of ``session_id``."""
+    owner = require_user(request)
+    if _is_admin(request):
+        return None
+    if not session_id:
+        raise HTTPException(403, "Admin access required")
+    from routes.session_routes import _verify_session_owner
+
+    _verify_session_owner(request, session_id)
+    return owner or ""
+
+
+def _run_viewer(request: Request, run_id: str) -> str:
+    """The caller, when they are an admin or own the chat the run belongs to."""
+    owner = require_user(request)
+    if _is_admin(request):
+        return owner
+    rec = activity.get_run(run_id)
+    if rec is None:
+        raise HTTPException(404, "Run not found")
+    from routes.session_routes import _verify_session_owner
+
+    try:
+        _verify_session_owner(request, str(rec.get("session_id") or ""))
+    except HTTPException:
+        raise HTTPException(404, "Run not found")
+    return owner
+
+
 def _repo_error(exc: Exception) -> HTTPException:
     return HTTPException(400, str(exc)[:500])
 
@@ -145,7 +192,9 @@ def setup_workbench_routes() -> APIRouter:
     @router.get("/runs")
     async def runs(request: Request, session_id: Optional[str] = None, limit: int = 50,
                    active: bool = False):
-        _admin(request)
+        # Off the loop: for a regular user this reads the chat's owner from
+        # the database, and every open tab polls here every few seconds.
+        viewer = await asyncio.to_thread(_chat_viewer, request, session_id)
         # The chat's strip also shows workers its workers started. Every open
         # tab polls this every few seconds; build the answer in a worker
         # thread (the registry sits behind a threading lock that writers hold)
@@ -159,6 +208,10 @@ def setup_workbench_routes() -> APIRouter:
                                        include_descendants=bool(session_id)),
             ttl=0,
         )
+        if viewer is not None:
+            # A run with no owner in this chat's tree is one of its own
+            # (background jobs record none); another owner's run never shows.
+            rows = [r for r in rows if r.get("owner") in (viewer, None)]
         if session_id:
             # The agent strip polls this every few seconds, so log a line only
             # when the answer changes. One line per change is enough to tell,
@@ -169,7 +222,7 @@ def setup_workbench_routes() -> APIRouter:
 
     @router.get("/runs/{run_id}")
     async def run_detail(request: Request, run_id: str):
-        _admin(request)
+        _run_viewer(request, run_id)
         rec = activity.get_run(run_id)
         if rec is None:
             raise HTTPException(404, "Run not found")
@@ -182,7 +235,7 @@ def setup_workbench_routes() -> APIRouter:
         that started it: a sub-agent (its partial answer still reaches the
         parent), a Claude Code background task, a background shell job, or a
         chat turn itself."""
-        _admin(request)
+        _run_viewer(request, run_id)
         from src.agent_control import stop_run
 
         try:
@@ -197,7 +250,7 @@ def setup_workbench_routes() -> APIRouter:
         """Ask a live agent run to finish from what it already has: a steer
         the loop reads between rounds, so the run writes its own hand-back
         instead of being cut off mid-tool the way Stop does."""
-        owner = _admin(request)
+        owner = _run_viewer(request, run_id)
         from src import agent_control
 
         try:
