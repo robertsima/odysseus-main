@@ -14,6 +14,7 @@ import { initColorPickers, attachColorPicker } from './colorPicker.js';
 import { hexToRgb } from './color/hex.js';
 import { makeWindowDraggable } from './windowDrag.js';
 import { snapModalToZone } from './tileManager.js';
+import { ATMOSPHERE_PATTERNS, startAtmosphere } from './backgroundAtmosphere.js';
 
 export const THEMES = {
   // `dark` is the stable legacy theme ID; its visual palette is Agamemnon.
@@ -472,10 +473,13 @@ const _BG_CLASSES = ['bg-pattern-dots', 'bg-pattern-lattice',
   'bg-pattern-grid', 'bg-pattern-diagonal', 'bg-pattern-rings', 'bg-pattern-aurora',
   'bg-pattern-synapse', 'bg-pattern-rain', 'bg-pattern-constellations',
   'bg-pattern-perlin-flow',
-  'bg-pattern-petals', 'bg-pattern-sparkles', 'bg-pattern-embers'];
+  'bg-pattern-petals', 'bg-pattern-sparkles', 'bg-pattern-embers',
+  ...ATMOSPHERE_PATTERNS.map(p => 'bg-pattern-' + p)];
+let _stopAtmosphere = null;
 const _CANVAS_PATTERNS = { synapse: _initSynapse, rain: _initRain, constellations: _initConstellations,
   'perlin-flow': _initPerlinFlow,
-  petals: _initPetals, sparkles: _initSparkles, embers: _initEmbers };
+  petals: _initPetals, sparkles: _initSparkles, embers: _initEmbers,
+  ...Object.fromEntries(ATMOSPHERE_PATTERNS.map(p => [p, () => { _stopAtmosphere = startAtmosphere(p); }])) };
 // 2026-10-03: window.matchMedia is absent when this module is loaded outside a
 // browser (the Node-driven tests, some embedded webviews). Treat that as no
 // reduced-motion preference rather than throwing at import time.
@@ -521,6 +525,7 @@ const _STATIC_PATTERNS = new Set(['none', 'dots']);
 
 export function applyBgPattern(pattern) {
   const p = pattern || 'none';
+  if (_stopAtmosphere) { _stopAtmosphere(); _stopAtmosphere = null; }
   document.body.classList.remove(..._BG_CLASSES);
   // Clean up any canvas backgrounds
   document.querySelectorAll('#synapse-canvas, #rain-canvas, #constellations-canvas, #perlin-flow-canvas, #petals-canvas, #sparkles-canvas, #embers-canvas').forEach(c => c.remove());

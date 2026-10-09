@@ -36,7 +36,11 @@ html[data-style="agamemnon"] body[class*="bg-pattern-"] .chat-container{backgrou
 /* Canvases sit behind Scribe text and all tool windows. Floating windows
    overlap Scribe and each other, so only the chat backdrop is translucent. */
 html[data-style="agamemnon"] body[class*="bg-pattern-"] :is(#synapse-canvas,#rain-canvas,#constellations-canvas,#perlin-flow-canvas,#petals-canvas,#sparkles-canvas,#embers-canvas){z-index:1!important;pointer-events:none}
+/* Atmosphere canvases keep z-index:0, before the positioned chat and sidebar
+   in document order. Raising them paints over opaque code blocks and inputs. */
+html[data-style="agamemnon"] body:has(>.bg-atmosphere-canvas) .chat-container{background:color-mix(in srgb,var(--ag-bg) 40%,transparent)}
 html[data-style="agamemnon"] body[class*="bg-pattern-"] #chat-history{background:color-mix(in srgb,var(--ag-panel) 89%,transparent)}
+html[data-style="agamemnon"] body:has(>.bg-atmosphere-canvas) #chat-history{background:color-mix(in srgb,var(--ag-panel) 40%,transparent)}
 html[data-style="agamemnon"] .ody-brand-name,html[data-style="agamemnon"] .ody-page-title{display:none!important}
 html[data-style="agamemnon"] .sidebar{width:240px!important;min-width:240px!important;background:var(--ag-rail)!important;border-right:2px solid var(--ag-border)}
 html[data-style="agamemnon"] .sidebar .sidebar-header{height:88px;min-height:88px;padding:0 24px 0 32px;align-items:flex-start;border:0!important;box-shadow:none!important}
