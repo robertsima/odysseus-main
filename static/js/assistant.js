@@ -242,22 +242,27 @@ function _renderSettingsBody(body, data, tzList, onClose = _closeModal) {
     }
     epSelect.innerHTML = epHTML;
     // When endpoint changes, load its models
+    let modelLoadGeneration = 0;
     epSelect.addEventListener('change', async () => {
+      const generation = ++modelLoadGeneration;
+      const previousModel = modelSelect.value;
       const url = epSelect.value;
-      if (!url) { modelSelect.innerHTML = '<option value="">(default)</option>'; return; }
+      if (!url) return; // A model-only custom override is valid without an endpoint.
       const ep = endpoints.find(e => e.base_url === url);
       if (!ep) return;
-      modelSelect.innerHTML = '<option value="">loading...</option>';
       try {
         const models = await _fetchJSON(`/api/model-endpoints/${ep.id}/models`);
-        let mHTML = '';
+        if (generation !== modelLoadGeneration || epSelect.value !== url) return;
+        const selectedModel = modelSelect.value !== previousModel ? modelSelect.value : previousModel;
+        let mHTML = '<option value="">Default / inherit</option>';
         const modelIds = (models.models || models || []).map(m => typeof m === 'string' ? m : (m.id || m.name || '')).filter(Boolean);
         for (const mid of sortModelIds(modelIds)) {
-          const sel = mid === crew.model ? ' selected' : '';
+          const sel = mid === selectedModel ? ' selected' : '';
           mHTML += `<option value="${_esc(mid)}"${sel}>${_esc(mid.split('/').pop())}</option>`;
         }
-        modelSelect.innerHTML = mHTML || '<option value="">(no models)</option>';
-      } catch { modelSelect.innerHTML = '<option value="">(failed)</option>'; }
+        if (selectedModel && !modelIds.includes(selectedModel)) mHTML += `<option value="${_esc(selectedModel)}" selected>${_esc(selectedModel)} (custom / unlisted)</option>`;
+        modelSelect.innerHTML = mHTML;
+      } catch { /* Keep the saved/custom value usable when discovery fails. */ }
     });
     // Trigger initial model load if endpoint is pre-selected
     if (epSelect.value) epSelect.dispatchEvent(new Event('change'));

@@ -215,7 +215,8 @@ function controlHtml(s) {
   } else if (s.options_source) {
     const options = sourcedOptions(s, value);
     const blank = `<option value=""${value ? '' : ' selected'}>Use the app default</option>`;
-    input = `<select id="${id}" class="set-input" data-set-key="${esc(s.key)}"${locked}>${blank}${options.map((item) => `<option value="${esc(item.value)}"${String(value) === item.value ? ' selected' : ''}>${esc(item.label)}</option>`).join('')}</select>`;
+    const modelControl = ['models', 'tts_models', 'stt_models'].includes(s.options_source) ? ' data-model-select-control' : '';
+    input = `<select id="${id}" class="set-input" data-set-key="${esc(s.key)}"${modelControl}${locked}>${blank}${options.map((item) => `<option value="${esc(item.value)}"${String(value) === item.value ? ' selected' : ''}>${esc(item.label)}</option>`).join('')}</select>`;
   } else if (s.type === 'choice') {
     const opts = (s.choices || []).map((c, i) => {
       const label = (s.choice_labels || [])[i] || choiceLabel(s, c);

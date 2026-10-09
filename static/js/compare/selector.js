@@ -8,6 +8,7 @@ import { _clearProbeWaves } from './probe.js';
 import uiModule from '../ui.js';
 import spinnerModule from '../spinner.js';
 import themeModule from '../theme.js';
+import { customModelRoute } from '../customModelRoute.js';
 
 const escapeHtml = uiModule.esc;
 
@@ -635,6 +636,11 @@ async function showModelSelector() {
           }
 
           // Search provider picker (smaller)
+          row.appendChild(customModelRoute(chatModels, chosen => {
+            state._searchSynthModels[idx] = chosen;
+            if (!chatModels.some(m => m.id === chosen.id && m.url === chosen.url)) state._cachedModels.push(chosen);
+            renderModelRows();
+          }));
           const provSelect = document.createElement('select');
           provSelect.className = 'cmp-form-control cmp-prov-select';
           available.forEach((p, pi) => {
@@ -754,6 +760,11 @@ async function showModelSelector() {
           row.appendChild(select);
         }
 
+        if (!_shuffled) row.appendChild(customModelRoute(filtered, chosen => {
+          selections[idx] = chosen;
+          if (!models.some(m => m.id === chosen.id && m.url === chosen.url)) models.push(chosen);
+          _remindShuffle(); renderModelRows();
+        }));
         // Research mode: search provider picker next to model
         if (needsProviders && researchProviders.length > 0 && !_shuffled) {
           const provSelect = document.createElement('select');
@@ -1314,6 +1325,14 @@ async function showModelSelector() {
           if (exact) return { ...sel, endpoint: exact.url, endpointId: exact.endpointId, endpointName: exact.endpointName || sel.endpointName || '' };
           const byId = models.find(m => m.id === sel.model);
           if (byId) return { model: byId.id, endpoint: byId.url, endpointId: byId.endpointId, name: byId.name, endpointName: byId.endpointName || '' };
+          // Custom IDs need not be advertised by discovery, but the saved
+          // route must still belong to a currently configured endpoint.
+          const route = models.find(m => m.url === sel.endpoint);
+          if (route && sel.model) {
+            const custom = { ...route, id: sel.model, name: sel.name || sel.model };
+            models.push(custom);
+            return { ...sel, endpointId: route.endpointId };
+          }
           return null;
         });
         // Keep nulls in place so slot positions are preserved

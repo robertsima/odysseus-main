@@ -6,6 +6,7 @@ import uiModule from './ui.js';
 import settingsModule from './settings.js';
 import { sortModelObjects } from './modelSort.js';
 import spinnerModule from './spinner.js';
+import { customModelRoute } from './customModelRoute.js';
 
 const API_BASE = window.location.origin;
 
@@ -431,6 +432,7 @@ function _initModelPickerDropdown() {
     listEl.innerHTML = '';
     listEl.classList.remove('is-loading');
     const all = _getAllModels();
+    listEl.appendChild(customModelRoute(all, _pick));
     const q = (filter || '').trim().toLowerCase();
     const hasAnyModel = all.length > 0;
     listEl.classList.toggle('is-empty', !hasAnyModel);

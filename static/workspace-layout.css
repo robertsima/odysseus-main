@@ -1,0 +1,44 @@
+/* Multi-pane geometry overrides both appearances and remembered edge docks.
+   All other window styling and the legacy one/two-pane layout are unchanged. */
+html body.workspace-split .workspace-section.workspace-section {
+  position: fixed !important;
+  display: flex !important;
+  inset: auto !important;
+  left: var(--section-left) !important;
+  top: var(--section-top) !important;
+  width: var(--section-width) !important;
+  height: var(--section-height) !important;
+  min-width: 0 !important; max-width: none !important;
+  min-height: 0 !important; max-height: none !important;
+  margin: 0 !important; transform: none !important;
+  border-radius: 0 !important; box-sizing: border-box !important;
+  animation: none !important; transition: none !important;
+  overflow: hidden !important; pointer-events: auto !important;
+  border: 1px solid var(--border) !important;
+}
+html body.workspace-split .workspace-parked.workspace-parked { visibility: hidden !important; pointer-events: none !important; }
+html body.workspace-split .workspace-owner.workspace-owner {
+  background: transparent !important; backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important; pointer-events: none !important;
+}
+body.workspace-split .notes-pane-backdrop { pointer-events: none !important; background: transparent !important; }
+body.workspace-split :is(.edge-dock-resize-handle, .doc-resize-handle) { display: none !important; }
+#workspace-section-tabs {
+  position: fixed; top: 0; right: 0; height: 42px; z-index: 11000;
+  display: flex; align-items: center; gap: 4px; overflow-x: auto;
+  padding: 3px 6px; box-sizing: border-box;
+  background: var(--panel); border-bottom: 1px solid var(--border);
+}
+#workspace-section-tabs button {
+  flex: 0 0 auto; padding: 6px 12px; color: var(--fg); background: var(--bg);
+  border: 1px solid var(--border); border-radius: 4px; font: inherit; cursor: pointer;
+}
+#workspace-section-tabs button[aria-pressed="true"] { border-color: var(--red); background: color-mix(in srgb, var(--red) 15%, var(--bg)); }
+.model-override-control { display: flex; flex-wrap: wrap; gap: 6px; width: 100%; min-width: 0; }
+.model-override-control > :is(select, input, textarea) { width: 100%; min-width: 0; box-sizing: border-box; }
+.model-override-control [hidden] { display: none !important; }
+.model-override-status { font-size: 11px; opacity: .75; }
+.custom-model-route { min-width: 0; padding: 6px; font-size: 12px; }
+.custom-model-route summary { cursor: pointer; }
+.custom-model-route[open] { display: flex; flex-direction: column; gap: 6px; }
+.custom-model-route :is(input, select) { width: 100%; min-width: 0; box-sizing: border-box; }

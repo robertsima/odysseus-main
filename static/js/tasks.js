@@ -1586,15 +1586,20 @@ function _showForm(existing, initTaskType, initTriggerType) {
   // Populate model dropdown from /api/models. Value is "endpoint_url::model"
   // so a single field encodes both the model name and which endpoint to call.
   // Blank value (option 0) = inherit session default.
+  const initialModelSel = document.getElementById('task-form-model');
+  const savedModelKey = existing?.model
+    ? (existing.endpoint_url ? `${existing.endpoint_url}::${existing.model}` : existing.model) : '';
+  if (initialModelSel && savedModelKey) {
+    const saved = document.createElement('option'); saved.value = savedModelKey;
+    saved.textContent = existing.model; initialModelSel.appendChild(saved); initialModelSel.value = savedModelKey;
+  }
   fetch(`${API_BASE}/api/models`, { credentials: 'same-origin' })
     .then(r => r.json())
     .then(data => {
-      const modelSel = document.getElementById('task-form-model');
-      if (!modelSel) return;
+      const modelSel = initialModelSel;
+      if (!modelSel?.isConnected) return;
       const items = (data.items || []).filter(it => (it.model_type || 'llm') === 'llm');
-      const curKey = existing?.endpoint_url && existing?.model
-        ? `${existing.endpoint_url}::${existing.model}`
-        : '';
+      const curKey = modelSel.value;
       for (const it of items) {
         if (it.offline || !it.models || it.models.length === 0) continue;
         const group = document.createElement('optgroup');
@@ -1604,7 +1609,7 @@ function _showForm(existing, initTaskType, initTriggerType) {
           const opt = document.createElement('option');
           opt.value = `${it.url}::${m}`;
           opt.textContent = m;
-          if (opt.value === curKey) opt.selected = true;
+          if (Array.from(modelSel.options).some(o => o.value === opt.value)) continue;
           group.appendChild(opt);
         }
         modelSel.appendChild(group);
@@ -1618,6 +1623,7 @@ function _showForm(existing, initTaskType, initTriggerType) {
         opt.selected = true;
         modelSel.appendChild(opt);
       }
+      modelSel.value = curKey;
     })
     .catch(() => {});
 
@@ -1688,6 +1694,9 @@ function _showForm(existing, initTaskType, initTriggerType) {
       if (idx > 0) {
         payload.endpoint_url = modelVal.slice(0, idx);
         payload.model = modelVal.slice(idx + 2);
+      } else {
+        payload.endpoint_url = '';
+        payload.model = modelVal;
       }
     } else {
       // Explicitly clear so a previously-pinned task can return to default.
