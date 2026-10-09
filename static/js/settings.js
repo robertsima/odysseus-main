@@ -2210,6 +2210,9 @@ async function initSttSettingsV2() {
     var provider = provSel.value;
     modelRow.style.display = provider === 'local' || isEndpoint() ? 'flex' : 'none';
     langRow.style.display = provider === 'disabled' ? 'none' : 'flex';
+    // The wrapper owns visibility after enhancement; clear legacy inline hiding.
+    modelSelect.style.display = '';
+    modelInput.style.display = '';
     (modelSelect.closest('.model-override-control') || modelSelect).style.display = isEndpoint() ? 'none' : '';
     (modelInput.closest('.model-override-control') || modelInput).style.display = isEndpoint() ? '' : 'none';
     var selected = providers.find(function(item) { return item.id === provider; });

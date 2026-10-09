@@ -129,3 +129,24 @@ def test_fresh_mobile_tools_focus_new_section(open_app):
     assert page.locator('#agents-dashboard .modal-content').is_visible()
     page.get_by_role('button', name='Chat', exact=True).click()
     assert page.locator('#chat-container').is_visible()
+
+
+@pytest.mark.parametrize('width,height', [(1440, 920), (720, 900)])
+def test_running_progress_does_not_clip_composer(open_app, width, height):
+    """Expanded running-worker/checklist content must yield to usable chat controls."""
+    page = open_app(width, height=height)
+    open_sections(page)
+    page.evaluate('window.documentModule.openPanel()')
+    page.wait_for_selector('.doc-editor-pane.workspace-section')
+    page.wait_for_selector('.chat-progress-shelf .agent-strip-row')
+    page.wait_for_timeout(150)
+    assert page.locator('#chat-history').bounding_box()['height'] >= 60
+    controls = page.locator('.chat-input-bar button:visible, .chat-input-bar textarea:visible')
+    assert controls.count() >= 3
+    assert controls.evaluate_all("""els => els.every(el => {
+      const r = el.getBoundingClientRect(), pane = document.querySelector('#chat-container').getBoundingClientRect();
+      return r.top >= pane.top && r.bottom <= pane.bottom && r.left >= pane.left && r.right <= pane.right
+        && el.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2));
+    })""")
+    page.locator('.chat-input-bar textarea:visible').fill('Composer remains usable')
+    assert page.locator('.chat-input-bar textarea:visible').input_value() == 'Composer remains usable'

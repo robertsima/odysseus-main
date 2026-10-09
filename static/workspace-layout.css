@@ -23,6 +23,15 @@ html body.workspace-split .workspace-owner.workspace-owner {
 }
 body.workspace-split .notes-pane-backdrop { pointer-events: none !important; background: transparent !important; }
 body.workspace-split :is(.edge-dock-resize-handle, .doc-resize-handle) { display: none !important; }
+/* Progress can grow independently of the viewport. In a short section it
+   must scroll rather than displace the transcript and composer below the crop. */
+html body.workspace-split #chat-container.workspace-section { padding: 10px 14px; }
+html body.workspace-split #chat-container .chat-progress-shelf {
+  flex: 0 1 auto; min-height: 0; max-height: 22%; overflow: auto;
+  scrollbar-gutter: stable;
+}
+html body.workspace-split #chat-history { min-height: 60px; padding: 12px 14px; }
+html body.workspace-split #chat-container .chat-input-bar { flex: 0 0 auto; }
 #workspace-section-tabs {
   position: fixed; top: 0; right: 0; height: 42px; z-index: 11000;
   display: flex; align-items: center; gap: 4px; overflow-x: auto;
