@@ -20,6 +20,7 @@ html body.workspace-split .workspace-parked.workspace-parked { visibility: hidde
 html body.workspace-split .workspace-owner.workspace-owner {
   background: transparent !important; backdrop-filter: none !important;
   -webkit-backdrop-filter: none !important; pointer-events: none !important;
+  outline: none !important;
 }
 body.workspace-split .notes-pane-backdrop { pointer-events: none !important; background: transparent !important; }
 body.workspace-split :is(.edge-dock-resize-handle, .doc-resize-handle, .doc-divider) { display: none !important; }

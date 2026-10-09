@@ -45,6 +45,8 @@ def test_third_fourth_fifth_section_and_responsive_restore(workspace_page):
     page = workspace_page
     open_sections(page)
     assert_sections(page, 3)
+    # The legacy modal focus outline must not cut through other grid sections.
+    assert page.locator('.workspace-owner').evaluate_all("els => els.every(el => getComputedStyle(el).outlineStyle === 'none')")
     page.evaluate("""async () => {
       const d = await import('/static/js/document.js?v=20260928docedittarget1');
       d.default.openPanel();
