@@ -41,7 +41,7 @@ export function syncWorkspaceIndicator(path) {
   if (pill) {
     pill.style.display = (path && !chat) ? '' : 'none';
     pill.classList.toggle('active', !!path);
-    if (path) pill.title = `Workspace: ${path}\nFile tools are confined here; shell commands start here but are not sandboxed and can reach outside it.\nClick to clear.`;
+    if (path) pill.title = `Workspace for this chat: ${path}\nFile tools are confined here; shell commands start here but are not sandboxed and can reach outside it.\nClick to clear.`;
   }
   if (name) name.textContent = path ? _basename(path) : '';
   if (overflow) {
@@ -57,10 +57,46 @@ export function applyMode(_mode) {
   syncWorkspaceIndicator(getWorkspace());
 }
 
-export function setWorkspace(path) {
+// The workspace belongs to the chat (2026-10-09). It used to live only in this
+// browser, so a new chat inherited the last chat's folder and a chat's tool
+// set changed with whatever folder the browser held. The browser copy now
+// only holds the open chat's folder, and a new chat's until it is created.
+function _currentSessionId() {
+  try { return window.sessionModule?.getCurrentSessionId?.() || null; } catch (_) { return null; }
+}
+
+async function _saveToChat(sessionId, path) {
+  try {
+    const res = await fetch(`${API_BASE}/api/session/${encodeURIComponent(sessionId)}/settings`, {
+      method: 'PATCH', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspace: path || null }),
+    });
+    if (res.ok) {
+      try { document.dispatchEvent(new CustomEvent('odysseus:chat-settings-changed', { detail: { sessionId } })); } catch (_) {}
+      return true;
+    }
+    let detail = '';
+    try { detail = (await res.json()).detail || ''; } catch (_) {}
+    if (uiModule && uiModule.showToast) uiModule.showToast(`Workspace not saved for this chat${detail ? `: ${detail}` : ''}`);
+  } catch (_) {}
+  return false;
+}
+
+/** Show `path` as the open chat's workspace. `persist` (default) also saves it
+ *  on the chat; restoring a chat's own folder passes false. */
+export function setWorkspace(path, { persist = true } = {}) {
   if (path) Storage.set(KEYS.WORKSPACE, path);
   else Storage.remove(KEYS.WORKSPACE);
   syncWorkspaceIndicator(path || '');
+  const sid = persist ? _currentSessionId() : null;
+  if (sid) {
+    _saveToChat(sid, path || '').then((ok) => {
+      if (!ok && path && getWorkspace() === path) {
+        Storage.remove(KEYS.WORKSPACE);
+        syncWorkspaceIndicator('');
+      }
+    });
+  }
 }
 
 /**

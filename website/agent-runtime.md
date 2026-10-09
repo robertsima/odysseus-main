@@ -109,7 +109,8 @@ the core coding tools (`read_file`, `write_file`, `edit_file`, `apply_patch`,
 `bash`, `python`, `grep`, `glob`, `ls`, `get_workspace`, `preview_file`,
 `update_plan`, `web_search`, `web_fetch`, `recall_tool_output`,
 `recall_chat_history`, `ask_user`, `manage_skills`, `discover_tools`,
-`manage_bg_jobs`), the tools the loadout enables, forced tools, and every tool
+`manage_bg_jobs`, `manage_memory`, `search_documents`, plus the document tools
+when a document is open), the tools the loadout enables, forced tools, and every tool
 the chat was offered or declared earlier (§2.5). Everything else comes through
 `discover_tools`, which attaches and remembers as before.
 
@@ -119,6 +120,14 @@ different set, and on the Codex route only part of the declared list was
 callable per round (52 declared, 29 callable). A round costs 6-7 s at any
 prompt size, so each selection miss that the model repaired with
 `discover_tools` cost a round, and each change to the list cost a cache miss.
+
+The workspace belongs to the chat. The picker saves it on the chat
+(`PATCH /api/session/{id}/settings`, which accepts a folder only from an admin
+or a single-user install and only after `vet_workspace`). Switching chats
+restores that chat's folder, or its agent's, and a new chat starts without
+one. It used to live in the browser, so a new chat inherited the last chat's
+folder, and a chat's tool set changed with whatever folder the browser held
+(2026-10-09: core mode on for two turns of an assistant chat, then off).
 
 Policy is not widened. The list is cut by the same permission view
 `discover_tools` and the executor use (allowlists, disabled tools, the owner's

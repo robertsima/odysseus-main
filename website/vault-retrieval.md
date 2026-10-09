@@ -119,7 +119,7 @@ workspace. Mount each tree once, and make it `rw` if the agent should be able
 to edit it.
 
 **The knowledge base is reachable with a workspace bound.** Binding a workspace
-(`/workspace set`) confines the file tools to that folder — plus the
+(`/workspace set`, saved on that chat) confines the file tools to that folder — plus the
 personal-documents tree, which stays in reach either way. Without that carve-out
 a coding turn could not consult the vault, and editing the vault meant binding
 the vault as the workspace, which revoked everything else.

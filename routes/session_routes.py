@@ -101,6 +101,26 @@ def _reject_compact_during_active_run(session_id: str) -> None:
         raise HTTPException(409, "Session has an active run; try compacting after it finishes")
 
 
+def _vetted_chat_workspace(request: Request, requested: str) -> str:
+    """The canonical folder for a chat's saved workspace, or an HTTP error.
+
+    The workspace picker saves the folder on the chat (2026-10-09: it used to
+    live in the browser and leaked into every chat). Headless workers read
+    the saved value, so it gets the chat route's checks
+    (`_resolve_request_workspace`): only an admin or a single-user install
+    may bind a folder, and `vet_workspace` must accept it.
+    """
+    from src.tool_execution import vet_workspace
+    from src.tool_security import owner_is_admin_or_single_user
+
+    if not owner_is_admin_or_single_user(effective_user(request)):
+        raise HTTPException(403, "Only an admin can set a workspace folder")
+    workspace = vet_workspace(requested)
+    if not workspace:
+        raise HTTPException(400, "That folder cannot be used as a workspace")
+    return workspace
+
+
 def _verify_session_owner(request: Request, session_id: str, session_manager=None):
     """Verify the current user owns the session, honoring single-user modes.
 
@@ -1029,6 +1049,8 @@ def setup_session_routes(
             raise HTTPException(400, "settings must be a JSON object")
         from src import shell_access
         shell_access.guard_settings_change(request, session_id, patch)
+        if patch.get("workspace"):
+            patch["workspace"] = _vetted_chat_workspace(request, patch["workspace"])
         if update_session_settings(session_id, patch) is None:
             raise HTTPException(500, "Failed to save chat settings")
         return _settings_payload(session_id)

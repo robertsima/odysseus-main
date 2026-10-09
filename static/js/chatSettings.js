@@ -74,18 +74,25 @@ function patchSettings(patch) {
 
 // ── restore on chat switch ────────────────────────────────────────────────
 async function onSessionSwitch(sessionId) {
+  const fromNewChat = !state.sessionId;
   state.sessionId = sessionId || null;
   state.data = null;
   state.context = null;
   closePanel();
   render();
-  if (!sessionId) return;
+  if (!sessionId) {
+    // A new chat starts without a folder; the last chat's never carries over.
+    // Only clear when leaving a chat, so a folder picked in the new chat
+    // before its first message (the id is still null then) is not dropped.
+    if (!fromNewChat && workspaceModule?.getWorkspace?.()) workspaceModule.setWorkspace('', { persist: false });
+    return;
+  }
   const seq = ++state.loadSeq;
   try {
     const data = await api(`/api/session/${encodeURIComponent(sessionId)}/settings`);
     if (seq !== state.loadSeq) return;
     state.data = data;
-    restore(data.settings || {});
+    restore(data.settings || {}, { fromNewChat });
   } catch (_) {
     if (seq !== state.loadSeq) return;
     state.data = null;
@@ -93,18 +100,21 @@ async function onSessionSwitch(sessionId) {
   render();
 }
 
-function restore(settings) {
+function restore(settings, { fromNewChat = false } = {}) {
   const toggles = settings.toggles;
   if (toggles && window.__odysseusApplyChatToggles) {
     try { window.__odysseusApplyChatToggles(toggles); } catch (_) {}
   }
-  // Workspace is agent-only and part of how the chat last ran: restore it
-  // (or clear the previous chat's) once the chat has a recorded turn.
-  if (toggles && workspaceModule?.setWorkspace) {
-    const current = workspaceModule.getWorkspace?.() || '';
-    const wanted = settings.workspace || '';
-    if (current !== wanted) workspaceModule.setWorkspace(wanted);
-  }
+  // The workspace belongs to the chat (or the agent that made it). A chat
+  // that has run, or has a saved folder, gets exactly its own. A chat that has
+  // not run yet keeps a folder picked for it while it was new, and saves it;
+  // arriving from another chat, it starts without one.
+  if (!workspaceModule?.setWorkspace) return;
+  const current = workspaceModule.getWorkspace?.() || '';
+  const saved = settings.workspace || '';
+  const next = (saved || toggles) ? saved : (fromNewChat ? current : '');
+  if (next !== current) workspaceModule.setWorkspace(next, { persist: false });
+  else if (next && !saved) workspaceModule.setWorkspace(next);
 }
 
 // ── status line ───────────────────────────────────────────────────────────
@@ -337,6 +347,12 @@ function init() {
     if (e.detail && e.detail.sessionId === state.sessionId) { state.context = e.detail; render(); }
   });
   document.addEventListener('odysseus:model-picked', () => setTimeout(render, 50));
+  // The workspace picker saves on the chat; show the new folder in the line.
+  document.addEventListener('odysseus:chat-settings-changed', (e) => {
+    if (state.sessionId && e.detail?.sessionId === state.sessionId) {
+      api(`/api/session/${encodeURIComponent(state.sessionId)}/settings`).then((d) => { state.data = d; render(); }).catch(() => {});
+    }
+  });
   // An approval decided in the chat can change what the settings report.
   document.addEventListener('odysseus:approval-decided', () => {
     if (state.sessionId) api(`/api/session/${encodeURIComponent(state.sessionId)}/settings`).then((d) => { state.data = d; render(); }).catch(() => {});
