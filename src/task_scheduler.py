@@ -495,6 +495,24 @@ def _model_endpoint_breaker():
 _APPROVAL_UNAVAILABLE_MARK = "none can be given in this run"
 
 
+def _record_task_usage(session_id, metrics, owner) -> None:
+    """Add a scheduled run's tokens to its chat's totals and the usage ledger.
+
+    The chat route does this for foreground turns and run_headless for
+    workers; a scheduled task drives the agent loop itself and was never
+    counted: on 2026-10-09 a 20-round task read 1.4M tokens and its chat
+    showed 0.
+    """
+    if not session_id:
+        return
+    try:
+        from routes.chat_helpers import accumulate_token_usage
+
+        accumulate_token_usage(str(session_id), metrics, owner=owner or None)
+    except Exception:
+        logger.debug("task usage accounting failed", exc_info=True)
+
+
 def _parse_stream_error(chunk: str) -> str:
     """Pull a human-readable message out of an SSE ``event: error`` frame.
 
@@ -3442,6 +3460,8 @@ class TaskScheduler:
                         if data.get("thinking"):
                             continue
                         full_text += data["delta"]
+                    elif data.get("type") == "metrics" and isinstance(data.get("data"), dict):
+                        _record_task_usage(session_id, data["data"], task.owner)
                     elif data.get("type") == "tool_output":
                         calls_log.append({
                             "tool": str(data.get("tool") or "?"),

@@ -444,6 +444,18 @@ class TurnToolDiscovery:
         canonical_exact = next((name for name in permitted if name.casefold() == exact), None)
         semantic = [] if canonical_exact else await self._semantic_names(query, min(limit * 3, 24))
         semantic_rank = {name: index for index, name in enumerate(semantic) if name in permitted}
+        # An MCP tool needs a word of the query in its name, its server's label
+        # or its description (the lexical pass above), not embedding nearness
+        # alone. On 2026-10-09 "add a document to the vault" attached Penpot's
+        # create_rectangle/create_team and GitHub write tools three rounds
+        # running: each grew the declared list (cache 12-21%) and none could
+        # help. Built-ins keep semantic matches; the catalog is small and
+        # curated. Retrieval drops MCP neighbours the same way (tool_index).
+        lexical_names = {row[-1] for row in scored}
+        semantic_rank = {
+            name: index for name, index in semantic_rank.items()
+            if not _MCP_NAME.match(name) or name in lexical_names
+        }
         lexical_rank = {row[-1]: row[1:] for row in scored}
         matched_names = {canonical_exact} if canonical_exact else set(lexical_rank) | set(semantic_rank)
         # A permitted substitute for a named-but-denied tool is a match: it is

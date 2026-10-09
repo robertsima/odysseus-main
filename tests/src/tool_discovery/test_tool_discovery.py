@@ -671,3 +671,25 @@ def test_readonly_workflows_discover_unannotated_mcp_reads_like_the_executor_all
         assert discovery.permitted_names(settings) == {"mcp__penpot__get_profile"}
         assert run(discovery, "get profile", settings=settings)["loaded_names"] == ["mcp__penpot__get_profile"]
         assert run(discovery, "update team", settings=settings)["loaded_names"] == []
+
+
+def test_an_mcp_tool_needs_a_word_of_the_query_not_just_embedding_nearness():
+    # 2026-10-09: "add a document to the vault" attached Penpot's
+    # create_rectangle three rounds running; it shares no word with the query.
+    async def semantic(_query, _limit):
+        return [pp("create_rectangle"), "manage_memory"]
+
+    discovery = TurnToolDiscovery(CATALOG + PENPOT, semantic_search=semantic)
+    result = run(discovery, "add a document to the vault")
+
+    assert pp("create_rectangle") not in result["loaded_names"]
+    assert "manage_memory" in result["loaded_names"]
+
+
+def test_an_mcp_tool_the_query_describes_is_still_found_by_meaning():
+    async def semantic(_query, _limit):
+        return [pp("create_rectangle")]
+
+    discovery = TurnToolDiscovery(CATALOG + PENPOT, semantic_search=semantic)
+
+    assert pp("create_rectangle") in run(discovery, "draw a rectangle shape in penpot")["loaded_names"]
