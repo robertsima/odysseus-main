@@ -9,6 +9,7 @@ import { providerLogo } from './providers.js';
 import { PROMPT_TEMPLATES, getUserTemplates } from './presets.js';
 import { sortModelObjects } from './modelSort.js';
 import Storage from './storage.js';
+import { customModelRoute } from './customModelRoute.js';
 
 let API_BASE = '';
 let _active = false;
@@ -478,6 +479,11 @@ export async function showModelPicker() {
     async function render(filter) {
       list.innerHTML = '<div style="opacity:0.4;padding:8px;font-size:12px;">Loading models…</div>';
       const all = await getAllModels();
+      list.innerHTML = '';
+      list.appendChild(customModelRoute(all, m => {
+        if (!all.some(item => item.mid === m.mid)) all.push(m);
+        render(search.value);
+      }));
       const q = (filter || '').toLowerCase();
       all.forEach(m => {
         if (q && !m.mid.toLowerCase().includes(q) && !m.display.toLowerCase().includes(q) && !m.epName.toLowerCase().includes(q)) return;

@@ -11,6 +11,9 @@ pytestmark = pytest.mark.browser
 
 def test_the_window_brought_forward_covers_the_other_one(open_app):
     page = open_app(1440)
+    # Exercise the legacy two-section floating layout. Chat plus these two
+    # tools now deliberately tiles instead (covered by workspaceLayout).
+    page.evaluate("document.getElementById('chat-container').classList.add('hidden')")
     open_agents(page)
     open_workbench(page, activity=False)
     page.evaluate("document.body.classList.add('theme-frosted')")

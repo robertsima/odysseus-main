@@ -2,6 +2,7 @@
 // User-facing preferences: AI models, search, appearance
 
 import uiModule from './ui.js';
+import { enhanceModelControl, retainModel } from './modelOverride.js';
 import searchModule from './search.js';
 import { byId } from './settings/dom.js';
 import {
@@ -303,12 +304,13 @@ function _fillModelSelect(selectEl, models, selected, keepBlank) {
     opt.textContent = String(m).split('/').pop();
     selectEl.appendChild(opt);
   });
-  if (previous && Array.from(selectEl.options).some(function(o) { return o.value === previous; })) {
-    selectEl.value = previous;
+  if (previous) {
+    retainModel(selectEl, previous);
   } else if (blankText !== null) {
     selectEl.value = '';
   }
   _syncModelLogo(selectEl);
+  if (selectEl.id !== 'set-ctxModelSelect') enhanceModelControl(selectEl);
 }
 
 function _registerAiEndpointRefresh(fn) {
@@ -371,7 +373,7 @@ function _bindFallbackWidget(opts) {
         selectEl.appendChild(o);
       });
     }
-    if (selected) selectEl.value = selected;
+    retainModel(selectEl, selected);
   }
 
   async function save() {
@@ -407,6 +409,7 @@ function _bindFallbackWidget(opts) {
       var mS = document.createElement('select');
       mS.className = 'settings-select';
       fillModels(mS, epS.value, fb.model);
+      retainModel(mS, fb.model);
 
       fb.endpoint_id = epS.value;
       fb.model = mS.value;
@@ -433,6 +436,7 @@ function _bindFallbackWidget(opts) {
       row.appendChild(num);
       row.appendChild(epS);
       row.appendChild(mS);
+      enhanceModelControl(mS);
       row.appendChild(rm);
       fbContainer.appendChild(row);
     });
@@ -610,7 +614,8 @@ async function initImageSettings() {
   } catch (e) { console.warn('Failed to load models for image settings', e); }
   try {
     const settings = await _loadSettingsSnapshot();
-    if (settings.image_model) modelSel.value = settings.image_model;
+    if (settings.image_model) retainModel(modelSel, settings.image_model);
+    enhanceModelControl(modelSel);
     if (settings.image_quality) qualSel.value = settings.image_quality;
     if (enabledToggle) enabledToggle.checked = settings.image_gen_enabled === true;
   } catch (e) { console.warn('Failed to load settings', e); }
@@ -672,7 +677,8 @@ async function initVisionSettings() {
   } catch (e) { console.warn('Failed to load endpoints for vision fallback', e); }
   try {
     const settings = await _loadSettingsSnapshot();
-    if (settings.vision_model) vlSel.value = settings.vision_model;
+    if (settings.vision_model) retainModel(vlSel, settings.vision_model);
+    enhanceModelControl(vlSel);
     _syncModelLogo(vlSel);
     if (enabledToggle) enabledToggle.checked = settings.vision_enabled !== false;
     visionFallbackWidget = _bindFallbackWidget({
@@ -2204,8 +2210,11 @@ async function initSttSettingsV2() {
     var provider = provSel.value;
     modelRow.style.display = provider === 'local' || isEndpoint() ? 'flex' : 'none';
     langRow.style.display = provider === 'disabled' ? 'none' : 'flex';
-    modelSelect.style.display = isEndpoint() ? 'none' : '';
-    modelInput.style.display = isEndpoint() ? '' : 'none';
+    // The wrapper owns visibility after enhancement; clear legacy inline hiding.
+    modelSelect.style.display = '';
+    modelInput.style.display = '';
+    (modelSelect.closest('.model-override-control') || modelSelect).style.display = isEndpoint() ? 'none' : '';
+    (modelInput.closest('.model-override-control') || modelInput).style.display = isEndpoint() ? '' : 'none';
     var selected = providers.find(function(item) { return item.id === provider; });
     var privacy = selected ? selected.privacy : (provider === 'local' ? 'local' : 'browser-service');
     privacyHint.textContent = privacy === 'local'
@@ -2251,7 +2260,7 @@ async function initSttSettingsV2() {
     var prefs = await prefsResponse.json();
     if (prefs.provider) provSel.value = prefs.provider;
     if (prefs.model) {
-      if ([...modelSelect.options].some(function(option) { return option.value === prefs.model; })) modelSelect.value = prefs.model;
+      retainModel(modelSelect, prefs.model);
       modelInput.value = prefs.model;
     }
     langInput.value = prefs.language || '';
@@ -2261,6 +2270,8 @@ async function initSttSettingsV2() {
     message.style.color = 'var(--red, #e55)';
   }
 
+  enhanceModelControl(modelSelect, { defaultLabel: 'Default (base)' });
+  enhanceModelControl(modelInput, { loadCatalog: true, modelType: 'stt', qualified: false, defaultLabel: 'Default (base)' });
   updateEnabled();
   updateVisibility();
 

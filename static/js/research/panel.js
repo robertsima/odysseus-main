@@ -6,6 +6,7 @@ import themeModule from '../theme.js';
 import createResearchSynapse from '../researchSynapse.js';
 import spinnerModule from '../spinner.js';
 import { sortModelIds } from '../modelSort.js';
+import { retainModel } from '../modelOverride.js';
 
 // Rotating research textarea placeholders — pick one at random each
 // time the panel is rendered so the example keeps feeling fresh.
@@ -528,9 +529,9 @@ function _editJob(job) {
   const spEl = document.getElementById('research-search-provider');
   if (spEl && s.search_provider) spEl.value = s.search_provider;
   const epEl = document.getElementById('research-endpoint');
-  if (epEl && s.endpoint_id) epEl.value = s.endpoint_id;
+  if (epEl && s.endpoint_id) { epEl.value = s.endpoint_id; _populateModels(s.endpoint_id); }
   const mEl = document.getElementById('research-model');
-  if (mEl && s.model) mEl.value = s.model;
+  if (mEl && s.model) retainModel(mEl, s.model);
   // Remove the old job so clicking Start/Queue makes a fresh one
   jobs.removeJob(job.id);
   // Scroll the form into view
@@ -618,12 +619,7 @@ function _restoreSavedSettings() {
   if (ep && saved.endpoint_id) {
     ep.value = saved.endpoint_id;
     _populateModels(saved.endpoint_id);
-    if (saved.model) {
-      setTimeout(() => {
-        const model = document.getElementById('research-model');
-        if (model) model.value = saved.model;
-      }, 50);
-    }
+    if (saved.model) retainModel(document.getElementById('research-model'), saved.model);
   }
 }
 
@@ -646,7 +642,9 @@ async function _loadEndpoints() {
 function _populateModels(endpointId) {
   const sel = document.getElementById('research-model');
   if (!sel) return;
+  const value = sel.value;
   sel.innerHTML = '<option value="">Default</option>';
+  retainModel(sel, value);
   if (!endpointId) return;
   const ep = _endpoints.find(e => e.id === endpointId);
   if (!ep || !ep.models) return;
@@ -656,6 +654,7 @@ function _populateModels(endpointId) {
     opt.textContent = m;
     sel.appendChild(opt);
   });
+  retainModel(sel, value);
 }
 
 // ── Job rendering ──

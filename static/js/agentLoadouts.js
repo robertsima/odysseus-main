@@ -193,7 +193,7 @@ export function mountLoadoutsEditor(container, { profiles: initial = [], canEdit
       };
       const head = node('div', 'agent-profile-head');
       head.appendChild(field('Name', mk('input', 'name', { placeholder: 'researcher', maxlength: '40' })));
-      head.appendChild(field('Model', mk('input', 'model', { placeholder: 'workers: empty = calling chat’s model' }), 'model or model@endpoint. Applies to delegated workers only; a chat switched to this loadout keeps its own model.'));
+      head.appendChild(field('Model', mk('input', 'model', { 'data-model-override-control': '', placeholder: 'workers: empty = calling chat’s model' }), 'model or model@endpoint. Applies to delegated workers only; a chat switched to this loadout keeps its own model.'));
       head.appendChild(field('Rounds', mk('input', 'max_rounds', { type: 'number', min: '0', max: '200', placeholder: '0 = no budget' }), 'Round budget (0 = no budget, max 200). A positive number is the round at which the worker is asked to wrap up and hand back what it has, including what is left. It is never cut off mid-task.'));
       const remove = button('Delete');
       remove.classList.add('agent-profile-remove');
@@ -261,8 +261,8 @@ export function mountLoadoutsEditor(container, { profiles: initial = [], canEdit
       grid.appendChild(field('Extra denied tools', mk('textarea', 'disabled_tools', { rows: '2', placeholder: 'Always denied, e.g. bash, send_email' })));
       grid.appendChild(field('Selected skills', mk('textarea', 'skill_names', { rows: '2', placeholder: 'Skill names; used when Skills = Selected' })));
       grid.appendChild(field('Selected MCP servers', mk('textarea', 'allowed_mcp_servers', { rows: '2', placeholder: 'Server IDs; used when MCP = Selected' })));
-      grid.appendChild(field('Allowed models', mk('textarea', 'allowed_models', { rows: '2', placeholder: 'model or model@endpoint; used when Models = Selected' })));
-      grid.appendChild(field('Model fallbacks', mk('textarea', 'model_fallbacks', { rows: '2', placeholder: 'Try in order if the primary model is unavailable' })));
+      grid.appendChild(field('Allowed models', mk('textarea', 'allowed_models', { 'data-model-list-control': '', rows: '2', placeholder: 'model or model@endpoint; used when Models = Selected' })));
+      grid.appendChild(field('Model fallbacks', mk('textarea', 'model_fallbacks', { 'data-model-list-control': '', rows: '2', placeholder: 'Try in order if the primary model is unavailable' })));
       advanced.appendChild(grid);
       card.appendChild(advanced);
       item.appendChild(card);
