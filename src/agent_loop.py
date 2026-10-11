@@ -15,6 +15,7 @@ import os
 import re
 import time
 import logging
+from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, Iterable, List, Dict, Optional, Set, Tuple
 from urllib.parse import urlparse
 
@@ -1775,6 +1776,51 @@ def _delegation_gated_tools(policy: object, text: str) -> Set[str]:
     if _explicit_delegation_requested(text):
         return set()
     return set(_DELEGATION_TOOLS) - _delegation_tools_named_by_user(text)
+
+
+@dataclass
+class DelegationGate:
+    """The delegation tools one turn may not use (`gated`) and the ones it may
+    use only to continue the chat's own workers (`continue_only`)."""
+    policy: str = "explicit"
+    gated: Set[str] = field(default_factory=set)
+    continue_only: Set[str] = field(default_factory=set)
+
+    def as_execution_scope(self, already_disabled: Iterable[str] = ()) -> Dict[str, Any]:
+        """What tool execution needs to word a refusal: tools something else
+        already disabled keep their own message."""
+        return {"policy": self.policy, "gated": frozenset(self.gated - set(already_disabled)),
+                "continue_only": frozenset(self.continue_only)}
+
+
+def _delegation_gate(policy: object, text: str, session_id: Optional[str],
+                     settings: Dict[str, Any], *, from_worker: bool = False) -> DelegationGate:
+    """`_delegation_gated_tools` plus the chat's standing consent.
+
+    Under `explicit` the person's consent is per chat (src.delegation_consent):
+    a message that asks for agents is remembered, and a chat with consent or
+    child workers keeps `send_to_session` and `manage_agent_loadout` for
+    continuing its own workers on later turns. `never` is decided first and no
+    consent reopens it.
+    """
+    mode = str(policy or "explicit").strip().lower()
+    if mode == "never":
+        return DelegationGate(mode, set(_DELEGATION_TOOLS))
+    if from_worker:
+        # A worker's hand-back: delegation was authorised for the request
+        # behind it, and the follow-up budget decides what it may start.
+        return DelegationGate(mode)
+    if mode == "explicit":
+        from src import delegation_consent
+
+        delegation_consent.record_intent(session_id, settings, text)
+    gated = _delegation_gated_tools(mode, text)
+    continue_only: Set[str] = set()
+    if mode == "explicit" and gated:
+        from src import delegation_consent
+
+        gated, continue_only = delegation_consent.relax_gate(gated, session_id, settings)
+    return DelegationGate(mode, gated, continue_only)
 
 
 def _extract_last_user_message(messages: List[Dict]) -> str:
@@ -6195,11 +6241,12 @@ async def stream_agent_loop(
     _latest_user_source = ((_latest_user_message(messages) or {}).get("metadata") or {}).get("source")
     _delegation_text = (_person_request_text(messages) if _latest_user_is_harness_note(messages)
                         else _last_user)
-    if _latest_user_source == "worker" and _delegation_policy != "never":
-        _gated_delegation: Set[str] = set()
-    else:
-        _gated_delegation = _delegation_gated_tools(_delegation_policy, _delegation_text)
-    if "manage_agent_loadout" in _gated_delegation and _delegation_policy != "never":
+    _delegation_state = _delegation_gate(
+        _delegation_policy, _delegation_text, session_id, _agent_settings,
+        from_worker=(_latest_user_source == "worker"))
+    _gated_delegation = _delegation_state.gated
+    if (_delegation_policy != "never"
+            and {"manage_agent_loadout"} & (_gated_delegation | _delegation_state.continue_only)):
         # Naming a saved agent is asking for it: "yes, start Penpot Product
         # Designer" after the loop suggested that loadout.
         try:
@@ -6207,15 +6254,17 @@ async def stream_agent_loop(
 
             if loadout_named_in(_spoken_user_text(_delegation_text)):
                 _gated_delegation.discard("manage_agent_loadout")
+                _delegation_state.continue_only.discard("manage_agent_loadout")
         except Exception:
             logger.debug("[tool-routing] loadout-name check skipped", exc_info=True)
+    _delegation_scope = _delegation_state.as_execution_scope(disabled_tools)
     if _gated_delegation:
         disabled_tools.update(_gated_delegation)
         _mark_dropped(_gated_delegation, f"delegation-policy:{_delegation_policy}")
         # Only non-empty when the user wrote a launcher's name out: `explicit`
         # means "when the human asks", and naming the tool is a more specific
         # ask than any phrase the recogniser matches.
-        _named_delegation = set(_DELEGATION_TOOLS) - _gated_delegation
+        _named_delegation = set(_DELEGATION_TOOLS) - _gated_delegation - _delegation_state.continue_only
         if _named_delegation:
             logger.info(
                 "[tool-routing] delegation policy=%s; kept %d tool(s) the user named "
@@ -8105,6 +8154,7 @@ async def stream_agent_loop(
                     security_context=run_security,
                     exact_approval=exact_approval,
                     allow_private=allow_private,
+                    delegation_gate=_delegation_scope,
                 )
             finally:
                 await approved_progress_q.put(None)
@@ -9707,6 +9757,7 @@ async def stream_agent_loop(
                             security_context=run_security,
                             allow_private=allow_private,
                             tool_discovery=_turn_discovery,
+                            delegation_gate=_delegation_scope,
                         )
                     finally:
                         # Sentinel so the drainer knows to stop.

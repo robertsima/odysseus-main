@@ -117,6 +117,16 @@ def widened(current: Optional[Dict[str, Any]], patch: Dict[str, Any]) -> list:
     return out
 
 
+def is_agent_call(request: Any) -> bool:
+    """Whether the request came through the agent's loopback tool, not a person."""
+    from core.middleware import INTERNAL_TOOL_HEADER
+    from src.owner_identity import INTERNAL_TOOL_USER
+
+    return (request.headers.get(INTERNAL_TOOL_HEADER) is not None
+            or getattr(request.state, "current_user", None) == INTERNAL_TOOL_USER
+            or getattr(request.state, "api_token", False))
+
+
 def guard_settings_change(request: Any, session_id: str, patch: Dict[str, Any]) -> None:
     """Refuse a chat-settings change a person did not make, or may not make.
 
@@ -127,8 +137,7 @@ def guard_settings_change(request: Any, session_id: str, patch: Dict[str, Any]) 
     """
     from fastapi import HTTPException
 
-    from core.middleware import INTERNAL_TOOL_HEADER
-    from src.owner_identity import INTERNAL_TOOL_USER, auth_disabled
+    from src.owner_identity import auth_disabled
 
     try:
         from core.database import get_session_settings
@@ -139,10 +148,7 @@ def guard_settings_change(request: Any, session_id: str, patch: Dict[str, Any]) 
     wider = widened(current, patch)
     if not wider:
         return
-    agent_call = (request.headers.get(INTERNAL_TOOL_HEADER) is not None
-                  or getattr(request.state, "current_user", None) == INTERNAL_TOOL_USER
-                  or getattr(request.state, "api_token", False))
-    if agent_call:
+    if is_agent_call(request):
         raise HTTPException(403, "Only a person in the Agamemnon UI can widen a chat's shell or vault access "
                                  f"({', '.join(wider)})")
     if normalize(patch.get("shell_access")) == "host" and not auth_disabled():

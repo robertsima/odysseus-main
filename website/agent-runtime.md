@@ -129,6 +129,18 @@ one. It used to live in the browser, so a new chat inherited the last chat's
 folder, and a chat's tool set changed with whatever folder the browser held
 (2026-10-09: core mode on for two turns of an assistant chat, then off).
 
+A turn that sends no workspace leaves the saved one alone and runs in it (a turn with no preset likewise keeps the saved `preset_id`), after
+`vet_workspace` and for the same callers; only a vetted, non-empty workspace on
+a turn replaces it, and clearing is the settings `PATCH` with `null` (before
+2026-10-10 every such turn erased the folder, and a later resume found none).
+A worker launch or `send_to_session` resume takes the target chat's saved
+workspace first and the caller's second. When the saved path no longer passes
+`vet_workspace`, the preflight refusal names that path and why (missing, not a
+folder, application data, sensitive) instead of saying the chat has none, and
+every candidate it lists passes `vet_workspace`, including managed worktrees at
+`agent_worktrees/<slug>` and `agent_worktrees/_repos/<key>/<slug>`. A workspace
+passed explicitly on a resume is saved on the target chat.
+
 Policy is not widened. The list is cut by the same permission view
 `discover_tools` and the executor use (allowlists, disabled tools, the owner's
 baseline, plan and read-only modes), bash and python follow the Shell gate,
@@ -248,7 +260,7 @@ and selection was invisible.
 
 | gate | effect |
 | --- | --- |
-| delegation policy | `never`, or `explicit` without an explicit request, disables delegation launchers, loadout creation and qualified MCP `run_pi_task` tools — `manage_agent_loadout` included, whose `start` action launches a worker; `_DELEGATION_TOOLS` says why a name set cannot cover remote-execution MCP tools and `mcp_access` must. Under `explicit`, a launcher the user **typed the name of** is kept: naming the tool is a more specific ask than any phrase the recogniser matches, and only that tool is kept. The name has to be said, not shown — a fenced block, a quoted line or a pasted log does not count, so `run the agent tests` and a transcript of the refusal both stay gated. `never` is not re-opened by any wording |
+| delegation policy | `never`, or `explicit` without the chat's consent, disables delegation launchers, loadout creation and qualified MCP `run_pi_task` tools — `manage_agent_loadout` included, whose `start` action launches a worker; `_DELEGATION_TOOLS` says why a name set cannot cover remote-execution MCP tools and `mcp_access` must. Under `explicit`, a launcher the user **typed the name of** is kept: naming the tool is a more specific ask than any phrase the recogniser matches, and only that tool is kept. Consent is per chat, not per message: once a message asked for an agent ("have the Lead Engineer worker implement X", "use the lead engineer to finish this"), or the chat has child workers, or the person switched the tool on in the chat's tool settings (denylist or `tool_access=selected` allowlist), later turns may still resume that chat's own workers (`send_to_session` to them, `manage_agent_loadout` status and stop). Starting a new worker needs that turn's wording or the tool setting (`src/delegation_consent.py`). The name has to be said, not shown — a fenced block, a quoted line or a pasted log does not count, so `run the agent tests` and a transcript of the refusal both stay gated. `never` is not re-opened by any wording |
 | tool allowlist | the chat's `tool_access`/`enabled_tools` (§6), inverted against the tools that exist on *this* turn |
 | model / memory / skill access | the chat's loadout (§6) removes what it is not allowed |
 | plan mode | allowlist of read-only tools only |
@@ -855,6 +867,11 @@ range 0–8). **Provider-wide concurrent jobs** is Claude Code's shared process
 capacity. Increasing provider capacity to eight does not grant each parent
 permission to launch eight children. Capacity refusals name the parent-chat
 scope and its setting; monitoring and stopping remain available at capacity.
+They also list the live workers holding the slots (session id and title) and the
+options: wait for the hand-back, steer the same worker with `send_to_session`,
+or stop it with `manage_agent_loadout action=stop`. A `send_to_session` whose
+target is the worker holding the slot is queued as a steer for that worker's
+next round instead of being refused.
 
 ### The tool allowlist
 
@@ -1416,6 +1433,19 @@ an entry that resolves but is switched off for the turn is policy working as
 configured, not metadata to fix. `manage_skills action=add` says so at authoring
 time. Domains starved by a deliberately narrowed loadout are recorded as expected
 observations rather than warnings.
+Under `explicit`, consent for continuing work is a property of the chat
+(`src/delegation_consent.py`). A message that passes the explicit check is
+stored as `delegation_granted`; a prohibition stores `False`. A chat with that
+grant, or with child workers it launched, keeps `send_to_session` (to its own
+workers only) and the `status` and `stop` actions of `manage_agent_loadout` on
+later turns, so "finish it" resumes the worker the person asked for. Starting a
+new worker, or any other loadout action, still needs that turn's wording. A
+delegation tool the person switches on in the chat's tool settings (off in the
+denylist, or added to a `tool_access=selected` allowlist) is recorded in
+`delegation_tools_enabled` (a model calling the settings API is not a
+person) and is open for that tool. `never` stays absolute. A refused delegation
+tool says it is the chat's delegation policy and what unlocks it, not that the
+tool is disabled by the user.
 Stop/status/wait requests do not authorize new launches. Research branches with
 bound web or MCP tools must make successful calls to those bindings before the
 controller can mark their work complete. A missing permission-store read blocks

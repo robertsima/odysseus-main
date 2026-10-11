@@ -1051,8 +1051,19 @@ def setup_session_routes(
         shell_access.guard_settings_change(request, session_id, patch)
         if patch.get("workspace"):
             patch["workspace"] = _vetted_chat_workspace(request, patch["workspace"])
-        if update_session_settings(session_id, patch) is None:
+        tool_settings_edited = bool({"disabled_tools", "enabled_tools", "tool_access"} & set(patch))
+        before_settings = {}
+        if tool_settings_edited:
+            from core.database import get_session_settings
+            before_settings = get_session_settings(session_id) or {}
+        saved_settings = update_session_settings(session_id, patch)
+        if saved_settings is None:
             raise HTTPException(500, "Failed to save chat settings")
+        if tool_settings_edited and not shell_access.is_agent_call(request):
+            # A person turning a delegation tool on is consent to use it in this
+            # chat; a model calling the API for itself is not.
+            from src import delegation_consent
+            delegation_consent.record_tool_settings_change(session_id, before_settings, saved_settings)
         return _settings_payload(session_id)
 
     @router.post("/session/{session_id}/compact")

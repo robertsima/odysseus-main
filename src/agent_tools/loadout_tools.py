@@ -1354,19 +1354,9 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
     limit = policy["max_parallel_workers"]
     running = agent_control.live_children(session_id)
     if limit <= 0 or running >= limit:
-        return {
-            "error": (
-                f"Worker capacity reached: {running} active of this chat's limit {limit}. "
-                "This is the parent chat's Child workers limit, separate from provider-wide concurrent jobs. "
-                "Do not retry a start while capacity is unchanged."
-            ),
-            "blocked": True,
-            "blocked_reason": "worker_capacity",
-            "capacity_scope": "parent_chat",
-            "configuration_hint": "Agents > select the parent chat > Loadout > Child workers. Only the user may raise this ceiling.",
-            "capacity": {"limit": limit, "active": running, "available": max(0, limit - running)},
-            "exit_code": 1,
-        }
+        from src.tool_execution import _worker_capacity_result, capacity_holders
+
+        return _worker_capacity_result("manage_agent_loadout", limit, running, capacity_holders(session_id))
     started_profile = agent_profiles.get_profile(name) if name else None
     if name and started_profile is None:
         rows = agent_profiles.load_profiles()
