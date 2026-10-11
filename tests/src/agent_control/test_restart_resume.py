@@ -75,15 +75,16 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(agent_control, "_continue_parent", continue_parent)
 
     def crash(*, restart_resumes=0, age_s=600, parent_session="p-1", source="session", command=COMMAND,
-              subagent=False):
+              subagent=False, marker=False, title="Sub-agent · ↳ Lead Engineer: Implement the feature"):
         """Leave a live run in the registry, then 'restart': a new process loads the file."""
         if subagent:
             # What send_to_session records: filed under the PARENT chat, no
             # parent_session key, the worker chat in target_session.
-            rid = act.run_started("p-1", "session", "Sub-agent · ↳ Lead Engineer: Implement the feature",
+            rid = act.run_started("p-1", "session", title,
                                   owner="alice", detail=SUBAGENT_MESSAGE,
                                   data={"target_session": "w-1", "target_session_name": "Builder",
                                         "model": "m", "mode": "agent",
+                                        **({"kind": "sub_agent"} if marker else {}),
                                         **({"restart_resumes": restart_resumes} if restart_resumes else {})})
         else:
             data = {"target_session": "w-1", "mode": "agent",
@@ -280,3 +281,25 @@ async def test_a_user_stop_stays_cancelled_and_is_not_resumed(world):
 
     assert result["resumed"] == [] and len(world["calls"]) == before
     assert act.get_run(run_id)["status"] == "cancelled"
+
+
+async def test_the_explicit_marker_identifies_a_sub_agent_whatever_its_title(world):
+    """The title is only a fallback for runs recorded before the marker existed."""
+    old = world["crash"](subagent=True, marker=True, title="Delegated: carry on")
+
+    result = await agent_control.recover_after_restart()
+    await _settle()
+
+    assert [r["run_id"] for r in result["resumed"]] == [old]
+
+
+async def test_a_run_with_another_kind_is_not_taken_for_a_sub_agent_by_its_title(world):
+    rid = act.run_started("p-1", "session", "Sub-agent · look-alike", owner="alice",
+                          data={"target_session": "w-1", "mode": "agent", "kind": "continuation"})
+    act.flush_runs()
+    act._reset_for_tests()
+
+    result = await agent_control.recover_after_restart()
+    await _settle()
+
+    assert result["resumed"] == [] and act.get_run(rid)["status"] == "interrupted"

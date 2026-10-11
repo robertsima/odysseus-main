@@ -2015,6 +2015,8 @@ async def _execute_tool_block_impl(
                 "Tool blocked by worker capacity: tool=%s action=%s active=%s limit=%s",
                 tool, _tool_action(content, "run"), _live_children, _limit,
             )
+            from src import outcome_wiring as _outcome_wiring
+            _outcome_wiring.block_capacity(owner, session_id, _limit, _live_children)
             return f"{tool}: BLOCKED", _worker_capacity_result(tool, _limit, _live_children)
 
     if tool_policy and any(tool_policy.blocks(name) for name in policy_names):

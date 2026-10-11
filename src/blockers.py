@@ -193,3 +193,22 @@ def from_task_run(task_run: Any) -> Blocker:
               else "Open the failed run and read its error.")
     return Blocker(code="TASK_RUN_FAILED", summary=f"{label} failed.", recovery="user",
                    user_action=action, source=source, detail=detail)
+
+
+def worker_capacity(limit: int, running: int, *, session_id: str = "") -> Blocker:
+    """The chat's child-worker limit is reached.
+
+    With room configured (`limit` above 0) the running workers free a slot
+    when they finish, so nobody has to act: recovery `auto`. A limit of 0 never
+    frees on its own and only the person can raise it.
+    """
+    detail = {"limit": int(limit), "running": int(running)}
+    source = {"kind": "chat", "ref": str(session_id or "")}
+    if limit > 0:
+        return Blocker(code="WORKER_CAPACITY",
+                       summary=f"The chat is at its limit of {limit} worker(s); a slot frees when one finishes.",
+                       recovery="auto", user_action=None, source=source, detail=detail)
+    return Blocker(code="WORKER_CAPACITY", summary="The chat allows no child workers, so none can start.",
+                   recovery="user",
+                   user_action="Raise this chat's Child workers limit in Agents > the chat > Loadout.",
+                   source=source, detail=detail)

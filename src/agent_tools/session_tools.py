@@ -540,6 +540,17 @@ def cancel_children(run_ids) -> int:
     return len(tasks)
 
 
+_STATUS_VERBS = {"blocked": "is blocked", "partial": "finished part of the task"}
+
+
+def _judge_report(text: str, status: str, run_id: str) -> Dict:
+    """What the child's report says about its run (src/handback.judge_run)."""
+    from src import agent_activity
+    from src.handback import judge_run
+
+    return judge_run(text, status, (agent_activity.get_run(run_id) or {}).get("summary"), run_id=run_id)
+
+
 def _exchange_verdict(outcome: Dict) -> tuple:
     """(run status, verb) for a finished child exchange. The reply alone doesn't
     say the work is done: it can end on an approval card or run out of rounds."""
@@ -646,6 +657,9 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
         )
         if not preflight.ok:
             worker_preflight.record_blocked(session_id, owner, message, preflight)
+            from src import outcome_wiring
+
+            outcome_wiring.block_preflight(owner, session_id, preflight)
             return preflight.blocked_payload()
 
     if target_sid.lower() == "new":
@@ -735,11 +749,21 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
             session_id, "session", f"Sub-agent · {label}{sess.name or target_sid}: {message[:80]}",
             owner=owner,
             data={"target_session": target_sid, "target_session_name": sess.name, "model": runner.model,
-                  "mode": mode, **({"profile": profile["name"]} if profile else {})},
+                  "mode": mode, **({"profile": profile["name"]} if profile else {}),
+                  # Recovery and the dashboard tell a sub-agent from the parent's own
+                  # runs by this, not by the title.
+                  **({"kind": "sub_agent"} if mode == "agent" else {})},
             detail=message[:1500],
         )
         activity.publish(session_id, "message", f"→ {sess.name or target_sid}: {message[:160]}",
                          source="session", run_id=run_id, owner=owner, detail=message[:2000])
+        if mode == "agent":
+            # A sub-agent serves the outcomes the starting chat serves, and its
+            # start clears a blocker left by an earlier refusal or interruption.
+            from src import outcome_wiring
+
+            outcome_wiring.link_worker(owner, session_id, target_sid, run_id)
+            outcome_wiring.clear_blockers(owner, [session_id])
         tool_events = []
         outcome: Dict = {}
         from src import agent_runs
@@ -751,6 +775,7 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
             from src import agent_control
 
             status, text, events, error = "completed", "", [], ""
+            verdict: Dict = {"status": "completed", "summary": {}}
             try:
                 with owned:
                     try:
@@ -758,6 +783,8 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
                         if not text.strip() and events:
                             text = _NO_CLOSING_TEXT
                         status, _verb = _exchange_verdict(outcome)
+                        verdict = _judge_report(text, status, run_id)
+                        status = verdict["status"]
                     except asyncio.CancelledError:
                         if (activity.get_run(run_id) or {}).get("status") == "interrupted":
                             return  # the app is shutting down; startup recovery resumes it
@@ -780,10 +807,14 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
                     session_id, "session", run_id, f"Sub-agent · {sess.name or target_sid} {status}",
                     status=status, owner=owner,
                     data={"target_session": target_sid, "target_session_name": sess.name, "mode": mode,
-                          "steps": len(events), "result_excerpt": text[:400],
+                          "steps": len(events), "result_excerpt": text[:400], **verdict["summary"],
                           **({"error": error} if error else {})})
+                from src import outcome_wiring
+
+                outcome_wiring.record_handback(owner, target_sid, run_id, text, status, parent_session=session_id)
                 if session_id and status != "cancelled":
-                    await agent_control._hand_off(_session_manager, session_id, sess, message, text, status, owner)
+                    await agent_control._hand_off(_session_manager, session_id, sess, message, text, status, owner,
+                                                  verification=verdict["summary"].get("verification"))
             except Exception:
                 logger.warning("send_to_session: detached child %s could not hand back", target_sid, exc_info=True)
 
@@ -896,14 +927,23 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
                          source="session", run_id=run_id, owner=owner, detail=response[:2000])
         stopped = bool(outcome.get("stopped"))
         run_status, verb = _exchange_verdict(outcome)
+        verdict = _judge_report(response, run_status, run_id) if mode == "agent" else \
+            {"status": run_status, "summary": {}}
+        if verdict["status"] != run_status:
+            run_status, verb = verdict["status"], _STATUS_VERBS.get(verdict["status"], verb)
         activity.run_finished(
             session_id, "session", run_id,
             f"Sub-agent · {sess.name or target_sid} {verb}",
             status=run_status,
             owner=owner,
             data={"target_session": target_sid, "target_session_name": sess.name, "mode": mode,
-                  "steps": len(tool_events), "result_excerpt": response[:400]},
+                  "steps": len(tool_events), "result_excerpt": response[:400], **verdict["summary"]},
         )
+        if mode == "agent":
+            from src import outcome_wiring
+
+            outcome_wiring.record_handback(owner, target_sid, run_id, response, run_status,
+                                           parent_session=session_id)
 
         # Truncate for tool output
         if len(response) > 10000:
@@ -924,6 +964,10 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
             out["stopped_by_user"] = True
         if run_status != "completed":
             out["status"] = run_status
+        if verdict["summary"].get("verification") == "unverified":
+            out["verification"] = "unverified"
+        if verdict["summary"].get("needs_user"):
+            out["needs_user"] = verdict["summary"]["needs_user"]
         if preflight is not None:
             out["preflight"] = preflight.summary()
         if outcome.get("round_budget_reached"):

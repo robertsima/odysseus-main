@@ -709,9 +709,11 @@ def _field(message: Any, key: str) -> Any:
     return message.get(key) if isinstance(message, dict) else getattr(message, key, None)
 
 
-# Run statuses whose worker has written its last word. A "blocked" run never
-# started, so it has no result to store.
-_FINISHED_STATUSES = frozenset({"completed", "incomplete", "failed", "cancelled", "waiting_approval"})
+# Run statuses whose worker has written its last word. `blocked` covers a launch
+# refused before it started (no worker chat, so nothing to store: the callers
+# check `target_session`) and a worker that reported itself blocked.
+_FINISHED_STATUSES = frozenset({"completed", "incomplete", "failed", "cancelled", "waiting_approval",
+                                "partial", "blocked"})
 # How many finished runs one status call stores a full result for. Each is a
 # disk write plus a background embedding; the rest keep their excerpt.
 _MAX_STORED_RESULTS_PER_CALL = 5
@@ -826,7 +828,7 @@ def _status_rows(session_id: Optional[str], limit: int, run_id: str,
         # A launch refused by preflight is filed under the chat that asked for
         # it and never had a chat of its own. Falling back to the run's
         # session_id reported the PARENT's id as the worker (2026-09-28).
-        blocked = run["status"] == "blocked"
+        blocked = run["status"] == "blocked" and not summary.get("target_session")
         row = {
             "run_id": run["run_id"], "status": run["status"], "title": run["title"],
             "worker_session": None if blocked else (summary.get("target_session") or run.get("session_id")),
@@ -1354,6 +1356,9 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
     limit = policy["max_parallel_workers"]
     running = agent_control.live_children(session_id)
     if limit <= 0 or running >= limit:
+        from src import outcome_wiring
+
+        outcome_wiring.block_capacity(owner, session_id, limit, running)
         return {
             "error": (
                 f"Worker capacity reached: {running} active of this chat's limit {limit}. "

@@ -89,7 +89,13 @@ class ManageOutcomesTool:
                 fields["links"] = args["links"]
             if args.get("state"):
                 fields["state"] = args["state"]
-            return result(store.create(owner, str(args.get("title") or ""), source="agent", actor=actor, **fields))
+            created = store.create(owner, str(args.get("title") or ""), source="agent", actor=actor, **fields)
+            if created.get("ok") and session_id:
+                # The chat that made the outcome serves it: workers it starts and
+                # their reports reach the outcome through this link.
+                store.add_link(owner, created["outcome"]["id"], "chat", session_id, actor=actor)
+                created["outcome"] = store.get(owner, created["outcome"]["id"], events=0) or created["outcome"]
+            return result(created)
 
         if not outcome_id:
             return _err(f"manage_outcomes: id is required for action={action!r}")
