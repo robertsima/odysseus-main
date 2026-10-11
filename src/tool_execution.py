@@ -18,7 +18,7 @@ import re
 import stat
 import sys
 import time
-from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 
 
@@ -1440,8 +1440,84 @@ def _capacity_limited_tool_call(tool: str, content: Any) -> bool:
     return tool in {"send_to_session", "pipeline", "create_session"}
 
 
-def _worker_capacity_result(tool: str, limit: int, active: int) -> Dict[str, Any]:
+def capacity_holders(session_id: Optional[str]) -> List[Dict[str, str]]:
+    """The live runs that hold this chat's worker slots, with their worker chats.
+
+    Same rows ``agent_control.live_children`` counts (running, not the chat's
+    own turn, not a workflow controller), kept here as rows so the refusal can
+    name them.
+    """
+    if not session_id:
+        return []
+    sid = str(session_id)
+    try:
+        from src import agent_activity
+
+        rows = agent_activity.list_runs(limit=400)
+    except Exception:
+        return []
+    holders: List[Dict[str, str]] = []
+    for rec in rows:
+        summary = rec.get("summary") or {}
+        if not (rec.get("session_id") == sid or summary.get("parent_session") == sid):
+            continue
+        if rec.get("status") != "running" or rec.get("source") == "odysseus" or summary.get("workflow_controller"):
+            continue
+        # A send_to_session run is filed under the caller with the worker as
+        # its target; a launched worker's run is filed under the worker.
+        worker = summary.get("target_session") or (rec.get("session_id") if rec.get("session_id") != sid else "")
+        holders.append({"session_id": str(worker or ""), "title": str(rec.get("title") or ""),
+                        "run_id": str(rec.get("run_id") or "")})
+    return holders
+
+
+def _holders_sentence(holders: List[Dict[str, str]]) -> str:
+    if not holders:
+        return ""
+    named = "; ".join(
+        f"{h['session_id'] or h['run_id']}" + (f" ({h['title']})" if h.get("title") else "") for h in holders[:5])
+    return (f" Live worker(s) holding the slots: {named}. Options: wait for its hand-back, which returns to this "
+            "chat when it finishes; if the message is for that same worker, send_to_session to its id steers it "
+            "without a new slot; or stop it (manage_agent_loadout action='stop' with its worker_session) if it "
+            "is no longer needed.")
+
+
+def _steer_worker_holding_slot(content: Any, session_id: Optional[str], owner: Optional[str],
+                               holders: List[Dict[str, str]]) -> Tuple[Optional[Dict[str, Any]], str]:
+    """Deliver a send_to_session message as a steer when its target is the live
+    worker that holds the slot. Returns ``(result, note)``: ``result`` is None
+    when the target is someone else or the steer was refused, and ``note`` says why."""
+    try:
+        from src.agent_tools.session_tools import _parse_send_args, resolve_session_ref
+        from src.ai_interaction import get_session_manager
+
+        target, message, _mode = _parse_send_args(str(content or ""))
+        manager = get_session_manager()
+        if manager is not None:
+            target = resolve_session_ref(manager, target, owner=owner) or target
+    except Exception:
+        return None, ""
+    if not target or not message or target not in {h["session_id"] for h in holders}:
+        return None, ""
+    from src import agent_mailbox
+
+    sent = agent_mailbox.send(target, message, from_session=str(session_id or ""), owner=owner)
+    if not sent.get("ok"):
+        return None, f"The message to {target} could not be steered into its live run: {sent.get('reason')}."
+    return {
+        "response": (f"Worker {target} is still running, so the message was queued for its next round instead of "
+                     "starting a second run. Its answer comes back to this chat when it finishes; do not send "
+                     "it again."),
+        "steered": True, "to_session": target, "message_id": sent.get("message_id"),
+        "state": sent.get("state"), "exit_code": 0,
+    }, ""
+
+
+def _worker_capacity_result(tool: str, limit: int, active: int,
+                            holders: Optional[List[Dict[str, str]]] = None,
+                            note: str = "") -> Dict[str, Any]:
     available = max(0, limit - active)
+    holders = list(holders or [])
     if tool in {"delegate_to_agent", "delegate_to_claude_code"}:
         next_step = (
             f"inspect existing work with {tool} action='list' or action='poll', or cancel it if appropriate."
@@ -1453,10 +1529,12 @@ def _worker_capacity_result(tool: str, limit: int, active: int) -> Dict[str, Any
             f"Worker capacity reached: {active} active of this chat's limit {limit}. "
             "This is the parent chat's Child workers limit, not the provider-wide concurrent-jobs setting. "
             "Do not retry a start while capacity is unchanged; " + next_step
+            + _holders_sentence(holders) + (f" {note}" if note else "")
         ),
         "blocked": True,
         "blocked_reason": "worker_capacity",
-        "capacity": {"limit": limit, "active": active, "available": available},
+        "capacity": {"limit": limit, "active": active, "available": available,
+                     **({"holders": holders} if holders else {})},
         "capacity_scope": "parent_chat",
         "configuration_hint": "Agents > select the parent chat > Loadout > Child workers. Only the user may raise this ceiling.",
         "exit_code": 1,
@@ -2048,7 +2126,13 @@ async def _execute_tool_block_impl(
                 "Tool blocked by worker capacity: tool=%s action=%s active=%s limit=%s",
                 tool, _tool_action(content, "run"), _live_children, _limit,
             )
-            return f"{tool}: BLOCKED", _worker_capacity_result(tool, _limit, _live_children)
+            holders = capacity_holders(session_id)
+            note = ""
+            if tool == "send_to_session":
+                steered, note = _steer_worker_holding_slot(content, session_id, owner, holders)
+                if steered is not None:
+                    return f"{tool}: STEERED", steered
+            return f"{tool}: BLOCKED", _worker_capacity_result(tool, _limit, _live_children, holders, note)
 
     if tool_policy and any(tool_policy.blocks(name) for name in policy_names):
         desc = f"{tool}: BLOCKED"
