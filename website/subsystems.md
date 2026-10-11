@@ -516,6 +516,25 @@ agent cannot confirm, set a priority, or replace a due date the person set.
 `outcomes.record_worker_handback` applies a worker's final report to the
 outcomes linked to its chat, run or parent chat; it never raises.
 
+**What updates an outcome without the person.** Four things, all through links:
+
+- A worker or `send_to_session` sub-agent started from a chat linked to an
+  outcome is linked to it (chat and run). An outcome an agent creates is linked
+  to the creating chat.
+- Every worker finish path applies the worker's report: evidence attached,
+  `done` only with evidence, `partial` keeps it `active` with the first `Open:`
+  item as the next action, and `blocked` or a `Needs user:` line sets a blocker.
+  A `done` report with no evidence leaves the outcome `active` and asks the
+  person to confirm.
+- A launch refused by worker preflight or the chat's worker limit sets a
+  blocker (`WORKSPACE_REQUIRED` and the other preflight codes, or
+  `WORKER_CAPACITY`, recovery `auto` while the limit allows workers).
+- A worker interrupted by a restart and not resumed sets `RUN_INTERRUPTED`
+  (recovery `retry`). The next worker started from the chat clears these
+  blockers.
+
+None of this changes a due date or priority, and none of it confirms done.
+
 ## Workbench and agent worktrees
 
 Two things that sit next to each other: a window showing what every agent is
