@@ -346,6 +346,31 @@ def known_checkouts() -> List[str]:
         return []
 
 
+def _vetted(paths: Iterable[str]) -> List[str]:
+    """Only the paths a worker can be bound to, for every candidate list we print."""
+    from src.tool_execution import vet_workspace
+
+    return [p for p in paths if vet_workspace(p)]
+
+
+def unusable_reason(path: str) -> str:
+    """Why ``vet_workspace`` refuses ``path``, in words for the person."""
+    from src.tool_execution import _is_app_state_path, _is_sensitive_path
+
+    resolved = os.path.realpath(os.path.expanduser((path or "").strip()))
+    if not os.path.exists(resolved):
+        return "the folder does not exist"
+    if not os.path.isdir(resolved):
+        return "it is not a folder"
+    if os.path.dirname(resolved) == resolved:
+        return "it is a filesystem root"
+    if _is_sensitive_path(resolved):
+        return "it is a sensitive location"
+    if _is_app_state_path(resolved):
+        return "it is inside the application data folder, outside the allowed repository roots"
+    return "it is not usable as a workspace"
+
+
 def _origin_repo_name(path: str) -> str:
     """The repository name of a checkout's GitHub ``origin`` ("" if none).
 
@@ -549,14 +574,21 @@ def run_preflight(
         not no_workspace and task_needs_workspace(task))
     unavailable = set(unavailable_tools or ())
 
+    # The chat's saved workspace, when it no longer passes the check: say so
+    # rather than behaving as if the chat had none.
+    stale = ""
+    if (inherited_workspace and not explicit_workspace
+            and not vet_workspace(inherited_workspace)):
+        stale = inherited_workspace
+
     if explicit_workspace:
         vetted = vet_workspace(explicit_workspace)
         if vetted is None:
             pf.problems.append({
                 "code": "WORKSPACE_INVALID",
-                "message": (f"workspace {explicit_workspace!r} is not a directory agents may use "
-                            "(missing, sensitive, or application state)"),
-                "candidates": known_checkouts(),
+                "message": (f"workspace {explicit_workspace!r} cannot be used: "
+                            f"{unusable_reason(explicit_workspace)}"),
+                "candidates": _vetted(known_checkouts()),
                 "required_fields": ["workspace"],
             })
             return pf
@@ -571,7 +603,7 @@ def run_preflight(
         # narrower workspace, and one the sandbox accepts.
         too_broad = _shell_sandbox_problem(pf.workspace)
         if too_broad:
-            inside = [c for c in known_checkouts() if vet_workspace(c) and _within(c, pf.workspace)]
+            inside = [c for c in _vetted(known_checkouts()) if _within(c, pf.workspace)]
             chosen = _checkout_named_in(task, inside) or (
                 inside[0] if len(inside) == 1 and pf.needs_workspace else None)
             if chosen:
@@ -582,27 +614,43 @@ def run_preflight(
                     f"bash/python can run in {pf.workspace} only with the private-vault grant ({too_broad}); "
                     "pass workspace as the repository to work on so they run sandboxed there")
     elif pf.needs_workspace:
-        checkouts = [c for c in known_checkouts() if vet_workspace(c)]
+        checkouts = _vetted(known_checkouts())
         by_path = _workspace_from_task_paths(task, checkouts)
         chosen = by_path or _checkout_named_in(task, checkouts) or (checkouts[0] if len(checkouts) == 1 else None)
         if chosen:
             pf.workspace = vet_workspace(chosen)
             pf.workspace_source = ("path in the task" if by_path else
                                    "named in the task" if len(checkouts) > 1 else "only checkout")
+            if stale:
+                pf.warnings.append(
+                    f"the chat's saved workspace {stale} cannot be used ({unusable_reason(stale)}); "
+                    f"this run uses {pf.workspace} instead")
         else:
+            if stale:
+                why = f"this chat's saved workspace {stale} cannot be used ({unusable_reason(stale)})"
+                lead = (f"Pass workspace=<one of: {', '.join(checkouts[:8])}>; " if checkouts else
+                        "No checkout is available under the configured repository roots; ")
+                message = f"{lead}{why}"
+            else:
+                message = (("Pass workspace=<one of: " + ", ".join(checkouts[:8]) + ">; this chat has none "
+                            "and the task works on a repository" if checkouts else
+                            "No checkout is available under the configured repository roots, so the task "
+                            "has no repository to work in"))
             pf.problems.append({
                 "code": "WORKSPACE_REQUIRED",
-                "message": (("Pass workspace=<one of: " + ", ".join(checkouts[:8]) + ">; this chat has none "
-                             "and the task works on a repository" if checkouts else
-                             "No checkout is available under the configured repository roots, so the task "
-                             "has no repository to work in")
-                            + ". If the task needs no files (design, research), pass requires: ['no_workspace']."),
+                "message": message + ". If the task needs no files (design, research), pass requires: ['no_workspace'].",
+                **({"stale_workspace": {"path": stale, "reason": unusable_reason(stale)}} if stale else {}),
                 "candidates": checkouts,
                 "required_fields": ["workspace"],
                 "next_action": ({"retry_with": {"workspace": checkouts[0]}, "choose_from": checkouts}
                                 if checkouts else None),
             })
             return pf
+
+    if stale and not pf.workspace:
+        pf.warnings.append(
+            f"the chat's saved workspace {stale} cannot be used ({unusable_reason(stale)}); "
+            "this run has no workspace")
 
     if pf.workspace and not os.access(pf.workspace, os.R_OK | os.X_OK):
         pf.problems.append({

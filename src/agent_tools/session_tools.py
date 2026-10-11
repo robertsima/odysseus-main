@@ -250,6 +250,33 @@ def _caller_workspace(session_id: Optional[str]) -> Optional[str]:
         return None
 
 
+def _inherited_workspace(saved: Optional[str], caller: Optional[str]) -> Optional[str]:
+    """The target's saved workspace, else the caller's. A saved path that no
+    longer passes vetting yields to a usable caller workspace; with none, it is
+    kept so preflight can name it."""
+    from src.tool_execution import vet_workspace
+
+    if saved and (vet_workspace(saved) or not (caller and vet_workspace(caller))):
+        return saved
+    return caller or saved
+
+
+def _save_resume_workspace(target_sid: str, owner: Optional[str], workspace: Optional[str]) -> None:
+    """Keep a workspace the caller named for a resume on the target chat, so
+    the next resume needs no repair. Same gate as the settings route: only an
+    admin or single-user owner binds a folder, and the path was vetted."""
+    if not workspace:
+        return
+    try:
+        from core.database import update_session_settings
+        from src.tool_security import owner_is_admin_or_single_user
+
+        if owner_is_admin_or_single_user(owner):
+            update_session_settings(target_sid, {"workspace": workspace})
+    except Exception:
+        logger.debug("send_to_session: saving the resume workspace failed", exc_info=True)
+
+
 def _new_child_session(manager, parent_id: Optional[str], owner: Optional[str], message: str,
                        profile: Optional[Dict], workspace: Optional[str] = None) -> tuple:
     from src.agent_lifecycle import unit_lock
@@ -584,7 +611,7 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
         preflight = worker_preflight.run_preflight(
             message,
             explicit_workspace=extras.get("workspace") or None,
-            inherited_workspace=target_settings.get("workspace") or _caller_workspace(session_id),
+            inherited_workspace=_inherited_workspace(target_settings.get("workspace"), _caller_workspace(session_id)),
             unavailable_tools=worker_preflight.worker_unavailable_tools(
                 owner, profile, target_settings.get("disabled_tools") or ()),
             requires=extras.get("requires") or (),
@@ -619,6 +646,9 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
 
     if not message:
         return {"error": "No message provided", "exit_code": 1}
+
+    if preflight and preflight.workspace and extras.get("workspace") and not extras.get("_child_created"):
+        _save_resume_workspace(target_sid, owner, preflight.workspace)
 
     try:
         # Build context from session history
