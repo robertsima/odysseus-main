@@ -177,3 +177,31 @@ def evidence(hb: Handback, run: Optional[Dict[str, Any]], *, run_id: str = "", b
             add("tests", line[:200], line)
             break
     return items
+
+
+def judge_run(text: str, status: str, run_summary: Optional[Dict[str, Any]] = None, *, run_id: str = "") -> Dict[str, Any]:
+    """What a finished worker's report says about its run.
+
+    Returns `{"status": ..., "summary": {...}}`. Only a run that ended
+    `completed` is re-judged; an approval wait, a stop, a failure or an
+    interruption keeps its status. A report that says `blocked` makes the run
+    `blocked`, `partly done` makes it `partial`, and `done` with nothing in
+    `evidence` stays `completed` but is marked `verification: "unverified"`.
+    The parsed `Needs` lines and the first `Open:` item go in the summary. A
+    report in none of these formats changes nothing.
+    """
+    if status != "completed":
+        return {"status": status, "summary": {}}
+    hb = parse_handback(text)
+    summary: Dict[str, Any] = {}
+    if hb.needs_user:
+        summary["needs_user"] = hb.needs_user[:3]
+    if hb.needs_parent:
+        summary["needs_parent"] = hb.needs_parent[:3]
+    if hb.open:
+        summary["open_first"] = hb.open[0]
+    if hb.outcome in ("blocked", "partial"):
+        status = hb.outcome
+    elif hb.outcome == "done":
+        summary["verification"] = "verified" if evidence(hb, run_summary, run_id=run_id) else "unverified"
+    return {"status": status, "summary": summary}

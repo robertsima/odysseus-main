@@ -44,6 +44,9 @@ const STATUS = {
   // Refused before it started (src/worker_preflight.py): no workspace for a
   // repository task, or the tools it needs are switched off.
   blocked: ['Blocked', 'warn'],
+  // A worker whose report said "partly done" (src/handback.py). Not a failure and
+  // not finished: what is left is in its Open: list.
+  partial: ['Partly done', 'warn'],
   // Steering-message states (src/agent_control.py). They share this map, and
   // therefore the same pill colours, because they answer the same question the
   // run statuses above do: is this still going, did it land, or did it not.
@@ -340,7 +343,12 @@ async function loadHistory(sid) {
   }
 }
 /** Rows waiting on the user: tool approvals plus stated needs. */
-function needsYou(r) { return r.status === 'waiting_approval' || r.status === 'needs_input'; }
+function needsYou(r) {
+  if (r.status === 'waiting_approval' || r.status === 'needs_input') return true;
+  // A blocked or partly done worker is the person's to act on only when it said
+  // what it needs; without a `Needs user:` line it is shown, not escalated.
+  return (r.status === 'blocked' || r.status === 'partial') && (r.needs || []).length > 0;
+}
 function updateBadges() {
   const attention = (state.totals.waiting_approval || 0) + (state.totals.needs_input || 0);
   const running = (state.totals.running || 0);
@@ -929,8 +937,11 @@ function rowHtml(r, nest = {}) {
   const blocked = r.pending_approvals
     ? `<span class="ag-row-attn">${r.pending_approvals} approval${r.pending_approvals === 1 ? '' : 's'}</span>` : '';
   // What it is waiting for, in its own words (the first `Needs user:` line).
-  const need = r.status === 'needs_input' && (r.needs || []).length
-    ? `<div class="ag-row-need" title="${esc(r.needs.join('\n'))}"><span class="ag-row-need-label">Needs:</span> ${esc(r.needs[0])}${r.needs.length > 1 ? ` (+${r.needs.length - 1})` : ''} <button type="button" class="wb-btn wb-btn-sm wb-btn-ghost ag-need-clear" data-ag="clear-needs" data-sid="${esc(r.session_id)}" title="Already answered (in another chat, or outside Agamemnon)? Clear this request">Mark answered</button></div>` : '';
+  const showNeeds = (r.needs || []).length && (r.status === 'needs_input' || r.status === 'blocked' || r.status === 'partial');
+  // "Mark answered" clears the chat's open-needs record; a blocked or partial run's
+  // needs come from its report and are answered by the next report.
+  const need = showNeeds
+    ? `<div class="ag-row-need" title="${esc(r.needs.join('\n'))}"><span class="ag-row-need-label">Needs:</span> ${esc(r.needs[0])}${r.needs.length > 1 ? ` (+${r.needs.length - 1})` : ''}${r.status === 'needs_input' ? ` <button type="button" class="wb-btn wb-btn-sm wb-btn-ghost ag-need-clear" data-ag="clear-needs" data-sid="${esc(r.session_id)}" title="Already answered (in another chat, or outside Agamemnon)? Clear this request">Mark answered</button>` : ''}</div>` : '';
   const children = (r.children || []).slice(0, 5);
   const crew = children.length ? `<div class="ag-card-crew" title="${r.children?.length || 0} attached workers"><span class="ag-crew-line"></span>${children.map(c => robotHtml(c, 'micro')).join('')}${r.children.length > children.length ? `<b>+${r.children.length - children.length}</b>` : ''}</div>` : '';
   const status = r.status || 'idle';
@@ -1144,7 +1155,7 @@ function childHtml(c) {
   const live = c.status === 'running';
   const s = c.summary || {};
   const title = String(c.title || '').replace(/^(Sub-agent|Claude Code|Background job|Worker)\s*[·:]\s*/, '');
-  return `<div class="ag-child${live ? '' : ' done'}">${robotHtml(c, 'mini')}${pill(c.status === 'completed' ? 'finished' : c.status)}${chip(c.source)}<span class="ag-child-title" title="${esc(c.title)}">${esc(title)}</span><span class="ag-row-dur" data-started="${c.started_at || ''}" data-finished="${c.finished_at || ''}">${esc(fmtDur(c.started_at, c.finished_at))}</span>
+  return `<div class="ag-child${live ? '' : ' done'}">${robotHtml(c, 'mini')}${pill(c.status === 'completed' ? 'finished' : c.status)}${s.verification === 'unverified' ? '<span class="wb-pill warn" title="The worker said it was done, but no commit, pull request, changed file or passing test count backs that up"><i aria-hidden="true"></i>Unverified</span>' : ''}${chip(c.source)}<span class="ag-child-title" title="${esc(c.title)}">${esc(title)}</span><span class="ag-row-dur" data-started="${c.started_at || ''}" data-finished="${c.finished_at || ''}">${esc(fmtDur(c.started_at, c.finished_at))}</span>
     ${s.target_session && !isCurrentChat(s.target_session) ? `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="open-chat" data-sid="${esc(s.target_session)}">Open</button>` : ''}
     <button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="inspect-run" data-run="${esc(c.run_id)}" data-sid="${esc(state.selected || '')}">Inspect</button>
     ${live ? `<button type="button" class="wb-btn wb-btn-sm" data-ag="stop-run" data-run="${esc(c.run_id)}">Stop</button>` : `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="hide-run" data-run="${esc(c.run_id)}" title="Hide this completed card; activity history remains">Hide</button>`}</div>`;

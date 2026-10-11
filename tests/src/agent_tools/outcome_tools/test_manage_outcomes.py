@@ -117,7 +117,8 @@ async def test_link_and_unlink(run, outcomes):
     unlinked = await run(ALICE, action="unlink", id=out["id"], link_id=linked["link"]["id"])
 
     assert linked["exit_code"] == 0 and unlinked["exit_code"] == 0
-    assert outcomes.get("alice", out["id"])["links"] == []
+    # Only the creating chat's own link is left.
+    assert [link["kind"] for link in outcomes.get("alice", out["id"])["links"]] == ["chat"]
 
 
 async def test_list_filters_by_states(run):
@@ -163,3 +164,24 @@ def test_manage_outcomes_is_registered_everywhere_it_should_be():
         assert not action_is_read("manage_outcomes", json.dumps({"action": write}))
         effects = capabilities_for_action("manage_outcomes", json.dumps({"action": write})).effects
         assert ToolEffect.WRITE_PRIVATE in effects and ToolEffect.DESTRUCTIVE not in effects
+
+
+async def test_an_outcome_the_agent_creates_is_linked_to_the_chat_that_made_it(run, outcomes):
+    """Without the link, workers that chat starts and their reports never reach the outcome."""
+    out = await _create(run)
+
+    got = outcomes.get("alice", out["id"])
+    assert [(link["kind"], link["ref"]) for link in got["links"]] == [("chat", "worker-1")]
+    assert outcomes.find_by_link("alice", "chat", "worker-1")[0]["id"] == out["id"]
+
+
+async def test_a_chat_named_in_links_is_not_linked_twice(run, outcomes):
+    out = await _create(run, links=[{"kind": "chat", "ref": "worker-1"}])
+
+    assert len(outcomes.get("alice", out["id"])["links"]) == 1
+
+
+async def test_a_call_without_a_chat_links_nothing(run, outcomes):
+    out = await _create(run, ctx={"owner": "alice"})
+
+    assert outcomes.get("alice", out["id"])["links"] == []

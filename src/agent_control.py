@@ -1028,6 +1028,10 @@ async def _launch_worker(*, owner: Optional[str], task: str, profile_name: Optio
         )
         if not checked.ok:
             worker_preflight.record_blocked(parent_session, owner, task, checked)
+            # The outcome this chat serves shows the refusal as its blocker; the
+            # next worker that starts clears it.
+            from src import outcome_wiring
+            outcome_wiring.block_preflight(owner, parent_session, checked)
             raise worker_preflight.WorkerBlocked(checked)
     child_kwargs = {"workspace": checked.workspace} if checked and checked.workspace else {}
     if resume:
@@ -1091,6 +1095,12 @@ async def _launch_worker(*, owner: Optional[str], task: str, profile_name: Optio
               **(run_metadata or {})},
         detail=task[:1500],
     )
+    if parent_session:
+        # The worker serves the outcomes its starting chat serves; running again
+        # clears a blocker an earlier refusal or interruption left on them.
+        from src import outcome_wiring
+        outcome_wiring.link_worker(owner, parent_session, sess.id, run_id)
+        outcome_wiring.clear_blockers(owner, [parent_session, sess.id])
     # One writer per worktree (src/worktree_writers.py): while this run lives,
     # the file tools refuse writes into its workspace from any session that is
     # not this worker or below it. Released as soon as the run's turn ends, and
@@ -1206,6 +1216,16 @@ async def _launch_worker(*, owner: Optional[str], task: str, profile_name: Optio
             # stop, so no "stopped" hand-back. Startup recovery resumes it.
             _WORKERS.pop(run_id, None)
             return
+        raw_status = status
+        verdict: Dict[str, Any] = {"status": status, "summary": {}}
+        if not (run_metadata or {}).get("workflow_id"):
+            # What the report says about the run. A workflow reads its children's
+            # `completed`, so its workers keep it.
+            from src import handback
+
+            verdict = handback.judge_run(text, status, (activity.get_run(run_id) or {}).get("summary"),
+                                         run_id=run_id)
+            status = verdict["status"]
         try:
             meta: Dict[str, Any] = {"source": "worker", "model": sess.model, "run_id": run_id,
                                     "status": status, **(run_metadata or {})}
@@ -1223,7 +1243,10 @@ async def _launch_worker(*, owner: Optional[str], task: str, profile_name: Optio
                               f"Worker · {label}{sess.name} {status}", status=status, owner=owner,
                               data={"target_session": sess.id, "steps": len(events), "result_excerpt": text[:400],
                                     "max_rounds": total_rounds, "rounds_exhausted": exhausted,
+                                    **verdict["summary"],
                                     **({"error": error_detail} if error_detail else {})})
+        from src import outcome_wiring
+        outcome_wiring.record_handback(owner, sess.id, run_id, text, status, parent_session=parent_session)
         if parent_session:
             # Two events, because they answer different questions. The message
             # carries the result text; the status event is what closes the run
@@ -1242,7 +1265,7 @@ async def _launch_worker(*, owner: Optional[str], task: str, profile_name: Optio
                              data={"status": status, "target_session": sess.id, "parent_session": parent_session,
                                    "max_rounds": total_rounds, "rounds_exhausted": exhausted,
                                    **({"error": error_detail} if error_detail else {})})
-            waiting_on = live_children(sess.id) if handoff and status == "completed" else 0
+            waiting_on = live_children(sess.id) if handoff and raw_status == "completed" else 0
             if waiting_on:
                 # A lead that launched its own workers and ended its turn is not
                 # done: its result is what it writes after they report back
@@ -1254,7 +1277,8 @@ async def _launch_worker(*, owner: Optional[str], task: str, profile_name: Optio
                                  source="session", run_id=run_id, owner=owner)
             elif handoff:
                 try:
-                    await _hand_off(manager, parent_session, sess, task, text, status, owner)
+                    await _hand_off(manager, parent_session, sess, task, text, status, owner,
+                                    verification=verdict["summary"].get("verification"))
                 except Exception:
                     logger.warning("worker hand-off to %s failed", parent_session, exc_info=True)
         _WORKERS.pop(run_id, None)
@@ -1385,7 +1409,7 @@ def _restart_worker_ids(rec: dict) -> Optional[Tuple[str, str]]:
     "Sub-agent" run, which is filed under the PARENT chat with the worker chat
     in ``target_session`` and no ``parent_session`` (the 2026-10-10 production
     runs). The parent's own "Continuing after worker" run has the second shape
-    without the title. Workflow children are left to the workflow's recovery.
+    without the marker or the title. Workflow children are left to the workflow's recovery.
     """
     summary = rec.get("summary") or {}
     if rec.get("source") != "session" or summary.get("workflow_id") or summary.get("workflow_controller"):
@@ -1393,9 +1417,12 @@ def _restart_worker_ids(rec: dict) -> Optional[Tuple[str, str]]:
     target, sid, parent = summary.get("target_session"), rec.get("session_id"), summary.get("parent_session")
     if parent and target and target == sid:
         return str(parent), str(sid)
-    if (not parent and target and sid and target != sid and summary.get("mode") == "agent"
-            and str(rec.get("title") or "").startswith("Sub-agent")):
-        return str(sid), str(target)
+    if not parent and target and sid and target != sid and summary.get("mode") == "agent":
+        # send_to_session marks its agent-mode runs `kind: "sub_agent"`. The title
+        # test is only for runs recorded before the marker existed.
+        kind = summary.get("kind")
+        if kind == "sub_agent" or (kind is None and str(rec.get("title") or "").startswith("Sub-agent")):
+            return str(sid), str(target)
     return None
 
 
@@ -1417,18 +1444,19 @@ def _saved_workspace(session_id: str) -> Optional[str]:
         return None
 
 
-def _restart_refusal(rec: dict, parent_id: str, now: float) -> Optional[str]:
-    """Why this interrupted worker is not resumed, or None when it may be."""
+def _restart_refusal(rec: dict, parent_id: str, now: float) -> Tuple[Optional[str], Optional[Tuple[int, int]]]:
+    """(why this interrupted worker is not resumed, (limit, running) when that
+    is capacity), or (None, None) when it may be."""
     summary = rec.get("summary") or {}
     limit = _auto_resume_limit()
     resumes = int(summary.get("restart_resumes") or 0)
     if limit <= 0:
-        return "automatic resume is off (agent_worker_auto_resume_limit is 0)"
+        return "automatic resume is off (agent_worker_auto_resume_limit is 0)", None
     if resumes >= limit:
         return (f"it has already been resumed {resumes} time(s) after restarts, the limit "
-                f"(agent_worker_auto_resume_limit) is {limit}")
+                f"(agent_worker_auto_resume_limit) is {limit}"), None
     if now - float(rec.get("started_at") or 0) > RESTART_RESUME_WINDOW_S:
-        return f"it started more than {RESTART_RESUME_WINDOW_S // 3600} hours ago"
+        return f"it started more than {RESTART_RESUME_WINDOW_S // 3600} hours ago", None
     try:
         from core.database import get_session_settings
         from src.session_settings import effective_worker_limit
@@ -1438,8 +1466,8 @@ def _restart_refusal(rec: dict, parent_id: str, now: float) -> Optional[str]:
         cap = 1
     running = live_children(parent_id)
     if cap <= 0 or running >= cap:
-        return f"the parent chat's worker limit is {cap} and {running} are running"
-    return None
+        return f"the parent chat's worker limit is {cap} and {running} are running", (cap, running)
+    return None, None
 
 
 async def _recover_worker(rec: dict, now: float) -> bool:
@@ -1480,8 +1508,9 @@ async def _recover_worker(rec: dict, now: float) -> bool:
         manager.save_sessions()
     except Exception:
         logger.debug("restart recovery could not save the interrupted turn", exc_info=True)
-    why = _restart_refusal(rec, parent_id, now)
+    why, capacity = _restart_refusal(rec, parent_id, now)
     new_run = None
+    from src import blockers, outcome_wiring
     if why is None:
         from src import agent_profiles
 
@@ -1496,6 +1525,15 @@ async def _recover_worker(rec: dict, now: float) -> bool:
         except Exception as exc:
             why = f"it could not be started again: {exc}"
             logger.warning("restart recovery: worker %s not resumed: %s", worker_id, exc)
+            from src.worker_preflight import WorkerBlocked
+
+            if isinstance(exc, WorkerBlocked):
+                capacity = ()  # the launch already put its preflight blocker on the outcome
+    if new_run is None and capacity != ():
+        # The outcomes this worker served show why it stopped.
+        blocker = (blockers.worker_capacity(capacity[0], capacity[1], session_id=parent_id) if capacity
+                   else blockers.from_interrupted_run({**rec, "summary": {**summary, "parent_session": parent_id}}))
+        outcome_wiring.block(owner, [parent_id, worker_id], blocker, runs=[rec["run_id"]])
     if parent is None:
         return new_run is not None
     outcome = f"resumed ({resumes + 1}/{limit})" if new_run else "not resumed"
@@ -1603,7 +1641,8 @@ def _already_handed_off(parent, key: str) -> bool:
 
 
 async def _hand_off(manager, parent_id: str, worker, task: str, text: str, status: str,
-                    owner: Optional[str], *, continue_parent: bool = True) -> None:
+                    owner: Optional[str], *, continue_parent: bool = True,
+                    verification: Optional[str] = None) -> None:
     """Deliver a finished worker's result to the chat it reports to.
 
     The result is saved into the parent chat as a message from the worker,
@@ -1620,6 +1659,7 @@ async def _hand_off(manager, parent_id: str, worker, task: str, text: str, statu
         return
     headline = {"completed": "finished", "incomplete": "ran out of rounds",
                 "waiting_approval": "is waiting for the user's approval",
+                "blocked": "is blocked", "partial": "finished part of the task",
                 "interrupted": "was interrupted by an app restart",
                 "resumed": "was interrupted by an app restart and resumed"}.get(status, status)
     # The brief ends with the person's request, and _handoff_guidance repeats
@@ -1629,6 +1669,9 @@ async def _hand_off(manager, parent_id: str, worker, task: str, text: str, statu
     inject = (f"[Worker {worker.name} {headline}]\nTask: {_brief_opening(task)}\n\nResult:\n{text[:12000]}\n\n"
               + ("The worker was cut off by its round budget, so the result above is partial. The same "
                  "worker resumes from there (guidance below).\n\n" if status == "incomplete" else "")
+              + ("Unverified: no commit, pull request, changed file or passing test count backs the "
+                 "worker's claim that it is done. Check it before reporting it as finished.\n\n"
+                 if verification == "unverified" else "")
               + _handoff_guidance(parent, worker, status, text))
     # Whether a turn was already running when this result arrived: that turn
     # built its context before the result existed, so its reply (saved after
@@ -1703,7 +1746,7 @@ async def _hand_off(manager, parent_id: str, worker, task: str, text: str, statu
 # admin) stays off, and the chat's own tool policy still applies.
 _CONTINUE_LAUNCH_TOOLS = frozenset({"send_to_session", "manage_agent_loadout", "delegate_to_agent",
                                     "delegate_to_claude_code", "orchestrate_agents"})
-_CONTINUABLE_STATUSES = frozenset({"completed", "incomplete", "failed"})
+_CONTINUABLE_STATUSES = frozenset({"completed", "incomplete", "failed", "partial", "blocked"})
 # User-role messages in a chat that are not the person's request: hand-backs,
 # mid-turn steers (part of the request they amend), publish decisions.
 _NOT_A_REQUEST = frozenset({"worker", "steer", "publish_decision"})

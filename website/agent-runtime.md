@@ -1018,6 +1018,31 @@ failure hand-back. A request the provider refused (400, 401, 403, 429) is
 never resumed. On 2026-10-07/08 five worker runs ended this way, and the admin
 model resumed by hand twice and then stopped; nothing ran for 15 min.
 
+**Run status follows the report.** A worker's run status says what its
+hand-back says, not only that the turn ended. `Outcome: blocked` makes the run
+`blocked`, `partly done` makes it `partial`, and `done` with nothing in
+`handback.evidence` (no commit, pull request, changed file or passing test
+count) stays `completed` with `verification: "unverified"`. The run summary
+keeps the parsed `Needs user:` / `Needs parent:` lines (`needs_user`,
+`needs_parent`) and the first `Open:` item (`open_first`). The parent receives
+"[Worker X is blocked]" or "[Worker X finished part of the task]", and an
+unverified `done` carries an "Unverified" line. Approval waits, stops, failures
+and interruptions keep their statuses, and workflow children keep `completed`.
+Neither new status is live. The Agents dashboard shows them as Blocked and
+Partly done, and lists a blocked or partial worker under "Needs you" when it
+left a `Needs user:` line. `send_to_session` agent-mode runs carry
+`kind: "sub_agent"`, which restart recovery uses to find them (the title test
+is only a fallback for older runs).
+
+**Outcome linking.** A worker or sub-agent started from a chat that serves an
+outcome serves it too: its chat and run are linked to the same outcomes, and an
+outcome an agent creates through `manage_outcomes` is linked to the creating
+chat. Every worker finish path calls `outcomes.record_worker_handback`. A launch
+refused by preflight or by the chat's worker limit, and a worker interrupted by a
+restart that is not resumed, set a blocker on the linked outcomes (a capacity
+blocker recovers `auto` while the limit allows workers, `user` when it is 0).
+The next worker to start clears those blockers.
+
 **After an app restart.** At startup, every run the old process left live is
 marked `interrupted` with `interrupted_reason` (the restart time and the tool
 and command it was running; a shell `tool_start` is saved at once so the

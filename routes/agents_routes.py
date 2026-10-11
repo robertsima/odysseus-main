@@ -52,7 +52,8 @@ _RECENT_S = 24 * 3600
 
 _ACTIVITY_TO_RUN_STATUS = {"running": "running", "waiting_approval": "waiting_approval",
                            "completed": "done", "done": "done", "failed": "error",
-                           "error": "error", "blocked": "error", "cancelled": "stopped", "stopped": "stopped"}
+                           "error": "error", "blocked": "blocked", "partial": "partial",
+                           "cancelled": "stopped", "stopped": "stopped"}
 
 
 def _run_from_activity(rec: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -63,7 +64,7 @@ def _run_from_activity(rec: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if not status:
         return {}
     return {"status": status, "started_at": rec.get("started_at"), "finished_at": rec.get("finished_at"),
-            "source": rec.get("source")}
+            "source": rec.get("source"), "needs_user": list((rec.get("summary") or {}).get("needs_user") or [])}
 _LIVE_SOURCES = {"session", "claude_code", "bg_job", "pipeline", "worktree"}
 SOLDIER_APPEARANCES = frozenset({"primary", "worker", "scout", "reviewer", "specialist", "sword", "helmet"})
 
@@ -345,14 +346,22 @@ def setup_agents_routes(session_manager) -> APIRouter:
             if sess is None:
                 continue
             run = chat_runs.get(sid) or _run_from_activity(target_runs.get(sid))
+            if run.get("status") == "done":
+                # The chat's own record only knows its turn ended. A worker whose
+                # report said blocked or partly done ended with that status.
+                reported = _run_from_activity(target_runs.get(sid))
+                if (reported.get("status") in ("blocked", "partial")
+                        and (reported.get("finished_at") or 0) >= (run.get("started_at") or 0)):
+                    run = reported
             children = by_session.get(sid, [])
             live_children = [c for c in children if c.get("status") == "running"]
             if pending.get(sid):
                 status = "waiting_approval"
             elif run.get("status") == "running":
                 status = "running"
-            elif run.get("status") in ("done", "error", "stopped"):
-                status = {"done": "finished", "error": "failed", "stopped": "stopped"}[run["status"]]
+            elif run.get("status") in ("done", "error", "stopped", "blocked", "partial"):
+                status = {"done": "finished", "error": "failed", "stopped": "stopped",
+                          "blocked": "blocked", "partial": "partial"}[run["status"]]
             else:
                 status = "idle"
             events = activity.history(sid, limit=12)
@@ -364,6 +373,10 @@ def setup_agents_routes(session_manager) -> APIRouter:
             needs = open_needs.read(settings, since=run.get("started_at"))
             if needs and status in ("finished", "idle", "stopped"):
                 status = "needs_input"
+            elif status in ("blocked", "partial") and not needs:
+                # Kept distinct from finished; the page lists it under "Needs you"
+                # when the worker left a `Needs user:` line.
+                needs = list(run.get("needs_user") or [])
             hidden_runs = {str(run_id) for run_id in (settings.get("hidden_agent_runs") or [])}
             own_ids = {c.get("run_id") for c in children}
             children = children + [c for c in delegated.get(sid, []) if c.get("run_id") not in own_ids]
@@ -473,13 +486,14 @@ def setup_agents_routes(session_manager) -> APIRouter:
                         keep.add(cursor)
                         cursor = parents.get(cursor)
             rows = [row for row in rows if row["session_id"] not in stranded or row["session_id"] in keep]
-        order = {"waiting_approval": 0, "needs_input": 0, "running": 1, "failed": 2, "finished": 3,
-                 "stopped": 4, "idle": 5}
+        order = {"waiting_approval": 0, "needs_input": 0, "running": 1, "blocked": 2, "partial": 2, "failed": 2,
+                 "finished": 3, "stopped": 4, "idle": 5}
         rows.sort(key=lambda r: (order.get(r["status"], 9), -(r.get("latest_ts") or r.get("started_at") or 0)))
         totals = {
             "running": sum(1 for r in rows if r["status"] == "running"),
             "waiting_approval": sum(1 for r in rows if r["status"] == "waiting_approval"),
-            "needs_input": sum(1 for r in rows if r["status"] == "needs_input"),
+            "needs_input": sum(1 for r in rows if r["status"] == "needs_input"
+                               or (r["status"] in ("blocked", "partial") and r["needs"])),
             "workers_running": sum(r["children_running"] for r in rows),
             "finished_24h": sum(1 for r in rows if r["status"] in ("finished",)),
             "failed_24h": sum(1 for r in rows if r["status"] == "failed"),
@@ -780,7 +794,8 @@ def setup_agents_routes(session_manager) -> APIRouter:
             rec = activity.get_run(run_id)
             if rec is None or rec.get("session_id") != session_id:
                 raise HTTPException(404, "Run not found")
-            if rec.get("status") not in {"completed", "finished", "failed", "error", "cancelled", "stopped", "incomplete", "interrupted"}:
+            if rec.get("status") not in {"completed", "finished", "failed", "error", "cancelled", "stopped", "incomplete", "interrupted",
+                                         "blocked", "partial"}:
                 raise HTTPException(409, "Only completed work can be hidden")
             terminal.add(run_id)
         from core.database import get_session_settings, update_session_settings
