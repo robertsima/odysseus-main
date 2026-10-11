@@ -1706,6 +1706,11 @@ def setup_chat_routes(
         # and leaves `disabled_tools` empty, so reading the field directly sees
         # an unrestricted chat and admits everything the allowlist excludes.
         disabled_tools.update(_session_settings.stored_disabled_tools(_chat_settings))
+        # The workspace belongs to the chat: a turn that names none runs in the
+        # saved folder, re-vetted, for the same callers that may bind one. A
+        # resumed approval keeps the folder its sealed action recorded.
+        if not workspace and not workspace_rejected and not pending_tool_approval and (_chat_settings or {}).get("workspace"):
+            workspace, _ = _resolve_request_workspace(request, _chat_settings["workspace"])
         _approval_mode = _session_settings.effective_approval_mode(_chat_settings)
 
         # Light auto-escalation: the user is in chat mode and just expressed a

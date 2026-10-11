@@ -18,7 +18,7 @@ import re
 import stat
 import sys
 import time
-from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 
 
@@ -525,7 +525,7 @@ def _agent_readable_data_subdirs_uncached() -> tuple[str, ...]:
 # Settings-derived, and consulted on every path check; a few seconds is fresh
 # enough for a changed repository-roots setting.
 _REPO_SUBDIRS_TTL_S = 5.0
-_REPO_SUBDIRS_CACHE: dict[str, tuple[float, tuple[str, ...]]] = {}
+_REPO_SUBDIRS_CACHE: dict[str, tuple[float, tuple[str, ...], tuple[str, ...]]] = {}
 
 
 def _repository_data_subdirs(data_dir: str) -> tuple[str, ...]:
@@ -543,7 +543,11 @@ def _repository_data_subdirs(data_dir: str) -> tuple[str, ...]:
     """
     now = time.monotonic()
     cached = _REPO_SUBDIRS_CACHE.get(data_dir)
-    if cached and now - cached[0] < _REPO_SUBDIRS_TTL_S:
+    # A root that did not exist when the entry was made (the worktree root,
+    # before the first worktree) may exist now: recompute rather than refuse.
+    if cached and now - cached[0] < _REPO_SUBDIRS_TTL_S and not any(
+        os.path.isdir(missing) for missing in cached[2]
+    ):
         return cached[1]
     try:
         from src.agent_worktree.config import load_config
@@ -554,14 +558,17 @@ def _repository_data_subdirs(data_dir: str) -> tuple[str, ...]:
     except Exception:
         return ()
     out: list[str] = []
+    missing: list[str] = []
     for raw in roots:
         expanded = os.path.abspath(os.path.expanduser(raw))
         if os.path.islink(expanded):
             continue
         resolved = os.path.realpath(expanded)
+        if not os.path.isdir(resolved):
+            missing.append(resolved)
+            continue
         if (
-            not os.path.isdir(resolved)
-            or resolved == data_dir
+            resolved == data_dir
             or not _path_within(resolved, data_dir)
             or _path_within(state_dir, resolved)
             or _is_sensitive_path(resolved)
@@ -569,7 +576,7 @@ def _repository_data_subdirs(data_dir: str) -> tuple[str, ...]:
             continue
         out.append(resolved)
     result = tuple(out)
-    _REPO_SUBDIRS_CACHE[data_dir] = (now, result)
+    _REPO_SUBDIRS_CACHE[data_dir] = (now, result, tuple(missing))
     return result
 
 
@@ -1433,8 +1440,84 @@ def _capacity_limited_tool_call(tool: str, content: Any) -> bool:
     return tool in {"send_to_session", "pipeline", "create_session"}
 
 
-def _worker_capacity_result(tool: str, limit: int, active: int) -> Dict[str, Any]:
+def capacity_holders(session_id: Optional[str]) -> List[Dict[str, str]]:
+    """The live runs that hold this chat's worker slots, with their worker chats.
+
+    Same rows ``agent_control.live_children`` counts (running, not the chat's
+    own turn, not a workflow controller), kept here as rows so the refusal can
+    name them.
+    """
+    if not session_id:
+        return []
+    sid = str(session_id)
+    try:
+        from src import agent_activity
+
+        rows = agent_activity.list_runs(limit=400)
+    except Exception:
+        return []
+    holders: List[Dict[str, str]] = []
+    for rec in rows:
+        summary = rec.get("summary") or {}
+        if not (rec.get("session_id") == sid or summary.get("parent_session") == sid):
+            continue
+        if rec.get("status") != "running" or rec.get("source") == "odysseus" or summary.get("workflow_controller"):
+            continue
+        # A send_to_session run is filed under the caller with the worker as
+        # its target; a launched worker's run is filed under the worker.
+        worker = summary.get("target_session") or (rec.get("session_id") if rec.get("session_id") != sid else "")
+        holders.append({"session_id": str(worker or ""), "title": str(rec.get("title") or ""),
+                        "run_id": str(rec.get("run_id") or "")})
+    return holders
+
+
+def _holders_sentence(holders: List[Dict[str, str]]) -> str:
+    if not holders:
+        return ""
+    named = "; ".join(
+        f"{h['session_id'] or h['run_id']}" + (f" ({h['title']})" if h.get("title") else "") for h in holders[:5])
+    return (f" Live worker(s) holding the slots: {named}. Options: wait for its hand-back, which returns to this "
+            "chat when it finishes; if the message is for that same worker, send_to_session to its id steers it "
+            "without a new slot; or stop it (manage_agent_loadout action='stop' with its worker_session) if it "
+            "is no longer needed.")
+
+
+def _steer_worker_holding_slot(content: Any, session_id: Optional[str], owner: Optional[str],
+                               holders: List[Dict[str, str]]) -> Tuple[Optional[Dict[str, Any]], str]:
+    """Deliver a send_to_session message as a steer when its target is the live
+    worker that holds the slot. Returns ``(result, note)``: ``result`` is None
+    when the target is someone else or the steer was refused, and ``note`` says why."""
+    try:
+        from src.agent_tools.session_tools import _parse_send_args, resolve_session_ref
+        from src.ai_interaction import get_session_manager
+
+        target, message, _mode = _parse_send_args(str(content or ""))
+        manager = get_session_manager()
+        if manager is not None:
+            target = resolve_session_ref(manager, target, owner=owner) or target
+    except Exception:
+        return None, ""
+    if not target or not message or target not in {h["session_id"] for h in holders}:
+        return None, ""
+    from src import agent_mailbox
+
+    sent = agent_mailbox.send(target, message, from_session=str(session_id or ""), owner=owner)
+    if not sent.get("ok"):
+        return None, f"The message to {target} could not be steered into its live run: {sent.get('reason')}."
+    return {
+        "response": (f"Worker {target} is still running, so the message was queued for its next round instead of "
+                     "starting a second run. Its answer comes back to this chat when it finishes; do not send "
+                     "it again."),
+        "steered": True, "to_session": target, "message_id": sent.get("message_id"),
+        "state": sent.get("state"), "exit_code": 0,
+    }, ""
+
+
+def _worker_capacity_result(tool: str, limit: int, active: int,
+                            holders: Optional[List[Dict[str, str]]] = None,
+                            note: str = "") -> Dict[str, Any]:
     available = max(0, limit - active)
+    holders = list(holders or [])
     if tool in {"delegate_to_agent", "delegate_to_claude_code"}:
         next_step = (
             f"inspect existing work with {tool} action='list' or action='poll', or cancel it if appropriate."
@@ -1446,10 +1529,12 @@ def _worker_capacity_result(tool: str, limit: int, active: int) -> Dict[str, Any
             f"Worker capacity reached: {active} active of this chat's limit {limit}. "
             "This is the parent chat's Child workers limit, not the provider-wide concurrent-jobs setting. "
             "Do not retry a start while capacity is unchanged; " + next_step
+            + _holders_sentence(holders) + (f" {note}" if note else "")
         ),
         "blocked": True,
         "blocked_reason": "worker_capacity",
-        "capacity": {"limit": limit, "active": active, "available": available},
+        "capacity": {"limit": limit, "active": active, "available": available,
+                     **({"holders": holders} if holders else {})},
         "capacity_scope": "parent_chat",
         "configuration_hint": "Agents > select the parent chat > Loadout > Child workers. Only the user may raise this ceiling.",
         "exit_code": 1,
@@ -1548,8 +1633,13 @@ async def execute_tool_block(
         | _MissingToolSecurityContext
     ) = _MISSING_TOOL_SECURITY_CONTEXT,
     exact_approval: Optional[ExactToolApproval] = None,
+    delegation_gate: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
+
+    ``delegation_gate`` is this turn's delegation decision (src.agent_loop
+    DelegationGate.as_execution_scope): it words the refusal of a gated tool and
+    limits a continue-only tool to the chat's own workers.
 
     Thin wrapper: bind the per-turn workspace (so the path resolvers + subprocess
     cwd confine to it) for the duration of this call, then delegate. Reset on the
@@ -1682,6 +1772,7 @@ async def execute_tool_block(
             tool_policy=tool_policy,
             allow_private=allow_private,
             delegation_authorized=delegation_authorized,
+            delegation_gate=delegation_gate,
             tool_discovery=tool_discovery,
             approved_document_id=(
                 exact_approval.pending.document_id
@@ -1744,6 +1835,7 @@ async def _execute_tool_block_impl(
     tool_policy: Optional[Any] = None,
     allow_private: bool = False,
     delegation_authorized: Optional[bool] = None,
+    delegation_gate: Optional[Dict[str, Any]] = None,
     tool_discovery: Optional[Any] = None,
     approved_document_id: Optional[str] = None,
     approved_document_version: Optional[int] = None,
@@ -1853,9 +1945,28 @@ async def _execute_tool_block_impl(
         # is just disabled; only file-reading MCP tools get the vault message.
         if tool_requires_private_grant(tool) and tool not in ("bash", "python") and allow_private is not True:
             return desc, private_tool_denial(tool)
+        if delegation_gate and tool in delegation_gate.get("gated", ()):
+            from src.delegation_consent import denial_message
+
+            logger.info("Tool held back by delegation policy: %s", tool)
+            return desc, {
+                "error": denial_message(tool, delegation_gate.get("policy", "explicit")),
+                "blocked": True, "blocked_reason": "delegation_policy", "exit_code": 1,
+            }
         result = {"error": f"Tool '{tool}' is disabled by user. Continue without it and tell the user it is turned off.", "exit_code": 1}
         logger.info(f"Tool blocked by user: {tool}")
         return desc, result
+
+    # A consented chat may continue its own workers without new wording; starting
+    # one is still this turn's decision (src.delegation_consent).
+    if delegation_gate and tool in delegation_gate.get("continue_only", ()):
+        from src.delegation_consent import continuation_refusal
+
+        refusal = continuation_refusal(tool, content, session_id, owner)
+        if refusal:
+            logger.info("Tool call is not a continuation, held back by delegation policy: %s", tool)
+            return f"{tool}: BLOCKED", {"error": refusal, "blocked": True,
+                                        "blocked_reason": "delegation_policy", "exit_code": 1}
 
     # Defense-in-depth for per-agent capability profiles. The prompt/schema
     # layer hides disallowed capabilities; these checks also reject a stale or
@@ -2015,9 +2126,15 @@ async def _execute_tool_block_impl(
                 "Tool blocked by worker capacity: tool=%s action=%s active=%s limit=%s",
                 tool, _tool_action(content, "run"), _live_children, _limit,
             )
+            holders = capacity_holders(session_id)
+            note = ""
+            if tool == "send_to_session":
+                steered, note = _steer_worker_holding_slot(content, session_id, owner, holders)
+                if steered is not None:
+                    return f"{tool}: STEERED", steered
             from src import outcome_wiring as _outcome_wiring
             _outcome_wiring.block_capacity(owner, session_id, _limit, _live_children)
-            return f"{tool}: BLOCKED", _worker_capacity_result(tool, _limit, _live_children)
+            return f"{tool}: BLOCKED", _worker_capacity_result(tool, _limit, _live_children, holders, note)
 
     if tool_policy and any(tool_policy.blocks(name) for name in policy_names):
         desc = f"{tool}: BLOCKED"

@@ -114,6 +114,21 @@ _USE_AN_AGENT_RE = re.compile(
 )
 
 
+# Handing work to a named role: "have the Lead Engineer worker implement X",
+# "use the lead engineer to finish this". The role noun must be followed by "to"
+# or an action verb, so "use the agent loop to debug" and "the worker pool"
+# stay prose. A determiner is required, as for _USE_AN_AGENT_RE.
+_ROLE_NOUN = (r"(?:agent|worker|specialist|engineer|developer|reviewer|designer|architect|"
+              r"researcher|analyst|planner|auditor|tester)")
+_ROLE_ACTION = (r"(?:to|implement|fix|build|write|review|finish|handle|do|run|check|audit|investigate|"
+                r"draft|design|refactor|test|update|create|add|make|take|work|continue|complete|look)")
+_USE_A_ROLE_RE = re.compile(
+    r"\b(?:use|employ|have|ask|get|let|tell)\s+(?:the|my|our|your|that|this)\s+"
+    r"(?:[\w-]+\s+){0,3}?" + _ROLE_NOUN + r"\s+" + _ROLE_ACTION + r"\b",
+    re.IGNORECASE,
+)
+
+
 # Prohibition, not mere co-occurrence of a negative word and an agent noun.
 #
 # The old form was `(do not|don't|never|without|no) ... {0,65} ... agents`
@@ -132,7 +147,7 @@ _USE_AN_AGENT_RE = re.compile(
 _NO_DELEGATION_RE = re.compile(
     r"(?:"
     r"\b(?:do\s+not|do\s*n'?t|never|please\s+do\s*n'?t)\b[^.!?\n]{0,65}"
-    r"\b(?:delegat\w*|sub[ -]?agents?|agents?|workers?|specialists?)\b"
+    r"\b(?:delegat\w*|sub[ -]?agents?|agents?|workers?|specialists?|engineers?|developers?|reviewers?|designers?)\b"
     r"|"
     r"\b(?:without|no)\s+(?:any\s+|more\s+|further\s+|additional\s+|other\s+|new\s+)*"
     r"(?:delegation|sub[ -]?agents?|agents|workers|specialists)\b"
@@ -188,6 +203,7 @@ def _clause_orchestration(clause: str) -> bool:
         or _USING_AGENTS_RE.search(clause)
         or _USE_AGENTS_RE.search(clause)
         or _USE_AN_AGENT_RE.search(clause)
+        or _USE_A_ROLE_RE.search(clause)
     )
 
 
@@ -240,6 +256,14 @@ def explicit_delegation_requested(text: str) -> bool:
         if _EXPLICIT_DELEGATION_RE.search(clause):
             return True
     return orchestration_requested(text)
+
+
+def delegation_prohibited(text: str) -> bool:
+    """True when the person forbids agents and asks for none in the same message."""
+    text = str(text or "")
+    if explicit_delegation_requested(text):
+        return False
+    return any(_NO_DELEGATION_RE.search(clause) for clause in _clauses(text))
 
 
 def delegation_intent_text(messages: List[Dict]) -> str:

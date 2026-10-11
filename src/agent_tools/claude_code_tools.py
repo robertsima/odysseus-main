@@ -330,6 +330,25 @@ def _head_branch(repository: Path) -> str:
     return head[:12] if head else ""
 
 
+def _checkouts_under(root: Path, managed_root: Optional[Path]) -> list[Path]:
+    """The root, its direct children, and for the managed worktree root the
+    ``_repos/<repository key>/<name>`` worktrees of other repositories."""
+    candidates = [root]
+    try:
+        children = sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith("."))
+    except OSError:
+        children = []
+    candidates.extend(children)
+    if managed_root is not None and root == managed_root:
+        from src.agent_worktree.config import REPOSITORY_WORKTREE_DIR
+        try:
+            for group in sorted(p for p in (root / REPOSITORY_WORKTREE_DIR).iterdir() if p.is_dir()):
+                candidates.extend(sorted(p for p in group.iterdir() if p.is_dir() and not p.name.startswith(".")))
+        except OSError:
+            pass
+    return [path for path in candidates if (path / ".git").exists()]
+
+
 def discover_repositories(limit: int = 25) -> list[dict]:
     """Git checkouts/worktrees at or one level below each approved root.
 
@@ -337,20 +356,23 @@ def discover_repositories(limit: int = 25) -> list[dict]:
     because the agent had no way to learn which paths *are* approved. Listing
     the real candidates (like the worktree ``doctor`` does) is what lets the
     one permitted retry succeed.
+
+    Roots take turns when the limit bites, so a long first root cannot hide the
+    managed worktrees under a later one (2026-10-10).
     """
+    managed_root = _managed_worktree_root()
+    per_root: list[tuple[Path, list[Path]]] = [
+        (root, _checkouts_under(root, managed_root)) for root in repository_roots() if root.is_dir()
+    ]
     found: list[dict] = []
     seen: set[str] = set()
-    for root in repository_roots():
-        if not root.is_dir():
-            continue
-        candidates = [root]
-        try:
-            candidates.extend(sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")))
-        except OSError:
-            pass
-        for path in candidates:
+    for depth in range(max((len(paths) for _root, paths in per_root), default=0)):
+        for root, paths in per_root:
+            if depth >= len(paths):
+                continue
+            path = paths[depth]
             key = str(path)
-            if key in seen or not (path / ".git").exists():
+            if key in seen:
                 continue
             seen.add(key)
             # A linked worktree's ".git" is a pointer file; say which it is so
