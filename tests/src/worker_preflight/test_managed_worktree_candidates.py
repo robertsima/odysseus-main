@@ -5,6 +5,7 @@ listed it as a candidate, and `vet_workspace` refused it ("listed but rejected")
 Or it was missing from the list, so a resume said the chat had no workspace.
 """
 import os
+import importlib
 import subprocess
 
 import pytest
@@ -33,7 +34,7 @@ def layout(tmp_path, monkeypatch):
     monkeypatch.delenv("ODYSSEUS_AGENT_WORKTREE_ROOT", raising=False)
     roots = {"value": [str(data / "development")]}
     monkeypatch.setattr(
-        "src.agent_tools.claude_code_tools._setting",
+        importlib.import_module("src.agent_tools.claude_code_tools"), "_setting",
         lambda key, default=None: roots["value"] if key == "claude_code_repository_roots" else default,
     )
     te._REPO_SUBDIRS_CACHE.clear()

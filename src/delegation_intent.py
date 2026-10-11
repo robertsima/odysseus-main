@@ -242,6 +242,14 @@ def explicit_delegation_requested(text: str) -> bool:
     return orchestration_requested(text)
 
 
+def delegation_prohibited(text: str) -> bool:
+    """True when the person forbids agents and asks for none in the same message."""
+    text = str(text or "")
+    if explicit_delegation_requested(text):
+        return False
+    return any(_NO_DELEGATION_RE.search(clause) for clause in _clauses(text))
+
+
 def delegation_intent_text(messages: List[Dict]) -> str:
     """Carry explicit human authorization across 'continue', never skill prose."""
     human = [text for msg in messages if (text := _user_intent_text(msg)) is not None]

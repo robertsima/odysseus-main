@@ -1555,8 +1555,13 @@ async def execute_tool_block(
         | _MissingToolSecurityContext
     ) = _MISSING_TOOL_SECURITY_CONTEXT,
     exact_approval: Optional[ExactToolApproval] = None,
+    delegation_gate: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
+
+    ``delegation_gate`` is this turn's delegation decision (src.agent_loop
+    DelegationGate.as_execution_scope): it words the refusal of a gated tool and
+    limits a continue-only tool to the chat's own workers.
 
     Thin wrapper: bind the per-turn workspace (so the path resolvers + subprocess
     cwd confine to it) for the duration of this call, then delegate. Reset on the
@@ -1689,6 +1694,7 @@ async def execute_tool_block(
             tool_policy=tool_policy,
             allow_private=allow_private,
             delegation_authorized=delegation_authorized,
+            delegation_gate=delegation_gate,
             tool_discovery=tool_discovery,
             approved_document_id=(
                 exact_approval.pending.document_id
@@ -1751,6 +1757,7 @@ async def _execute_tool_block_impl(
     tool_policy: Optional[Any] = None,
     allow_private: bool = False,
     delegation_authorized: Optional[bool] = None,
+    delegation_gate: Optional[Dict[str, Any]] = None,
     tool_discovery: Optional[Any] = None,
     approved_document_id: Optional[str] = None,
     approved_document_version: Optional[int] = None,
@@ -1860,9 +1867,28 @@ async def _execute_tool_block_impl(
         # is just disabled; only file-reading MCP tools get the vault message.
         if tool_requires_private_grant(tool) and tool not in ("bash", "python") and allow_private is not True:
             return desc, private_tool_denial(tool)
+        if delegation_gate and tool in delegation_gate.get("gated", ()):
+            from src.delegation_consent import denial_message
+
+            logger.info("Tool held back by delegation policy: %s", tool)
+            return desc, {
+                "error": denial_message(tool, delegation_gate.get("policy", "explicit")),
+                "blocked": True, "blocked_reason": "delegation_policy", "exit_code": 1,
+            }
         result = {"error": f"Tool '{tool}' is disabled by user. Continue without it and tell the user it is turned off.", "exit_code": 1}
         logger.info(f"Tool blocked by user: {tool}")
         return desc, result
+
+    # A consented chat may continue its own workers without new wording; starting
+    # one is still this turn's decision (src.delegation_consent).
+    if delegation_gate and tool in delegation_gate.get("continue_only", ()):
+        from src.delegation_consent import continuation_refusal
+
+        refusal = continuation_refusal(tool, content, session_id, owner)
+        if refusal:
+            logger.info("Tool call is not a continuation, held back by delegation policy: %s", tool)
+            return f"{tool}: BLOCKED", {"error": refusal, "blocked": True,
+                                        "blocked_reason": "delegation_policy", "exit_code": 1}
 
     # Defense-in-depth for per-agent capability profiles. The prompt/schema
     # layer hides disallowed capabilities; these checks also reject a stale or

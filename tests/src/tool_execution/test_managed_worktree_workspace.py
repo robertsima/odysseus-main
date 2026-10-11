@@ -4,6 +4,7 @@ Bug (2026-10-10): the repository-root allowlist was cached for 5 seconds. A path
 check made before the worktree root existed cached "no readable root", so the
 first worktree created in the next 5 seconds was refused as app state.
 """
+import importlib
 import subprocess
 
 import pytest
@@ -29,7 +30,7 @@ def test_a_worktree_made_right_after_a_path_check_is_accepted(tmp_path, monkeypa
     monkeypatch.setenv("ODYSSEUS_AGENT_SOURCE_REPO", str(source))
     monkeypatch.delenv("ODYSSEUS_AGENT_WORKTREE_ROOT", raising=False)
     monkeypatch.setattr(
-        "src.agent_tools.claude_code_tools._setting",
+        importlib.import_module("src.agent_tools.claude_code_tools"), "_setting",
         lambda key, default=None: [str(data / "development")] if key == "claude_code_repository_roots" else default,
     )
     te._REPO_SUBDIRS_CACHE.clear()
