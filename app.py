@@ -845,6 +845,8 @@ app.include_router(setup_editor_draft_routes())
 # Outcomes: one record per intent, linked to the systems of record
 from routes.outcome_routes import setup_outcome_routes
 app.include_router(setup_outcome_routes())
+from routes.today_routes import setup_today_routes
+app.include_router(setup_today_routes())
 
 # Capture: one line in, routed to Todoist, the calendar, a note or an outcome, once
 from routes.capture_routes import setup_capture_routes
@@ -1035,6 +1037,10 @@ async def serve_tasks(request: Request):
 
 @app.get("/library")
 async def serve_library(request: Request):
+    return await serve_index(request)
+
+@app.get("/today")
+async def serve_today(request: Request):
     return await serve_index(request)
 
 @app.get("/backgrounds")

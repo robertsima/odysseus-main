@@ -606,6 +606,47 @@ returned as `key`.
 tasks, reminders, appointments and follow-ups; `manage_notes`, `manage_calendar`
 and the Todoist tool remain for edits, queries and bulk changes.
 
+## Today
+
+Today is a short list that answers "what should I do now?". It shows at most five
+items that need the person today and three that are worth starting or resuming,
+each with a one-line reason. It reads every source live and stores nothing of
+its own; snooze and waiting live on outcomes.
+
+| | |
+|---|---|
+| Routes | `routes/today_routes.py` (`GET /api/today`, `POST /api/today/action`) |
+| Server | `src/today.py` |
+| Client | `static/js/today.js`, deep link `/today` |
+| Sources | Todoist (`td today --json`, admin or single user only), the owner's calendars, due notes and checklists, outcomes, resumable agent runs |
+
+**Ranking.** Overdue first, then due today, then outcomes blocked on the person
+(`recovery` of `user` or `approval`), then waiting outcomes whose follow-up is due.
+The `next` list orders by the person's priority, then active outcomes, resumable
+runs and open outcomes, then the most recently touched. Items cut from `today` by
+the cap move to the head of `next`. A snoozed outcome stays hidden until
+`snoozed_until`. An item that an open outcome links to (a Todoist task, event,
+note, run or chat) counts once, as the outcome. A run is resumable when it was
+`interrupted` or `partial` within seven days and no later run exists in its chat.
+
+**Sources fail alone.** Each source has its own timeout. One that raises or times
+out is named in `degraded` and the rest still render. Todoist that is not set up
+is skipped without a warning. Runs, notes, calendars and outcomes are filtered to
+the authenticated owner; rows with no owner belong to nobody.
+
+**Actions.** `start` makes an outcome linked to the item if there is none, opens a
+new chat seeded with it, and sets the outcome `active`. `resume` sends a worker
+chat back to work through `send_to_session`, so workspace, preflight, capacity and
+approval rules apply unchanged; a refusal becomes a blocker on the outcome.
+`defer` sets `snoozed_until` (default tomorrow 09:00 local). `wait` needs
+`waiting_on` and sets a follow-up (default three days, 09:00 local). `done` on an
+outcome records the person's confirmation; on a Todoist task it runs
+`td task complete`, and on a note it archives the note.
+
+**No action changes a due date or priority.** Defer and wait write only to the
+outcome. Done on a Todoist task or note completes it in its own system and attaches
+a `note` evidence item to any outcome linked to it.
+
 ## Workbench and agent worktrees
 
 Two things that sit next to each other: a window showing what every agent is

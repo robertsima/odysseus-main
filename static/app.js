@@ -35,6 +35,8 @@ import workbenchModule from './js/workbench.js?v=20260930agentroom1';
 import './js/chatSettings.js?v=20260918approvals1';
 // Agents dashboard: fleet view, approvals hub, steer/stop/launch (self-initialising).
 import './js/agentsDashboard.js?v=20260930agentroom1';
+// Today: the calm entry point, what needs you now plus one-line capture (self-initialising).
+import todayModule from './js/today.js?v=20261010today1';
 // User-customizable tool order shared by the icon rail and sidebar Tools list.
 import './js/navOrder.js?v=20260916accountprefs1';
 import voiceRecorderModule from './js/voiceRecorder.js';
@@ -204,6 +206,7 @@ function initRailHoverLabels() {
     'rail-delete-session': 'Delete',
     'rail-chats': 'Chat',
     'rail-documents': 'Docs',
+    'rail-today': 'Today',
     'rail-calendar': 'Calendar',
     'rail-compare': 'Compare',
     'rail-cookbook': 'Cookbook',
@@ -1107,6 +1110,11 @@ function initializeEventListeners() {
     });
   }
 
+  // Today (sidebar + rail) — js/today.js
+  [el("rail-today"), el("tool-today-btn")].filter(Boolean).forEach(btn => {
+    btn.addEventListener("click", () => todayModule.toggle());
+  });
+
   // Tasks tool button
   const toolTasksBtn = el('tool-tasks-btn');
   if (toolTasksBtn) {
@@ -1247,6 +1255,7 @@ function initializeEventListeners() {
         setTimeout(_go, 200);
       }
     },
+    '/today':    () => todayModule.open(),
     '/calendar': () => calendarModule && calendarModule.openCalendar(),
     '/cookbook': () => document.getElementById('tool-cookbook-btn')?.click(),
     '/email':    () => {

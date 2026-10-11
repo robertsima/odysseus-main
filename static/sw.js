@@ -9,7 +9,7 @@
 //   - Other static assets (images/fonts/libs): cache-first with bg refresh.
 //   - API / non-GET: never cached.
 // Bump CACHE_NAME whenever the precache list or SW logic changes.
-const CACHE_NAME = 'agamemnon-v392-shared-appearance';
+const CACHE_NAME = 'agamemnon-v393-today';
 const SHELL_NETWORK_TIMEOUT_MS = 2500;
 
 // KaTeX resolves these from its own stylesheet, so caching the CSS without them
@@ -88,6 +88,7 @@ const PRECACHE = [
   '/static/js/tasks.js',
   '/static/js/assistant.js',
   '/static/js/agentsDashboard.js',
+  '/static/js/today.js',
   '/static/js/agentMenu.js',
   '/static/js/navOrder.js',
   '/static/js/calendar.js',
