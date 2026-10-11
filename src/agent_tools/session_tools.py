@@ -525,6 +525,51 @@ def _point_to_stored_worker_result(out: Dict, target_sid: str, caller: Optional[
         "worker's tools; do not ask a finished worker to repeat or resend its result.")
 
 
+_NO_CLOSING_TEXT = "(the sub-agent finished with tool calls but no closing text)"
+# Detached finishers, held so the event loop does not drop them mid-run.
+_DETACHED: set = set()
+
+
+def _exchange_verdict(outcome: Dict) -> tuple:
+    """(run status, verb) for a finished child exchange. The reply alone doesn't
+    say the work is done: it can end on an approval card or run out of rounds."""
+    if outcome.get("stopped"):
+        return "cancelled", "stopped"
+    if outcome.get("awaiting_approval"):
+        return "waiting_approval", "is waiting for approval"
+    if outcome.get("rounds_exhausted"):
+        return "incomplete", "ran out of rounds"
+    return "completed", "replied"
+
+
+async def _as_child_run(exchange):
+    """Run a child's agent turn marked as a child run, not a top-level chat's.
+    The scope lives in the child's own task so it can outlive the caller's."""
+    from src.agent_control import child_run_scope
+
+    with child_run_scope():
+        return await exchange
+
+
+async def _await_child(child: "asyncio.Future", running, finish_detached):
+    """Wait for a child exchange without letting the caller's cancellation kill it.
+
+    The exchange used to run inline in the calling turn, so a newer message in
+    that chat, Stop or shutdown cancelled the child too. Cancelled while the
+    child is mid-run, the caller's contexts (the chat shown as busy) move to
+    ``finish_detached``, which waits for the child and hands its result back.
+    """
+    try:
+        return await asyncio.shield(child)
+    except asyncio.CancelledError:
+        if child.done():
+            raise
+        task = asyncio.ensure_future(finish_detached(child, running.pop_all()))
+        _DETACHED.add(task)
+        task.add_done_callback(_DETACHED.discard)
+        raise
+
+
 async def send_to_session(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
     """Send a message to an existing session and get a response.
 
@@ -689,11 +734,49 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
         outcome: Dict = {}
         from src import agent_runs
 
-        try:
-            # The child chat shows as working in every sidebar while it runs;
-            # its agent turn is a child run, not a top-level chat's.
-            from src.agent_control import child_run_scope
+        async def finish_detached(child, owned):
+            """The calling turn was cancelled with the child mid-run: let it
+            finish, save its exchange, close its run and hand the result back
+            to the caller's chat, as a launched worker's end does."""
+            from src import agent_control
 
+            status, text, events, error = "completed", "", [], ""
+            try:
+                with owned:
+                    try:
+                        text, events = await child
+                        if not text.strip() and events:
+                            text = _NO_CLOSING_TEXT
+                        status, _verb = _exchange_verdict(outcome)
+                    except asyncio.CancelledError:
+                        status, text = "cancelled", "(the sub-agent was cancelled before finishing)"
+                    except Exception as exc:
+                        status, error = "failed", str(exc)[:2000]
+                        events = list(getattr(exc, "tool_events", None) or [])
+                        partial = str(getattr(exc, "partial_text", "") or "").strip()
+                        text = f"Sub-agent failed: {exc}" + (f"\n\nOutput before the failure:\n{partial}" if partial else "")
+                origin = {"source": "agent", "from_session": session_id or "",
+                          "from_session_name": _session_display_name(_session_manager, session_id)}
+                reply_meta = {**origin, "direction": "reply", "model": sess.model,
+                              **({"status": status} if status != "completed" else {}),
+                              **({"error": error} if error else {}),
+                              **({"tool_events": events} if events else {})}
+                sess.add_message(ChatMessage("user", message, {**origin, "direction": "inbound"}))
+                sess.add_message(ChatMessage("assistant", text, reply_meta))
+                _session_manager.save_sessions()
+                activity.run_finished(
+                    session_id, "session", run_id, f"Sub-agent · {sess.name or target_sid} {status}",
+                    status=status, owner=owner,
+                    data={"target_session": target_sid, "target_session_name": sess.name, "mode": mode,
+                          "steps": len(events), "result_excerpt": text[:400],
+                          **({"error": error} if error else {})})
+                if session_id and status != "cancelled":
+                    await agent_control._hand_off(_session_manager, session_id, sess, message, text, status, owner)
+            except Exception:
+                logger.warning("send_to_session: detached child %s could not hand back", target_sid, exc_info=True)
+
+        try:
+            # The child chat shows as working in every sidebar while it runs.
             from contextlib import ExitStack
             from src.agent_lifecycle import unit_lock
             from core.database import Session as DbSession, get_db_session
@@ -706,11 +789,13 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
                         if archived:
                             raise ValueError("Restore the target chat before starting work")
                     running.enter_context(agent_runs.track_external(target_sid, source="subagent", owner=owner))
-                    running.enter_context(child_run_scope())
                 if mode == "agent":
                     from src.headless_agent import run_headless
 
-                    response, tool_events = await run_headless(
+                    # A task of its own, shielded: when the calling turn is
+                    # cancelled the exchange keeps running and hands back
+                    # (_await_child).
+                    child = asyncio.ensure_future(_as_child_run(run_headless(
                         runner, context,
                         max_rounds=profile["max_rounds"] if profile else SUBAGENT_MAX_ROUNDS,
                         disabled_tools=set(profile["disabled_tools"]) if profile else frozenset(),
@@ -731,9 +816,10 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
                         # to wrap up; the no-profile default stays advisory.
                         wrap_up_round=(profile["max_rounds"]
                                        if profile and (profile.get("max_rounds") or 0) > 0 else 0),
-                    )
+                    )))
+                    response, tool_events = await _await_child(child, running, finish_detached)
                     if not response.strip() and tool_events:
-                        response = "(the sub-agent finished with tool calls but no closing text)"
+                        response = _NO_CLOSING_TEXT
                 else:
                     # Same request-local refresh the chat route and headless
                     # workers do. The chat's saved headers can hold a bearer
@@ -795,16 +881,7 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
         activity.publish(session_id, "message", f"← {sess.name or target_sid}: {response[:160]}",
                          source="session", run_id=run_id, owner=owner, detail=response[:2000])
         stopped = bool(outcome.get("stopped"))
-        # The reply alone doesn't say the work is done: a worker can end its
-        # turn on an approval card or run out of rounds.
-        if stopped:
-            run_status, verb = "cancelled", "stopped"
-        elif outcome.get("awaiting_approval"):
-            run_status, verb = "waiting_approval", "is waiting for approval"
-        elif outcome.get("rounds_exhausted"):
-            run_status, verb = "incomplete", "ran out of rounds"
-        else:
-            run_status, verb = "completed", "replied"
+        run_status, verb = _exchange_verdict(outcome)
         activity.run_finished(
             session_id, "session", run_id,
             f"Sub-agent · {sess.name or target_sid} {verb}",
