@@ -999,6 +999,21 @@ failure hand-back. A request the provider refused (400, 401, 403, 429) is
 never resumed. On 2026-10-07/08 five worker runs ended this way, and the admin
 model resumed by hand twice and then stopped; nothing ran for 15 min.
 
+**After an app restart.** At startup, every run the old process left live is
+marked `interrupted` with `interrupted_reason` (the restart time and the tool
+and command it was running; a shell `tool_start` is saved at once so the
+command is on disk). A worker among them resumes in its own chat when it
+started in the last 6 hours, its parent chat has room, and it has been resumed
+after restarts fewer than `agent_worker_auto_resume_limit` times (the count is
+`restart_resumes` on the run lineage). The harness note names the command and
+tells it to take a narrower step, such as `python -m tests.run affected`. The
+parent chat gets one message either way. A worker that is not resumed ends it
+with a `Needs user:` line saying what the person can do. A `send_to_session`
+exchange in agent mode runs as its own task: if the calling turn is cancelled
+(newer message, Stop, shutdown), the child finishes and hands back to that chat.
+A cancelled turn's log line names the cause (new message, Stop, shutdown, or
+unknown), not a client disconnect.
+
 **Publishing is a pause.** Approving a publish request in the browser pushes
 and writes `[Publish approved by …]` into the chat that asked; nothing ran
 after it, so nobody checked the pull request's CI. `schedule_publish_followup`

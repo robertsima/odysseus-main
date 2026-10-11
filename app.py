@@ -1166,6 +1166,18 @@ async def _startup_event():
         _startup_tasks.append(start_bg_monitor())
     except Exception as _e:
         logger.warning("Failed to start background-job monitor: %s", _e)
+    # Close the runs the previous process left live now, with a reason, rather
+    # than on first read; then resume the workers among them in the background
+    # (src/agent_control.py, "recovery after an app restart").
+    try:
+        from src import agent_activity as _agent_activity
+        from src import agent_control as _agent_control
+        _interrupted_runs = _agent_activity.reconcile_interrupted()
+        if _interrupted_runs:
+            logger.info("Found %d run(s) interrupted by the last restart", len(_interrupted_runs))
+            _startup_tasks.append(asyncio.create_task(_agent_control.recover_after_restart(_interrupted_runs, delay_s=10)))
+    except Exception as _e:
+        logger.warning("Restart recovery of interrupted runs failed: %s", _e)
     # Incremental re-index of tracked vault directories. Without it, anything
     # that writes to an indexed tree — the AI updating its own notes, or a save
     # made outside the app — leaves RAG serving stale chunks indefinitely.

@@ -258,7 +258,8 @@ def _load_runs() -> None:
         if rec.get("status") in LIVE_RUN_STATUSES:
             rec["status"] = "interrupted"
             rec["finished_at"] = rec.get("finished_at") or now
-            rec.setdefault("summary", {})["interrupted_reason"] = _interruption_reason(rec, now)
+            reason, doing = _interruption_reason(rec, now)
+            rec.setdefault("summary", {}).update(interrupted_reason=reason, interrupted_while=doing)
             _restart_interrupted.append(str(rec.get("run_id")))
             flipped = True
     if flipped:
@@ -281,9 +282,10 @@ def _unfinished_tool(rec: dict) -> Optional[str]:
     return open_start
 
 
-def _interruption_reason(rec: dict, now: float) -> str:
-    """Why a run found live at load ended: the restart time, and the tool and
-    command it was in the middle of, from its progress or else its events."""
+def _interruption_reason(rec: dict, now: float) -> Tuple[str, str]:
+    """Why a run found live at load ended, and what it was doing: the restart
+    time, and the tool and command it was in the middle of, from its progress
+    or else its events."""
     when = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(now))
     progress = rec.get("progress") if isinstance(rec.get("progress"), dict) else {}
     tool = str(progress.get("current_tool") or "")
@@ -294,8 +296,9 @@ def _interruption_reason(rec: dict, now: float) -> str:
             doing = _unfinished_tool(rec) or ""
         except Exception:
             doing = ""
+    doing = _clamp(doing, 400)
     text = f"Interrupted by an app restart at {when}"
-    return f"{text} while running {_clamp(doing, 400)}" if doing else text
+    return (f"{text} while running {doing}" if doing else text), doing
 
 
 def reconcile_interrupted() -> List[dict]:
@@ -543,7 +546,7 @@ _RUN_SUMMARY_KEYS = frozenset({
     "requested_agents", "launched_agents", "research_requested", "research_completed", "research_failed",
     "usable_handoffs", "synthesis_status", "handoff_count", "artifact_count",
     "unresolved_count", "verification_failed",
-    "interrupted_reason", "restart_resumes", "resumed_from",
+    "interrupted_reason", "interrupted_while", "restart_resumes", "resumed_from",
 })
 
 
