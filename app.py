@@ -842,6 +842,10 @@ app.include_router(setup_gallery_routes())
 from routes.editor_draft_routes import setup_editor_draft_routes
 app.include_router(setup_editor_draft_routes())
 
+# Outcomes: one record per intent, linked to the systems of record
+from routes.outcome_routes import setup_outcome_routes
+app.include_router(setup_outcome_routes())
+
 # Scheduled tasks + event bus
 from src.task_scheduler import TaskScheduler
 task_scheduler = TaskScheduler(session_manager)
