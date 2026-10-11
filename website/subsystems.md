@@ -465,6 +465,57 @@ The personal assistant is not a separate subsystem: it is a `CrewMember` with
 `is_default_assistant=True` owning one pinned session and three daily check-in
 `ScheduledTask` rows (`routes/assistant_routes.py`).
 
+## Outcomes
+
+An outcome is one intent the person wants closed, either a project (idea to
+delivery) or an obligation (do it, follow up, close it). It exists because
+Todoist tasks, calendar events, notes, chats, agent runs, branches and pull
+requests each hold a piece of the intent and nothing tied them together.
+
+| | |
+|---|---|
+| Routes | `routes/outcome_routes.py` (`/api/outcomes/...`) |
+| Server | `src/outcomes.py` (the store and the state rules), `src/blockers.py`, `src/handback.py` |
+| Data | `outcomes`, `outcome_links`, `outcome_events` tables |
+| Agent tools | `manage_outcomes` (`src/agent_tools/outcome_tools.py`) |
+
+**Link, don't shadow.** A link holds the id of the item in the system that owns
+it (`todoist_task`, `calendar_event`, `note`, `chat`, `agent_run`,
+`scheduled_task`, `worktree`, `branch`, `pull_request`, `url`). The outcome never
+stores that item's title, due date or done-state. `due_at` is only for an
+outcome with no linked item that owns a date, and `snoozed_until` hides an
+outcome without touching any due date.
+
+**Done needs evidence.** `set_state(..., "done")` succeeds with at least one
+evidence item (`commit`, `pull_request`, `run`, `tests`, `review`, `note`) or with
+`confirmed_by_person`. Only the browser route can set the confirmation: the
+actor must be `person`, and an agent actor is ignored even if it passes the flag.
+A worker saying "done" is not evidence. `src/handback.py` reads the
+`Outcome: / Changed: / Checked: / Open:` report and keeps only claims with a
+fact behind them: a commit sha, a pull request, changed files, or a `Checked:`
+line with a passed-test count. A refused `done` returns an error result and
+writes nothing. Waiting needs `waiting_on`, and a blocker moves an open or
+active outcome to `blocked`.
+
+**Blockers.** `src/blockers.py` gives every stop one shape (`code`, `summary`,
+`recovery` of `auto`, `retry`, `user` or `approval`, and `user_action`, which is
+required when a person must act). Builders adapt worker preflight, `Needs
+user:` / `Needs parent:` lines, interrupted runs and failed task runs.
+
+**Routes.** `GET` and `POST /api/outcomes`; `GET` and `PATCH /{id}`;
+`POST /{id}/state` (`confirm` records the person's confirmation);
+`POST /{id}/links`, `DELETE /{id}/links/{link_id}`; `POST /{id}/blocker/clear`.
+`PATCH` edits title, detail, next action, waiting and follow-up fields, dates and
+priority, and cannot set state, evidence or confirmation. Every query filters on
+the authenticated owner with no null-owner sharing, and another user's id is a 404.
+
+**Agent tool.** `manage_outcomes` has the actions `list`, `get`, `create`,
+`update`, `set_state`, `link`, `unlink`, `add_evidence`, `set_blocker` and
+`clear_blocker`. The owner comes from the tool context, never the arguments. An
+agent cannot confirm, set a priority, or replace a due date the person set.
+`outcomes.record_worker_handback` applies a worker's final report to the
+outcomes linked to its chat, run or parent chat; it never raises.
+
 ## Workbench and agent worktrees
 
 Two things that sit next to each other: a window showing what every agent is

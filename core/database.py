@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from urllib.parse import unquote, urlparse
-from sqlalchemy import DDL, event, create_engine, Column, String, Text, Boolean, DateTime, Integer, ForeignKey, JSON, Index, func, inspect, text
+from sqlalchemy import DDL, event, create_engine, Column, String, Text, Boolean, DateTime, Integer, ForeignKey, JSON, Index, UniqueConstraint, func, inspect, text
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.ext.declarative import declarative_base, declared_attr
@@ -878,6 +878,64 @@ class EditorDraft(TimestampMixin, Base):
     __table_args__ = (
         Index('ix_editor_drafts_owner_updated', 'owner', 'is_active', 'updated_at'),
     )
+
+
+class Outcome(TimestampMixin, Base):
+    """One intent the person wants closed. It links to the systems of record
+    (Todoist, calendar, notes, chats, runs, PRs) and never copies their state."""
+    __tablename__ = "outcomes"
+
+    id                  = Column(String, primary_key=True, index=True)
+    owner               = Column(String, nullable=False, index=True)
+    title               = Column(String(300), nullable=False)
+    detail              = Column(Text, nullable=True)
+    kind                = Column(String, nullable=False, default="obligation")   # "project" | "obligation"
+    state               = Column(String, nullable=False, default="open", index=True)  # open|active|waiting|blocked|done|dropped
+    next_action         = Column(Text, nullable=True)
+    assignee            = Column(String, nullable=True)            # None = the person; "agent:<session_id>"
+    waiting_on          = Column(String, nullable=True)
+    follow_up_at        = Column(DateTime, nullable=True)
+    due_at              = Column(DateTime, nullable=True)          # only when no linked item owns a due date
+    priority            = Column(Integer, nullable=True)           # 1 (highest) to 4; set only by the person
+    snoozed_until       = Column(DateTime, nullable=True)
+    blocker_json        = Column(Text, nullable=True)
+    evidence_json       = Column(Text, nullable=False, default="[]")
+    confirmed_by_person = Column(Boolean, nullable=False, default=False)
+    completed_at        = Column(DateTime, nullable=True)
+    source              = Column(String, nullable=False, default="person")  # person | agent | capture
+
+    __table_args__ = (
+        Index('ix_outcomes_owner_state', 'owner', 'state'),
+    )
+
+
+class OutcomeLink(Base):
+    """A pointer from an outcome to an item in another system."""
+    __tablename__ = "outcome_links"
+
+    id         = Column(String, primary_key=True, index=True)
+    outcome_id = Column(String, ForeignKey("outcomes.id", ondelete="CASCADE"), nullable=False, index=True)
+    kind       = Column(String, nullable=False)
+    ref        = Column(String, nullable=False)
+    label      = Column(String, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=utcnow_naive)
+
+    __table_args__ = (
+        UniqueConstraint('outcome_id', 'kind', 'ref', name='uq_outcome_links_target'),
+        Index('ix_outcome_links_kind_ref', 'kind', 'ref'),
+    )
+
+
+class OutcomeEvent(Base):
+    """Append-only history of an outcome."""
+    __tablename__ = "outcome_events"
+
+    id          = Column(String, primary_key=True, index=True)
+    outcome_id  = Column(String, ForeignKey("outcomes.id", ondelete="CASCADE"), nullable=False, index=True)
+    at          = Column(DateTime, nullable=False, default=utcnow_naive)
+    actor       = Column(String, nullable=False, default="system")
+    kind        = Column(String, nullable=False)
+    detail_json = Column(Text, nullable=True)
 
 
 class TaskRun(Base):
