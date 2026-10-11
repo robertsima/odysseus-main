@@ -15,6 +15,7 @@ Durability scope: in-memory, survives as long as the server process runs (tab
 close / navigation / refresh). It does NOT survive a server restart.
 """
 import asyncio
+import contextvars
 import json
 import logging
 import time
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 class _Run:
     __slots__ = ("buffer", "subscribers", "status", "task", "evict_task",
-                 "owner", "source", "started_at", "finished_at", "run_id")
+                 "owner", "source", "started_at", "finished_at", "run_id", "cancel_cause")
 
     def __init__(self, owner: Optional[str] = None, source: str = "chat") -> None:
         self.buffer: list = []          # ordered SSE event strings (replay log)
@@ -42,6 +43,9 @@ class _Run:
         # Stable across every subscription/replay of this exact detached run.
         # The browser uses it to make local cost accounting replay-idempotent.
         self.run_id: str = uuid.uuid4().hex
+        # Why the task was cancelled, set where the cancel is issued:
+        # replaced | stopped | shutdown. None means nobody recorded a reason.
+        self.cancel_cause: Optional[str] = None
 
 
 _RUNS: Dict[str, _Run] = {}
@@ -61,6 +65,36 @@ _FINISHED: Dict[str, Dict] = {}
 # replay the result. After this, the run is evicted to bound memory — without
 # it, every session that ever streamed kept its entire event log forever.
 _EVICT_GRACE_S = 180
+
+
+_CAUSE_TEXT = {
+    "replaced": "a new message in the same chat replaced it",
+    "stopped": "the user pressed Stop",
+    "shutdown": "the server is shutting down",
+}
+# The run whose drain task is executing; the chat route's cancel handler runs
+# in that task and reads the cause through cancel_cause().
+_CURRENT_RUN: contextvars.ContextVar = contextvars.ContextVar("odysseus_current_run", default=None)
+
+
+def _cancel(run: _Run, cause: str) -> None:
+    """Cancel a run's task and record why. The first cause wins."""
+    if run.cancel_cause is None:
+        run.cancel_cause = cause
+    if run.task is not None:
+        run.task.cancel()
+
+
+def cancel_cause() -> str:
+    """Why the turn now being cancelled was cancelled, for the log line.
+
+    A detached turn survives a closed tab, so a cancel is a newer message, the
+    Stop control or shutdown. A stream outside a detached run (a compare pane)
+    is cancelled only when its client goes away."""
+    run = _CURRENT_RUN.get()
+    if run is None:
+        return "the client disconnected"
+    return _CAUSE_TEXT.get(run.cancel_cause or "", "unknown cause")
 
 
 def _publish(run: _Run, ev: str) -> None:
@@ -241,6 +275,7 @@ async def _drain(session_id: str, run: _Run, agen: AsyncGenerator[str, None],
     """Pull every event from the wrapped generator into the run buffer, fanning
     each out to live subscribers. Runs to completion regardless of subscribers."""
     subscribers_woken = False
+    _CURRENT_RUN.set(run)
 
     def _wake_subscribers() -> None:
         nonlocal subscribers_woken
@@ -321,7 +356,7 @@ def start(session_id: str, agen: AsyncGenerator[str, None], *, owner: Optional[s
             if prev.status == "running":
                 prev.status = "stopped"
                 _wake_run_subscribers(prev)
-            prev.task.cancel()
+            _cancel(prev, "replaced")
             prev_task = prev.task   # new run awaits this before it starts writing
         if prev.evict_task and not prev.evict_task.done():
             prev.evict_task.cancel()
@@ -399,8 +434,9 @@ async def stop_all(timeout: float = 4.0) -> int:
     """
     tasks = [run.task for run in list(_RUNS.values())
              if run.status == "running" and run.task and not run.task.done()]
-    for task in tasks:
-        task.cancel()
+    for run in list(_RUNS.values()):
+        if run.status == "running" and run.task and not run.task.done():
+            _cancel(run, "shutdown")
     if tasks:
         await asyncio.wait(tasks, timeout=timeout)
     return len(tasks)
@@ -418,7 +454,7 @@ async def stop_and_wait(session_id: str, timeout: float = 10.0) -> bool:
     run = get_active_run(session_id)
     if run is None or run.task is None or run.task.done():
         return False
-    run.task.cancel()
+    _cancel(run, "replaced")
     await asyncio.wait({run.task}, timeout=timeout)
     return True
 
@@ -437,6 +473,6 @@ def stop(session_id: str, expected_run_id: Optional[str] = None) -> bool:
     if run is None or (expected_run_id and run.run_id != expected_run_id):
         return False
     if run and run.task and not run.task.done():
-        run.task.cancel()
+        _cancel(run, "stopped")
         return True
     return False

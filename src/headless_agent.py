@@ -712,7 +712,7 @@ def _record_usage(sess, state: Dict[str, Any], owner: Optional[str]) -> None:
 _PROGRESS_EVENTS = frozenset({"agent_step", "tool_start", "tool_output", "round_usage"})
 
 
-def _tool_target(command: Any) -> Optional[str]:
+def _tool_target(command: Any, limit: int = 60) -> Optional[str]:
     """What a tool call works on, short enough for one line of the agent strip:
     the path, pattern, query or command head out of its arguments. "round 74 ·
     read_file" said nothing about where a worker was (2026-10-08)."""
@@ -733,7 +733,7 @@ def _tool_target(command: Any) -> Optional[str]:
             else:
                 return None
     text = " ".join(text.split())
-    return text if len(text) <= 60 else text[:57] + "..."
+    return text if len(text) <= limit else text[:limit - 3] + "..."
 
 
 def _track_progress(run_id: str, d: Dict[str, Any], state: Dict[str, Any]) -> None:
@@ -757,9 +757,14 @@ def _track_progress(run_id: str, d: Dict[str, Any], state: Dict[str, Any]) -> No
     elif kind == "tool_start":
         p["current_tool"] = d.get("tool")
         p["current_target"] = _tool_target(d.get("command"))
+        # The full command and its start, for the reason given if the app dies mid-run.
+        p["current_command"] = _tool_target(d.get("command"), 300)
+        p["current_started_at"] = time.time()
     elif kind == "tool_output":
         p["current_tool"] = None
         p["current_target"] = None
+        p["current_command"] = None
+        p["current_started_at"] = None
         p["tool_calls"] += 1
     else:
         for key, total in (("input", "input_tokens"), ("cached", "cached_tokens"), ("output", "output_tokens")):
@@ -768,7 +773,9 @@ def _track_progress(run_id: str, d: Dict[str, Any], state: Dict[str, Any]) -> No
             except (TypeError, ValueError):
                 pass
     p["last_event_at"] = time.time()
-    activity.note_progress(run_id, **p)
+    # A shell command is the one call long and heavy enough to take the process down.
+    shell = kind in ("tool_start", "tool_output") and d.get("tool") in ("bash", "python")
+    activity.note_progress(run_id, persist=shell, **p)
 
 
 async def _drain(sess, messages, state: Dict[str, Any], *, max_rounds: int, owner: Optional[str],

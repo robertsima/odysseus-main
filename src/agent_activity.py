@@ -78,6 +78,8 @@ _seq: Dict[str, int] = {}
 _loaded: Set[str] = set()
 _runs: Dict[str, dict] = {}
 _runs_loaded = False
+# Runs flipped to interrupted by the load that read the previous process's file.
+_restart_interrupted: List[str] = []
 # session_id -> run_id of the chat turn currently executing there. A turn
 # that ends without its own run_finished (client stop, generator closed,
 # an exception) is closed by the run manager through `close_turn`.
@@ -250,10 +252,89 @@ def _load_runs() -> None:
     except (OSError, ValueError):
         pass
     # A run that was still live when the process died never finished.
+    now = time.time()
+    flipped = False
     for rec in _runs.values():
         if rec.get("status") in LIVE_RUN_STATUSES:
             rec["status"] = "interrupted"
-            rec["finished_at"] = rec.get("finished_at") or time.time()
+            rec["finished_at"] = rec.get("finished_at") or now
+            reason, doing = _interruption_reason(rec, now)
+            rec.setdefault("summary", {}).update(interrupted_reason=reason, interrupted_while=doing)
+            _restart_interrupted.append(str(rec.get("run_id")))
+            flipped = True
+    for rec in _runs.values():
+        # Marked by interrupt_run when the last process shut down gracefully.
+        summary = rec.get("summary") or {}
+        if rec.get("status") == "interrupted" and summary.pop("recover_on_start", None):
+            _restart_interrupted.append(str(rec.get("run_id")))
+            flipped = True
+    if flipped:
+        # On disk before anything else can happen: a second kill must find these
+        # runs already interrupted, not flip them again with a later restart time.
+        _save_runs()
+
+
+def _unfinished_tool(rec: dict) -> Optional[str]:
+    """The last tool_start in the run's events with no tool_result after it."""
+    buf, _top = _read_tail(str(rec.get("session_id") or ""))
+    open_start: Optional[str] = None
+    for ev in buf:
+        if ev.get("run_id") != rec.get("run_id"):
+            continue
+        if ev.get("kind") == "tool_start":
+            open_start = str(ev.get("title") or "") or None
+        elif ev.get("kind") == "tool_result":
+            open_start = None
+    return open_start
+
+
+def _interruption_reason(rec: dict, now: float, shutdown: bool = False) -> Tuple[str, str]:
+    """Why a run found live at load ended, and what it was doing: the restart
+    time, and the tool and command it was in the middle of, from its progress
+    or else its events."""
+    when = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(now))
+    progress = rec.get("progress") if isinstance(rec.get("progress"), dict) else {}
+    tool = str(progress.get("current_tool") or "")
+    command = str(progress.get("current_command") or progress.get("current_target") or "")
+    doing = f"{tool}: {command}" if tool and command else tool
+    if not doing:
+        try:
+            doing = _unfinished_tool(rec) or ""
+        except Exception:
+            doing = ""
+    doing = _clamp(doing, 400)
+    text = f"Interrupted because the app shut down at {when}" if shutdown else f"Interrupted by an app restart at {when}"
+    return (f"{text} while running {doing}" if doing else text), doing
+
+
+def interrupt_run(run_id: str) -> Optional[dict]:
+    """Close a live run because the app is shutting down, and mark it for
+    recovery at the next start (a user Stop is ``cancelled`` and never is).
+    Saved at once: the process may be gone before the debounced write."""
+    with _lock:
+        _load_runs()
+        rec = _runs.get(str(run_id))
+        if rec is None or rec.get("status") not in LIVE_RUN_STATUSES:
+            return None
+        now = time.time()
+        reason, doing = _interruption_reason(rec, now, shutdown=True)
+        rec["status"] = "interrupted"
+        rec["finished_at"] = now
+        rec.setdefault("summary", {}).update(interrupted_reason=reason, interrupted_while=doing,
+                                             recover_on_start=True)
+        _save_runs()
+        return _copy_run(rec)
+
+
+def reconcile_interrupted() -> List[dict]:
+    """Close every run the previous process left live, now rather than on the
+    first read, and return those found (each carries ``interrupted_reason``).
+    Each run is returned once: a later call, or a later restart, finds none."""
+    with _lock:
+        _load_runs()
+        ids = list(_restart_interrupted)
+        _restart_interrupted.clear()
+        return [_copy_run(_runs[i]) for i in ids if i in _runs]
 
 
 def _save_runs() -> None:
@@ -448,7 +529,7 @@ PROGRESS_SAVE_S = 5.0
 _progress_saved_at: Dict[str, float] = {}
 
 
-def note_progress(run_id: Optional[str], **fields: Any) -> None:
+def note_progress(run_id: Optional[str], *, persist: bool = False, **fields: Any) -> None:
     """Merge live counters (round, tokens, current tool) into a run's record.
 
     A detached worker can run for a hundred rounds while its row shows only
@@ -458,7 +539,8 @@ def note_progress(run_id: Optional[str], **fields: Any) -> None:
     that matter out of the 500-event window. Persisted at most every
     ``PROGRESS_SAVE_S`` so a busy run does not rewrite the runs file per tool
     call; ``list_runs`` reads the in-memory record, so the UI is never behind.
-    Never raises.
+    ``persist`` saves now: a shell command can outlive the process that started
+    it, and the interruption reason is read from what reached disk. Never raises.
     """
     if not run_id:
         return
@@ -473,7 +555,7 @@ def note_progress(run_id: Optional[str], **fields: Any) -> None:
                 progress = rec["progress"] = {}
             progress.update(fields)
             now = time.time()
-            if now - _progress_saved_at.get(str(run_id), 0.0) >= PROGRESS_SAVE_S:
+            if persist or now - _progress_saved_at.get(str(run_id), 0.0) >= PROGRESS_SAVE_S:
                 _progress_saved_at[str(run_id)] = now
                 _save_runs()
     except Exception as exc:  # observability must never break the work it observes
@@ -489,6 +571,7 @@ _RUN_SUMMARY_KEYS = frozenset({
     "requested_agents", "launched_agents", "research_requested", "research_completed", "research_failed",
     "usable_handoffs", "synthesis_status", "handoff_count", "artifact_count",
     "unresolved_count", "verification_failed",
+    "interrupted_reason", "interrupted_while", "restart_resumes", "resumed_from", "recover_on_start",
 })
 
 
@@ -759,5 +842,6 @@ def _reset_for_tests() -> None:
         _runs.clear()
         _progress_saved_at.clear()
         _runs_loaded = False
+        _restart_interrupted.clear()
         _subscribers.clear()
         _active_turns.clear()

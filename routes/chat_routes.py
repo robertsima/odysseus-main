@@ -2440,7 +2440,7 @@ def setup_chat_routes(
                             yield chunk
                 except (asyncio.CancelledError, GeneratorExit):
                     if full_response and not incognito:
-                        logger.info("Client disconnected mid-stream (chat mode) for session %s, saving partial (%d chars)", session, len(full_response))
+                        logger.info("Turn cancelled (%s) for session %s, saving partial (%d chars)", agent_runs.cancel_cause(), session, len(full_response))
                         _stopped_content, _stopped_md = clean_thinking_for_save(
                             full_response,
                             {
@@ -2864,8 +2864,8 @@ def setup_chat_routes(
                         # what it was running (src/turn_trail.py).
                         _trail_note, _trail_events, _trail_texts = _trail.stopped_record()
                         if (full_response or _trail_events) and not incognito:
-                            logger.info("Client disconnected mid-stream for session %s, saving partial response (%d chars, %d tool calls)%s",
-                                        session, len(full_response), len(_trail_events),
+                            logger.info("Turn cancelled (%s) for session %s, saving partial response (%d chars, %d tool calls)%s",
+                                        agent_runs.cancel_cause(), session, len(full_response), len(_trail_events),
                                         f" {_trail_note}" if _trail_note else "")
                             _stopped_content2, _stopped_md2 = clean_thinking_for_save(
                                 full_response,

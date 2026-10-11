@@ -942,7 +942,8 @@ register_all([
             "When a worker's model request fails on a temporary provider error "
             "(a 5xx answer, a dropped connection, a timeout), the worker picks up "
             "where it stopped, after 30 seconds and then 2 minutes, this many "
-            "times before the failure is reported. 0 means report it at once."
+            "times before the failure is reported. The same limit caps how often a "
+            "worker is resumed after the app restarts under it. 0 means report it at once."
         ),
         group="Agents",
         min_value=0,

@@ -29,7 +29,7 @@ import re
 import threading
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from src import agent_activity as activity
 
@@ -947,7 +947,7 @@ async def _launch_worker(*, owner: Optional[str], task: str, profile_name: Optio
                         inline_profile: Optional[dict] = None, handoff: bool = True,
                         run_metadata: Optional[dict] = None, runtime_settings: Optional[dict] = None,
                         workspace: Optional[str] = None, requires: Optional[List[str]] = None,
-                        preflight: bool = True) -> dict:
+                        preflight: bool = True, resume: Optional[dict] = None) -> dict:
     """Start a worker in a fresh chat and return at once with its ids.
 
     The worker runs detached (like a chat turn survives a closed tab); its
@@ -958,6 +958,11 @@ async def _launch_worker(*, owner: Optional[str], task: str, profile_name: Optio
     it binds a workspace (``workspace``, else the parent chat's, else a
     checkout the task names) and attaches the file tools the task needs, or
     raises WorkerBlocked (a ValueError) with the fix, before any chat exists.
+
+    ``resume`` ({"session_id", "note"}) runs the worker again in that existing
+    chat instead of a new one, with ``note`` as the last message of its
+    context: the restart recovery's path, so capacity, preflight and the
+    hand-back to the parent apply as for any worker.
     """
     from src import agent_profiles, agent_runs
     from src.agent_tools.session_tools import _new_child_session
@@ -1025,9 +1030,14 @@ async def _launch_worker(*, owner: Optional[str], task: str, profile_name: Optio
             worker_preflight.record_blocked(parent_session, owner, task, checked)
             raise worker_preflight.WorkerBlocked(checked)
     child_kwargs = {"workspace": checked.workspace} if checked and checked.workspace else {}
-    sess, err = _new_child_session(manager, parent_session, owner, task, profile, **child_kwargs)
-    if err:
-        raise ValueError(err)
+    if resume:
+        sess = manager.get_session(resume["session_id"])
+        if sess is None or getattr(sess, "owner", None) != owner:
+            raise ValueError("the worker's chat is gone")
+    else:
+        sess, err = _new_child_session(manager, parent_session, owner, task, profile, **child_kwargs)
+        if err:
+            raise ValueError(err)
     if inline_profile is not None:
         # Workflow profiles are intentionally transient. Persist their complete
         # narrowed policy on the child before starting; the legacy child helper
@@ -1048,15 +1058,18 @@ async def _launch_worker(*, owner: Optional[str], task: str, profile_name: Optio
     # on this first turn and every reopened turn. Keep it out of history so it
     # cannot be duplicated or drift from the saved agent configuration.
     context: List[Dict[str, Any]] = [{"role": "user", "content": task}]
-    # Show the task in the worker's chat from the start. It was saved only when
-    # the run ended, so opening a running worker's chat showed an empty "New
-    # chat ready" screen. The run reads `context`, not the chat history.
-    try:
-        from core.models import ChatMessage as _ChatMessage
-        sess.add_message(_ChatMessage("user", task, {"source": "dashboard", "direction": "inbound"}))
-        manager.save_sessions()
-    except Exception:
-        logger.debug("worker task persist failed", exc_info=True)
+    if resume:
+        context = sess.get_context_messages() + [{"role": "user", "content": resume["note"]}]
+    else:
+        # Show the task in the worker's chat from the start. It was saved only when
+        # the run ended, so opening a running worker's chat showed an empty "New
+        # chat ready" screen. The run reads `context`, not the chat history.
+        try:
+            from core.models import ChatMessage as _ChatMessage
+            sess.add_message(_ChatMessage("user", task, {"source": "dashboard", "direction": "inbound"}))
+            manager.save_sessions()
+        except Exception:
+            logger.debug("worker task persist failed", exc_info=True)
     label = (f"{profile['name']} · "
              if profile and not profile.get("anonymous") and profile.get("name") not in (None, "worker") else "")
     # The loadout's own round budget, or 0 for no ceiling (the default). It is
@@ -1167,7 +1180,8 @@ async def _launch_worker(*, owner: Optional[str], task: str, profile_name: Optio
                              data={"status": "running", "auto_resume": resumes})
             # The agent strip shows this instead of a run that looks stuck; the
             # resumed run's first frame clears it.
-            activity.note_progress(run_id, waiting=note, current_tool=None, current_target=None)
+            activity.note_progress(run_id, waiting=note, current_tool=None, current_target=None,
+                                   current_command=None)
             if parent_session:
                 activity.publish(parent_session, "note", f"Worker {sess.name}: {note}", source="session",
                                  run_id=run_id, owner=owner, level="warning")
@@ -1187,6 +1201,11 @@ async def _launch_worker(*, owner: Optional[str], task: str, profile_name: Optio
         # continuation lets the parent write to it again.
         from src import worktree_writers as _ww
         _ww.unregister(run_id)
+        if status == "cancelled" and (activity.get_run(run_id) or {}).get("status") == "interrupted":
+            # interrupt_workers_for_shutdown cancelled this task: not a user
+            # stop, so no "stopped" hand-back. Startup recovery resumes it.
+            _WORKERS.pop(run_id, None)
+            return
         try:
             meta: Dict[str, Any] = {"source": "worker", "model": sess.model, "run_id": run_id,
                                     "status": status, **(run_metadata or {})}
@@ -1334,6 +1353,223 @@ def collect_worker_result(run_id: str, *, owner: Optional[str], session_id: Opti
     return result
 
 
+# -- recovery after an app restart ---------------------------------------
+# 2026-10-10: the app was hard-killed twice under a worker running a bash
+# command; Docker restarted it, nothing told the worker or its parent chat, and
+# the person typed "finish it" again and again. At startup the runs the last
+# process left live are closed with a reason (agent_activity.reconcile_interrupted)
+# and each worker among them is resumed in its own chat, unless it has already
+# been resumed `agent_worker_auto_resume_limit` times (the count rides on the
+# run lineage, so a command that kills the app every time cannot loop), it
+# started longer ago than the window, or its parent has no room for it. The
+# parent chat is told once either way.
+RESTART_RESUME_WINDOW_S = 6 * 3600
+
+
+def _restart_resume_note(doing: str, resumes: int, limit: int) -> str:
+    what = (f"while you were running `{doing}`. That command may have used up the machine's memory or "
+            "crashed the app, so do not run it again unchanged") if doing else (
+        "while you were working. If your last command was heavy, do not run it again unchanged")
+    return ("[Harness] The app restarted " + what + ". Your work so far is in the work trail above. "
+            "Continue from where it stopped; do not redo steps that already finished. Take a narrower "
+            "step instead, for example `python -m tests.run affected` rather than the full suite. If you "
+            "cannot go on without that command, say so on a `Needs user:` line. "
+            f"(Automatic resume {resumes} of {limit} after restarts.)")
+
+
+def _restart_worker_ids(rec: dict) -> Optional[Tuple[str, str]]:
+    """(parent chat, worker chat) when this run is a worker recovery may resume.
+
+    Two shapes carry a worker: a run ``_launch_worker`` filed under the worker's
+    own chat with ``parent_session`` set, and a ``send_to_session`` agent-mode
+    "Sub-agent" run, which is filed under the PARENT chat with the worker chat
+    in ``target_session`` and no ``parent_session`` (the 2026-10-10 production
+    runs). The parent's own "Continuing after worker" run has the second shape
+    without the title. Workflow children are left to the workflow's recovery.
+    """
+    summary = rec.get("summary") or {}
+    if rec.get("source") != "session" or summary.get("workflow_id") or summary.get("workflow_controller"):
+        return None
+    target, sid, parent = summary.get("target_session"), rec.get("session_id"), summary.get("parent_session")
+    if parent and target and target == sid:
+        return str(parent), str(sid)
+    if (not parent and target and sid and target != sid and summary.get("mode") == "agent"
+            and str(rec.get("title") or "").startswith("Sub-agent")):
+        return str(sid), str(target)
+    return None
+
+
+def _subagent_request(rec: dict) -> str:
+    """The message a send_to_session run carried: only its run_started event
+    kept it, because the exchange is saved to the worker's chat when it ends."""
+    for ev in activity.run_events(rec["run_id"]):
+        if ev.get("kind") == "run_started" and ev.get("detail"):
+            return str(ev["detail"])
+    return str(rec.get("title") or "")
+
+
+def _saved_workspace(session_id: str) -> Optional[str]:
+    try:
+        from core.database import get_session_settings
+
+        return (get_session_settings(session_id) or {}).get("workspace") or None
+    except Exception:
+        return None
+
+
+def _restart_refusal(rec: dict, parent_id: str, now: float) -> Optional[str]:
+    """Why this interrupted worker is not resumed, or None when it may be."""
+    summary = rec.get("summary") or {}
+    limit = _auto_resume_limit()
+    resumes = int(summary.get("restart_resumes") or 0)
+    if limit <= 0:
+        return "automatic resume is off (agent_worker_auto_resume_limit is 0)"
+    if resumes >= limit:
+        return (f"it has already been resumed {resumes} time(s) after restarts, the limit "
+                f"(agent_worker_auto_resume_limit) is {limit}")
+    if now - float(rec.get("started_at") or 0) > RESTART_RESUME_WINDOW_S:
+        return f"it started more than {RESTART_RESUME_WINDOW_S // 3600} hours ago"
+    try:
+        from core.database import get_session_settings
+        from src.session_settings import effective_worker_limit
+
+        cap = effective_worker_limit(get_session_settings(parent_id))
+    except Exception:
+        cap = 1
+    running = live_children(parent_id)
+    if cap <= 0 or running >= cap:
+        return f"the parent chat's worker limit is {cap} and {running} are running"
+    return None
+
+
+async def _recover_worker(rec: dict, now: float) -> bool:
+    """Resume or report one worker the restart interrupted. True when resumed."""
+    from core.models import ChatMessage
+    from src.ai_interaction import get_session_manager
+
+    summary = rec.get("summary") or {}
+    parent_id, worker_id = _restart_worker_ids(rec)
+    owner = rec.get("owner")
+    manager = get_session_manager()
+    worker = manager.get_session(worker_id) if manager else None
+    if worker is None:
+        return False
+    parent = manager.get_session(parent_id)
+    if worker_id != rec["session_id"]:
+        # A send_to_session exchange: its request was never saved to the worker's chat.
+        task = _subagent_request(rec)
+        try:
+            worker.add_message(ChatMessage("user", task, {
+                "source": "agent", "from_session": parent_id, "direction": "inbound",
+                "from_session_name": getattr(parent, "name", "") or ""}))
+        except Exception:
+            logger.debug("restart recovery could not save the interrupted request", exc_info=True)
+    else:
+        task = (next((str(m.content or "") for m in (worker.history or []) if m.role == "user"), "")
+                or str(rec.get("title") or ""))
+    reason = str(summary.get("interrupted_reason") or "Interrupted by an app restart")
+    doing = str(summary.get("interrupted_while") or "")
+    resumes = int(summary.get("restart_resumes") or 0)
+    limit = _auto_resume_limit()
+    try:
+        # The interrupted turn's partial output died with the process; the
+        # chat keeps the fact, as the upstream-error resume does.
+        worker.add_message(ChatMessage("assistant", f"({reason})", {
+            "source": "worker", "model": worker.model, "run_id": rec["run_id"], "status": "interrupted",
+            "error": reason}))
+        manager.save_sessions()
+    except Exception:
+        logger.debug("restart recovery could not save the interrupted turn", exc_info=True)
+    why = _restart_refusal(rec, parent_id, now)
+    new_run = None
+    if why is None:
+        from src import agent_profiles
+
+        profile_name = summary.get("profile")
+        try:
+            new_run = await launch_worker(
+                owner=owner, task=task, parent_session=parent_id,
+                profile_name=profile_name if profile_name and agent_profiles.get_profile(profile_name) else None,
+                workspace=_saved_workspace(worker_id),
+                run_metadata={"restart_resumes": resumes + 1, "resumed_from": rec["run_id"]},
+                resume={"session_id": worker_id, "note": _restart_resume_note(doing, resumes + 1, limit)})
+        except Exception as exc:
+            why = f"it could not be started again: {exc}"
+            logger.warning("restart recovery: worker %s not resumed: %s", worker_id, exc)
+    if parent is None:
+        return new_run is not None
+    outcome = f"resumed ({resumes + 1}/{limit})" if new_run else "not resumed"
+    activity.publish(parent_id, "note", f"Worker {worker.name}: {reason}; {outcome}",
+                     source="session", run_id=rec["run_id"], owner=owner, level="warning")
+    if new_run:
+        text = (f"{reason}. The worker was resumed automatically in its own chat "
+                f"(restart resume {resumes + 1} of {limit}). It continues from where it stopped with a "
+                "narrower step instead of re-running that command; its result arrives here when it finishes.")
+        await _hand_off(manager, parent_id, worker, task, text, "resumed", owner, continue_parent=False)
+        return True
+    text = (f"{reason}. The worker was not resumed: {why}.\n"
+            f"Needs user: Check that {doing or 'its last command'} is safe to run here, then tell the worker "
+            f"to continue in its chat ({worker.name}, session {worker_id}), or give it a narrower task.")
+    # A run too old to matter is reported without waking the parent's agent.
+    await _hand_off(manager, parent_id, worker, task, text, "interrupted", owner,
+                    continue_parent="hours ago" not in why)
+    return False
+
+
+async def interrupt_workers_for_shutdown(timeout: float = 3.0) -> int:
+    """On a graceful shutdown, mark the live workers interrupted and stop them.
+
+    Cancelling a worker's task at loop close made it look user-stopped
+    (`cancelled`, and its parent was told "the user stopped this worker"), so
+    startup never resumed it. The run is closed ``interrupted`` first
+    (agent_activity.interrupt_run) and the task cancelled; the cancel path
+    sees that status and hands nothing back. A real Stop does not come through
+    here and stays ``cancelled``. Returns how many were interrupted.
+    """
+    ids = [rec["run_id"] for rec in activity.list_runs(limit=400, active_only=True)
+           if rec.get("status") == "running" and _restart_worker_ids(rec)]
+    ids = [rid for rid in ids if activity.interrupt_run(rid)]
+    from src.agent_tools import session_tools
+
+    session_tools.cancel_children(ids)
+    tasks = [_WORKERS[rid] for rid in ids if rid in _WORKERS]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.wait(tasks, timeout=timeout)
+    return len(ids)
+
+
+async def recover_after_restart(interrupted: Optional[List[dict]] = None, *, delay_s: float = 0.0) -> dict:
+    """Resume or report the workers the previous process left running.
+
+    ``interrupted`` is what ``agent_activity.reconcile_interrupted`` returned
+    (the app runs that eagerly at startup and passes it in); when omitted it is
+    called here. ``delay_s`` lets the server finish starting (MCP servers
+    connect after it accepts traffic) before a resumed worker needs them.
+    Returns {"resumed": [runs], "not_resumed": [runs]}.
+    """
+    if interrupted is None:
+        interrupted = activity.reconcile_interrupted()
+    if delay_s > 0 and interrupted:
+        await asyncio.sleep(delay_s)
+    now = time.time()
+    out: Dict[str, List[dict]] = {"resumed": [], "not_resumed": []}
+    for rec in interrupted:
+        if _restart_worker_ids(rec) is None:
+            continue
+        try:
+            resumed = await _recover_worker(rec, now)
+        except Exception:
+            logger.warning("restart recovery failed for worker run %s", rec.get("run_id"), exc_info=True)
+            continue
+        out["resumed" if resumed else "not_resumed"].append(rec)
+    if interrupted:
+        logger.info("[restart-recovery] %d run(s) were live at restart; %d worker(s) resumed, %d reported",
+                    len(interrupted), len(out["resumed"]), len(out["not_resumed"]))
+    return out
+
+
 _HANDOFF_MAX_ROUNDS = 12
 # A worker that finishes while its parent chat is mid-turn waits for that turn
 # to end, then the parent continues with the result. Bounded, so a chat that
@@ -1367,7 +1603,7 @@ def _already_handed_off(parent, key: str) -> bool:
 
 
 async def _hand_off(manager, parent_id: str, worker, task: str, text: str, status: str,
-                    owner: Optional[str]) -> None:
+                    owner: Optional[str], *, continue_parent: bool = True) -> None:
     """Deliver a finished worker's result to the chat it reports to.
 
     The result is saved into the parent chat as a message from the worker,
@@ -1383,7 +1619,9 @@ async def _hand_off(manager, parent_id: str, worker, task: str, text: str, statu
     if parent is None:
         return
     headline = {"completed": "finished", "incomplete": "ran out of rounds",
-                "waiting_approval": "is waiting for the user's approval"}.get(status, status)
+                "waiting_approval": "is waiting for the user's approval",
+                "interrupted": "was interrupted by an app restart",
+                "resumed": "was interrupted by an app restart and resumed"}.get(status, status)
     # The brief ends with the person's request, and _handoff_guidance repeats
     # that request in full, so the task shows only its opening here. The
     # "[Worker …]\nTask:" opening is how hand-backs are recognised (the e2e mock
@@ -1410,6 +1648,8 @@ async def _hand_off(manager, parent_id: str, worker, task: str, text: str, statu
                                               "arrived_mid_turn": arrived_mid_turn, "handoff_key": key})
     parent.add_message(inject_msg)
     manager.save_sessions()
+    if not continue_parent:
+        return
     if _running_workers(parent_id):
         # Sibling workers are still running. Each finished worker used to
         # continue the parent on its own, so N workers meant N autonomous
@@ -1546,6 +1786,12 @@ def _handoff_guidance(parent, worker, status: str, text: str) -> str:
     if status == "waiting_approval":
         return ("The worker paused on an approval card in its own chat, so the task is not done. "
                 "Tell the user it needs their approval there; the worker continues from that card.")
+    if status == "resumed":
+        return ("The worker was resumed in its own chat and continues on its own. Nothing is needed now; "
+                "its result arrives here when it finishes.")
+    if status == "interrupted":
+        return ("The app restarted under this worker and it was not resumed. Tell the user what it was "
+                f"doing and what they can do (the worker is session \"{worker.id}\").")
     needs = _stated_needs(text)
     lines = []
     request = _request_text(parent)
