@@ -72,3 +72,38 @@ def test_the_consent_key_cannot_be_written_directly(api):
     response = alice.patch(f"/api/session/{chat}/settings", json={"delegation_tools_enabled": ["send_to_session"]})
 
     assert response.status_code == 400
+
+
+def test_adding_a_delegation_tool_to_a_selected_allowlist_is_recorded(api):
+    alice = api.as_user("alice")
+    chat = _chat(alice)
+    alice.patch(f"/api/session/{chat}/settings", json={"tool_access": "selected", "enabled_tools": ["web_search"]})
+
+    alice.patch(f"/api/session/{chat}/settings", json={"enabled_tools": ["web_search", "send_to_session"]})
+
+    assert _enabled(alice, chat) == ["send_to_session"]
+
+
+def test_a_dashboard_save_that_resends_an_unchanged_allowlist_records_nothing(api):
+    """The Agents panel PATCHes every field on each save."""
+    alice = api.as_user("alice")
+    chat = _chat(alice)
+    body = {"tool_access": "selected", "enabled_tools": ["send_to_session"], "disabled_tools": []}
+    alice.patch(f"/api/session/{chat}/settings", json=body)
+
+    alice.patch(f"/api/session/{chat}/settings", json=body)
+
+    assert not _enabled(alice, chat)
+
+
+@pytest.mark.security
+def test_an_agent_cannot_grant_itself_consent_through_the_allowlist(api):
+    alice = api.as_user("alice")
+    chat = _chat(alice)
+    alice.patch(f"/api/session/{chat}/settings", json={"tool_access": "selected", "enabled_tools": ["web_search"]})
+
+    response = alice.patch(f"/api/session/{chat}/settings", json={"enabled_tools": ["web_search", "send_to_session"]},
+                           headers={INTERNAL_TOOL_HEADER: "agent"})
+
+    assert response.status_code == 200, response.text
+    assert not _enabled(alice, chat)

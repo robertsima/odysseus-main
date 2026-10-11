@@ -103,7 +103,8 @@ def test_a_worker_hand_back_never_grants_consent(db):
 
 def test_a_tool_switched_on_in_the_chats_settings_opens_that_tool_fully(db):
     chat = _chat(db)
-    delegation_consent.record_tool_settings_change(chat, before={"manage_agent_loadout", "bash"}, after={"bash"})
+    delegation_consent.record_tool_settings_change(
+        chat, {"disabled_tools": ["manage_agent_loadout", "bash"]}, {"disabled_tools": ["bash"]})
 
     gate = _gate(chat, FINISH)
 
@@ -114,8 +115,8 @@ def test_a_tool_switched_on_in_the_chats_settings_opens_that_tool_fully(db):
 
 def test_switching_the_tool_off_again_withdraws_that_consent(db):
     chat = _chat(db)
-    delegation_consent.record_tool_settings_change(chat, before={"manage_agent_loadout"}, after=set())
-    delegation_consent.record_tool_settings_change(chat, before=set(), after={"manage_agent_loadout"})
+    delegation_consent.record_tool_settings_change(chat, {"disabled_tools": ["manage_agent_loadout"]}, {})
+    delegation_consent.record_tool_settings_change(chat, {}, {"disabled_tools": ["manage_agent_loadout"]})
 
     assert "manage_agent_loadout" in _gate(chat, FINISH).gated
 
@@ -155,3 +156,33 @@ def test_manage_agent_loadout_continues_but_does_not_start(db, action, allowed):
         "manage_agent_loadout", json.dumps({"action": action}), chat, "alice")
 
     assert (refusal is None) is allowed
+
+
+# ── allowlist chats ──────────────────────────────────────────────────────
+
+_SELECTED = {"tool_access": "selected", "enabled_tools": ["web_search"]}
+
+
+def test_adding_a_delegation_tool_to_a_selected_allowlist_opens_it(db):
+    chat = _chat(db)
+    after = {**_SELECTED, "enabled_tools": ["web_search", "send_to_session"]}
+    delegation_consent.record_tool_settings_change(chat, _SELECTED, after)
+
+    assert "send_to_session" not in _gate(chat, FINISH).gated
+
+
+def test_saving_an_allowlist_that_already_had_the_tool_is_not_a_switch(db):
+    chat = _chat(db)
+    both = {**_SELECTED, "enabled_tools": ["send_to_session"]}
+    delegation_consent.record_tool_settings_change(chat, both, {**both, "enabled_tools": ["send_to_session", "grep"]})
+
+    assert "send_to_session" in _gate(chat, FINISH).gated
+
+
+def test_removing_a_tool_from_the_allowlist_withdraws_it(db):
+    chat = _chat(db)
+    on = {**_SELECTED, "enabled_tools": ["send_to_session"]}
+    delegation_consent.record_tool_settings_change(chat, _SELECTED, on)
+    delegation_consent.record_tool_settings_change(chat, on, _SELECTED)
+
+    assert "send_to_session" in _gate(chat, FINISH).gated

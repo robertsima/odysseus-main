@@ -109,15 +109,30 @@ def relax_gate(gated: Set[str], session_id: Optional[str], settings: Dict[str, A
     return gated, set()
 
 
-def record_tool_settings_change(session_id: str, before: Iterable[str], after: Iterable[str]) -> None:
+def _switched_on(settings: Dict[str, Any], tool: str) -> bool:
+    """Whether the chat's own tool settings let it call ``tool``: not in its
+    denylist, and in its allowlist when it has one."""
+    from src.tool_policy import allowlist_permits
+
+    if tool in (settings.get("disabled_tools") or ()):
+        return False
+    return allowlist_permits(tool, settings.get("tool_access"), settings.get("enabled_tools") or ())
+
+
+def record_tool_settings_change(session_id: str, before: Dict[str, Any], after: Dict[str, Any]) -> None:
     """Note delegation tools the person switched on or off in the chat's tool settings.
 
-    ``before`` and ``after`` are the chat's disabled-tool names around a change
-    a person made in the UI.
+    ``before`` and ``after`` are the chat's settings around a change a person
+    made in the UI: removing a tool from the denylist, or adding it to a
+    ``tool_access=selected`` allowlist, switches it on.
     """
-    delegation = _delegation_tools()
-    before, after = set(before) & delegation, set(after) & delegation
-    switched_on, switched_off = before - after, after - before
+    switched_on, switched_off = set(), set()
+    for tool in _delegation_tools():
+        was, now = _switched_on(before, tool), _switched_on(after, tool)
+        if now and not was:
+            switched_on.add(tool)
+        elif was and not now:
+            switched_off.add(tool)
     if not (switched_on or switched_off):
         return
     try:
