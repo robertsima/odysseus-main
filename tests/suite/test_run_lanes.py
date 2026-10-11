@@ -73,3 +73,40 @@ def test_workstations_get_a_bounded_number_of_workers(monkeypatch, env, expected
 def test_marker_lanes_select_by_marker(calls, lane, marker):
     run.main([lane])
     assert calls[0][1][:2] == ["-m", marker]
+
+
+def _apply_env(monkeypatch, env):
+    for key in ("CI", "ODYSSEUS_TEST_WORKERS", "ODYSSEUS_AGENT_SHELL"):
+        monkeypatch.delenv(key, raising=False)
+        if key in env:
+            monkeypatch.setenv(key, env[key])
+
+
+def test_a_sandboxed_agent_shell_gets_two_workers_even_though_it_sets_ci(monkeypatch):
+    """The sandbox env sets CI=true, which started one pytest worker per CPU inside the app's container."""
+    from src import shell_sandbox
+
+    _apply_env(monkeypatch, shell_sandbox.sandbox_env({}))
+    assert run.workers() == "2"
+
+
+def test_an_unsandboxed_agent_shell_gets_two_workers_when_ci_is_set(monkeypatch):
+    """Full server shell chats inherit the app's environment, CI included."""
+    from src import shell_sandbox
+
+    _apply_env(monkeypatch, shell_sandbox.agent_shell_env({"CI": "true"}))
+    assert run.workers() == "2"
+
+
+def test_an_operator_set_worker_count_beats_the_agent_shell_bound(monkeypatch):
+    from src import shell_sandbox
+
+    _apply_env(monkeypatch, shell_sandbox.sandbox_env({"ODYSSEUS_TEST_WORKERS": "3"}))
+    assert run.workers() == "3"
+    _apply_env(monkeypatch, shell_sandbox.agent_shell_env({"ODYSSEUS_TEST_WORKERS": "5"}))
+    assert run.workers() == "5"
+
+
+def test_real_ci_still_gets_auto(monkeypatch):
+    _apply_env(monkeypatch, {"CI": "true"})
+    assert run.workers() == "auto"

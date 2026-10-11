@@ -110,6 +110,7 @@ async def test_posix_bash_keeps_existing_shell_path(monkeypatch):
     process = object()
 
     monkeypatch.setattr(subprocess_tools, "IS_WINDOWS", False)
+    monkeypatch.setattr(subprocess_tools.sys, "platform", "darwin")
 
     async def fake_shell(command, **kwargs):
         captured["command"] = command
@@ -125,4 +126,25 @@ async def test_posix_bash_keeps_existing_shell_path(monkeypatch):
     result = await subprocess_tools._create_bash_subprocess("pwd", cwd="/tmp/work")
 
     assert result is process
-    assert captured == {"command": "pwd", "kwargs": {"cwd": "/tmp/work"}}
+    assert captured == {"command": "pwd", "kwargs": {"start_new_session": True, "cwd": "/tmp/work"}}
+
+
+@pytest.mark.asyncio
+async def test_linux_bash_runs_sh_c_behind_the_oom_wrapper(monkeypatch):
+    captured = {}
+    process = object()
+
+    monkeypatch.setattr(subprocess_tools, "IS_WINDOWS", False)
+    monkeypatch.setattr(subprocess_tools.sys, "platform", "linux")
+
+    async def fake_exec(*argv, **kwargs):
+        captured["argv"] = list(argv)
+        captured["kwargs"] = kwargs
+        return process
+
+    monkeypatch.setattr(subprocess_tools.asyncio, "create_subprocess_exec", fake_exec)
+
+    assert await subprocess_tools._create_bash_subprocess("pwd", cwd="/tmp/work") is process
+    assert captured["argv"][-3:] == ["/bin/sh", "-c", "pwd"]
+    assert "oom_score_adj" in captured["argv"][2]
+    assert captured["kwargs"] == {"start_new_session": True, "cwd": "/tmp/work"}
