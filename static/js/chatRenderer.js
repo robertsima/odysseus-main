@@ -2800,6 +2800,13 @@ export function addMessage(role, content, modelName, metadata) {
             roleEl.title = pair.requestedModel + ' -> ' + contModel
               + ' (' + pair.requestedEndpointLabel + ' -> ' + contEndpointLabel + ')';
           }
+          // A reply under a persona names the persona on every round, as the
+          // single-bubble path does below; the route stays on the tooltip.
+          const personaLabel = metadata?.group_model || metadata?.character_name || '';
+          if (personaLabel) {
+            if (!roleEl.title) roleEl.title = roleEl.textContent;
+            roleEl.textContent = personaLabel;
+          }
           applyModelColor(roleEl, contModel);
           if (r === 0) roleEl.appendChild(roleTimestamp(metadata?.timestamp));
           wrap.appendChild(roleEl);
