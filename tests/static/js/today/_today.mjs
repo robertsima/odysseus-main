@@ -63,6 +63,12 @@ export async function openToday({ today = [], next = [], degraded = [], onAction
       input.value = text;
       input.dispatchEvent(new window.Event('input', { bubbles: true }));
     },
+    // The line is disabled while a submission is in flight; a test that submits
+    // right after another's answer has to wait for it, or its text is dropped.
+    idle() {
+      return waitFor(() => { const i = root.querySelector('#today-capture-input'); return i && !i.disabled; },
+                     { what: 'the capture line to be free' });
+    },
     submit() {
       root.querySelector('#today-capture').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
     },

@@ -28,6 +28,7 @@ test('created: says where it went, links to it, clears the line and refreshes To
 });
 
 test('duplicate reads the same as created, so a double submit looks like one add', async () => {
+  await view.idle();
   answers.push({ status: 'duplicate', destination: 'note', ref: 'n1', open_url: '/notes?id=n1' });
   view.type('Water plants');
   view.submit();
@@ -35,6 +36,7 @@ test('duplicate reads the same as created, so a double submit looks like one add
 });
 
 test('needs_clarification asks the question and resends with the chosen destination and the same key', async () => {
+  await view.idle();
   answers.push({
     status: 'needs_clarification', question: 'Is this a task or an appointment?',
     options: [{ label: 'Task in Todoist', destination: 'todoist', due: '2026-10-12' }, { label: 'Calendar event', destination: 'calendar' }],
@@ -60,6 +62,7 @@ test('needs_clarification asks the question and resends with the chosen destinat
 });
 
 test('failed shows the error, keeps the text, and a retry reuses the key', async () => {
+  await view.idle();
   answers.push({ status: 'failed', error: 'Todoist did not answer in time.' });
   const before = captures().length;
   view.type('Call the bank');
@@ -76,6 +79,7 @@ test('failed shows the error, keeps the text, and a retry reuses the key', async
 });
 
 test('a network failure is a failure too: the text stays', async () => {
+  await view.idle();
   const realFetch = globalThis.fetch;
   globalThis.fetch = async (url, init) => {
     if (String(url).includes('/api/capture')) throw new TypeError('network down');
@@ -92,6 +96,7 @@ test('a network failure is a failure too: the text stays', async () => {
 });
 
 test('different text is a different submission with its own key', async () => {
+  await view.idle();
   answers.push({ status: 'created', destination: 'todoist' }, { status: 'created', destination: 'todoist' });
   const before = captures().length;
   view.type('One thing');
@@ -106,6 +111,7 @@ test('different text is a different submission with its own key', async () => {
 });
 
 test('an unsafe link from the server is shown as text, never as a link', async () => {
+  await view.idle();
   answers.push({ status: 'created', destination: 'note', open_url: 'javascript:alert(1)' });
   await waitFor(() => !view.root.querySelector('#today-capture-input').disabled, { what: 'the input to unlock' });
   view.type('Odd link');

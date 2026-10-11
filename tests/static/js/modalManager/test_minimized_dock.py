@@ -12,7 +12,9 @@ from tests.helpers.static_app import (
 
 pytestmark = pytest.mark.browser
 
-MINIMIZE = ".modal-minimize-btn, .minimize-btn"
+# One selector, so the "#modal MINIMIZE" prefix scopes both alternatives. A bare
+# comma would let `.first` land on another window's hidden minimize button.
+MINIMIZE = ":is(.modal-minimize-btn, .minimize-btn)"
 CONTROLS = ("#message", ".send-btn")
 
 
