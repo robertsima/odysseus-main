@@ -56,12 +56,14 @@ function normalize(order) {
     const value = String(key);
     if (KEYS.has(value) && !seen.has(value)) { seen.add(value); result.push(value); }
   }
-  // A tool added after the order was saved goes where the default order puts it,
-  // not at the end: Today would otherwise be last for everyone with a saved order.
+  // A tool added after a full order was saved goes where the default order puts it
+  // (Today would otherwise be last for everyone). A short saved list is a choice
+  // about those tools only, so the rest still follow it.
+  const complete = result.length * 2 >= NAV_ITEMS.length;
   NAV_ITEMS.forEach((item, index) => {
     if (seen.has(item.key)) return;
     seen.add(item.key);
-    const successor = NAV_ITEMS.slice(index + 1).find((later) => result.includes(later.key));
+    const successor = complete ? NAV_ITEMS.slice(index + 1).find((later) => result.includes(later.key)) : null;
     if (successor) result.splice(result.indexOf(successor.key), 0, item.key);
     else result.push(item.key);
   });
