@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import sys
 import time
 import collections
@@ -20,6 +21,17 @@ DEFAULT_PYTHON_TIMEOUT = 60 * 60
 DEFAULT_BASH_IDLE_TIMEOUT = 60
 
 logger = logging.getLogger(__name__)
+
+# A timed-out or stopped command gets SIGTERM, then SIGKILL this long after, on
+# its whole process group: pytest-xdist workers outlived a killed `pytest`.
+KILL_GRACE_S = 2.0
+
+# What the app keeps of one output stream while a command runs: the first and
+# the last part, with the lines between counted. The tool result shows 60,000
+# characters (30% head, 70% tail), so these keep everything it can show. A
+# command printing gigabytes used to grow the app's own memory without limit.
+OUTPUT_KEEP_HEAD_CHARS = MAX_OUTPUT_CHARS
+OUTPUT_KEEP_TAIL_CHARS = MAX_OUTPUT_CHARS
 
 PROGRESS_INTERVAL_S = 2.0
 PROGRESS_TAIL_LINES = 12
@@ -43,6 +55,50 @@ _TMUX_NONINTERACTIVE = (
 _TMUX_LOCKS: Dict[str, asyncio.Lock] = {}
 
 
+def _agent_env(env: Optional[dict]) -> dict:
+    """The unsandboxed shell's environment, marked as an agent shell (tests/run.py
+    reads the mark). ``None`` means the app's own environment."""
+    from src import shell_sandbox
+
+    return shell_sandbox.agent_shell_env(env)
+
+
+def _own_group() -> dict:
+    """Spawn arguments that put the command in its own session and process group."""
+    return {} if IS_WINDOWS else {"start_new_session": True}
+
+
+async def _kill_process_group(proc, grace: Optional[float] = None) -> None:
+    """End ``proc`` and everything it started: SIGTERM to the group, SIGKILL
+    after the grace period. The command leads its own group (``_own_group``)."""
+    grace = KILL_GRACE_S if grace is None else grace
+    pid = getattr(proc, "pid", None)
+    if IS_WINDOWS or not pid:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        return
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=grace)
+    except Exception:
+        pass
+    # The leader may be gone while workers it started still run, so the group
+    # gets SIGKILL either way; the kernel keeps a pid unused while a group has it.
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=grace)
+    except Exception:
+        pass
+
+
 async def _create_bash_subprocess(command: str, **kwargs):
     """Start the agent shell with Bash semantics on every supported OS.
 
@@ -61,7 +117,13 @@ async def _create_bash_subprocess(command: str, **kwargs):
                 "install Git for Windows and restart Agamemnon"
             )
         return await asyncio.create_subprocess_exec(bash, "-c", command, **kwargs)
-    return await asyncio.create_subprocess_shell(command, **kwargs)
+    if sys.platform.startswith("linux"):
+        # What create_subprocess_shell runs, behind the OOM-score wrapper.
+        from src import shell_sandbox
+
+        return await asyncio.create_subprocess_exec(
+            *shell_sandbox.oom_first(["/bin/sh", "-c", command]), **_own_group(), **kwargs)
+    return await asyncio.create_subprocess_shell(command, **_own_group(), **kwargs)
 
 
 def _tmux_session_name(session_id: Optional[str], sandbox_workspace: Optional[str] = None) -> str:
@@ -137,10 +199,11 @@ async def _ensure_tmux_session(name: str, cwd: str, env: Optional[dict],
         # runs confined. No --new-session: the shell needs tmux's terminal.
         from src import shell_sandbox
 
-        pane = shell_sandbox.build_argv(["/bin/bash", "--noprofile", "--norc"],
-                                        workspace=sandbox_workspace, env=env, new_session=False,
-                                        package_cache=True,
-                                        extra_ro_binds=_attachment_binds())
+        pane = shell_sandbox.oom_first(shell_sandbox.build_argv(
+            ["/bin/bash", "--noprofile", "--norc"],
+            workspace=sandbox_workspace, env=env, new_session=False,
+            package_cache=True,
+            extra_ro_binds=_attachment_binds()))
     else:
         # The full server shell: the same toolchain choice as the sandbox
         # (src/toolchains.py), from the folder it starts in.
@@ -150,8 +213,11 @@ async def _ensure_tmux_session(name: str, cwd: str, env: Optional[dict],
             tool_env = shell_env(cwd, (env or os.environ).get("PATH"))
         except Exception:  # noqa: BLE001
             tool_env = {}
-        pane = [
+        from src import shell_sandbox
+
+        pane = shell_sandbox.oom_first([
             "env",
+            f"{shell_sandbox.AGENT_SHELL_VAR}=1",
             f"TERM={env.get('TERM', 'xterm-256color') if env else 'xterm-256color'}",
             f"COLUMNS={env.get('COLUMNS', '120') if env else '120'}",
             f"LINES={env.get('LINES', '40') if env else '40'}",
@@ -159,7 +225,7 @@ async def _ensure_tmux_session(name: str, cwd: str, env: Optional[dict],
             "/bin/bash",
             "--noprofile",
             "--norc",
-        ]
+        ])
     await _run_exec("tmux", "new-session", "-d", "-s", name, "-c", cwd, *pane, timeout=10)
     if not await _tmux_has_session(name):
         raise RuntimeError(f"failed to create tmux session {name}")
@@ -334,6 +400,46 @@ def _clean_tmux_command_output(text: str, wrapped_command: str) -> str:
         cleaned.append(raw)
     return "\n".join(cleaned).strip()
 
+class _BoundedLines:
+    """Lines of one output stream, keeping the first and the last part only.
+
+    ``text()`` joins them like ``"\n".join(lines)`` until something was dropped.
+    Then the text opens with a note, so the count survives the middle cut the
+    tool result gets, and carries a marker where the lines were.
+    """
+
+    def __init__(self, head_chars: int, tail_chars: int):
+        self._head_chars, self._tail_chars = head_chars, tail_chars
+        self._head: list[str] = []
+        self._head_len = 0
+        self._head_full = False
+        self._tail: collections.deque[str] = collections.deque()
+        self._tail_len = 0
+        self.dropped = 0
+
+    def add(self, line: str) -> None:
+        cost = len(line) + 1
+        if not self._head_full:
+            if self._head_len + cost <= self._head_chars:
+                self._head.append(line)
+                self._head_len += cost
+                return
+            self._head_full = True
+        self._tail.append(line)
+        self._tail_len += cost
+        while self._tail_len > self._tail_chars and len(self._tail) > 1:
+            self._tail_len -= len(self._tail.popleft()) + 1
+            self.dropped += 1
+
+    def text(self) -> str:
+        if not self.dropped:
+            return "\n".join([*self._head, *self._tail])
+        note = (f"[Agamemnon] The command printed more than the app keeps: {self.dropped} lines "
+                "in the middle were dropped. The start and the end are below.\n")
+        marker = f"... ({self.dropped} lines dropped) ..."
+        return note + "\n".join([*self._head, marker, *self._tail])
+
+
 async def _run_subprocess_streaming(
     proc: asyncio.subprocess.Process,
     *,
@@ -343,8 +449,8 @@ async def _run_subprocess_streaming(
 ) -> Tuple[str, str, Optional[int], str]:
     """``(stdout, stderr, exit code, stopped)``, ``stopped`` as in _run_tmux_bash."""
     started = time.time()
-    stdout_full: list[str] = []
-    stderr_full: list[str] = []
+    stdout_full = _BoundedLines(OUTPUT_KEEP_HEAD_CHARS, OUTPUT_KEEP_TAIL_CHARS)
+    stderr_full = _BoundedLines(OUTPUT_KEEP_HEAD_CHARS, OUTPUT_KEEP_TAIL_CHARS)
     tail = collections.deque(maxlen=PROGRESS_TAIL_LINES)
     last_output = [started]
 
@@ -357,7 +463,7 @@ async def _run_subprocess_streaming(
                 break
             decoded = line.decode("utf-8", errors="replace").rstrip("\n")
             last_output[0] = time.time()
-            full_buf.append(decoded)
+            full_buf.add(decoded)
             if label == "err":
                 tail.append(f"! {decoded}")
             else:
@@ -389,14 +495,7 @@ async def _run_subprocess_streaming(
             elif idle_timeout and now - last_output[0] > idle_timeout:
                 timed_out = "idle"
             if timed_out:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=2)
-                except Exception:
-                    pass
+                await _kill_process_group(proc)
                 break
             try:
                 await asyncio.wait_for(proc.wait(), timeout=min(1.0, max(0.05, timeout - (now - started))))
@@ -404,14 +503,7 @@ async def _run_subprocess_streaming(
             except asyncio.TimeoutError:
                 continue
     except asyncio.CancelledError:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=2)
-        except Exception:
-            pass
+        await asyncio.shield(_kill_process_group(proc))
         for t in (rd_out, rd_err):
             t.cancel()
         if prog_task is not None:
@@ -431,8 +523,8 @@ async def _run_subprocess_streaming(
                 pass
 
     return (
-        "\n".join(stdout_full),
-        "\n".join(stderr_full),
+        stdout_full.text(),
+        stderr_full.text(),
         proc.returncode,
         timed_out,
     )
@@ -571,20 +663,25 @@ class BashTool:
             if sandbox_ws:
                 from src import shell_sandbox
 
+                # bwrap's own --new-session would fail (setsid) in a process
+                # that already leads its group, and the group already gives
+                # the shell a session without a controlling terminal.
                 proc = await asyncio.create_subprocess_exec(
-                    *shell_sandbox.build_argv(["/bin/bash", "-c", content], workspace=sandbox_ws,
-                                              env=_subproc_env, package_cache=True,
-                                              extra_ro_binds=_attachment_binds()),
+                    *shell_sandbox.oom_first(shell_sandbox.build_argv(
+                        ["/bin/bash", "-c", content], workspace=sandbox_ws,
+                        env=_subproc_env, package_cache=True, new_session=IS_WINDOWS,
+                        extra_ro_binds=_attachment_binds())),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=sandbox_ws,
+                    **_own_group(),
                 )
             else:
                 proc = await _create_bash_subprocess(
                     content,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
-                    env=_subproc_env,
+                    env=_agent_env(_subproc_env),
                     cwd=agent_cwd(),
                 )
         except (RuntimeError, OSError) as e:
@@ -668,14 +765,17 @@ class PythonTool:
             if not os.path.realpath(argv[0]).startswith("/usr/"):
                 argv[0] = "python3"
             argv = shell_sandbox.build_argv(argv, workspace=sandbox_ws, env=_subproc_env,
-                                            package_cache=True,
+                                            package_cache=True, new_session=IS_WINDOWS,
                                             extra_ro_binds=_attachment_binds())
+        from src import shell_sandbox
+
         proc = await asyncio.create_subprocess_exec(
-            *argv,
+            *shell_sandbox.oom_first(argv),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=None if sandbox_ws else _subproc_env,
+            env=None if sandbox_ws else _agent_env(_subproc_env),
             cwd=sandbox_ws or agent_cwd(),
+            **_own_group(),
         )
         stdout, stderr, rc, timed_out = await _run_subprocess_streaming(
             proc,

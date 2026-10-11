@@ -40,6 +40,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
@@ -71,6 +72,7 @@ _ENV_ALLOW = frozenset({
     "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
     "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
     "PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "PIP_TRUSTED_HOST",
+    "ODYSSEUS_TEST_WORKERS",   # an operator's explicit test worker count wins (tests/run.py)
 })
 _ENV_ALLOW_PREFIXES = ("LC_", "GIT_CONFIG_")
 
@@ -111,6 +113,35 @@ QUIET_ENV = {
 }
 
 
+# Set in every agent shell. tests/run.py reads it before CI: the sandbox sets
+# CI=true, which made `python -m tests.run full` start one pytest worker per CPU
+# inside the app's container (2026-10-10, twice).
+AGENT_SHELL_VAR = "ODYSSEUS_AGENT_SHELL"
+
+# What the kernel's OOM killer prefers: 1000 is "kill me first". Raising the
+# value needs no privilege, and children inherit it.
+OOM_SCORE_ADJ = "1000"
+
+
+def agent_shell_env(base: Optional[Mapping[str, str]] = None) -> Dict[str, str]:
+    """``base`` (default: the app's environment) marked as an agent shell, for
+    the unsandboxed shell. The sandbox's own env gets the mark in ``sandbox_env``."""
+    env = dict(base if base is not None else os.environ)
+    env[AGENT_SHELL_VAR] = "1"
+    return env
+
+
+def oom_first(argv: Sequence[str]) -> List[str]:
+    """``argv`` run so the OOM killer picks it before the app. On 2026-10-10 a
+    test run filled the container's memory and the kernel killed uvicorn (PID 1)
+    instead, taking every agent run with it. Linux only; elsewhere unchanged.
+    A failed write is ignored, so the command still runs."""
+    if not sys.platform.startswith("linux"):
+        return list(argv)
+    script = f'{{ echo {OOM_SCORE_ADJ} > /proc/self/oom_score_adj; }} 2>/dev/null; exec "$@"'
+    return ["/bin/sh", "-c", script, "sh", *argv]
+
+
 def sandbox_env(base: Optional[Mapping[str, str]] = None, *, workspace: Optional[str] = None) -> Dict[str, str]:
     """The allowlisted environment the sandboxed shell runs with.
 
@@ -146,6 +177,7 @@ def sandbox_env(base: Optional[Mapping[str, str]] = None, *, workspace: Optional
     # environment its default prompt ("bash-5.2$ ") lands in every output.
     env["PS1"] = ""
     env["PS2"] = ""
+    env[AGENT_SHELL_VAR] = "1"
     return env
 
 

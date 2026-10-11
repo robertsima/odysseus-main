@@ -39,10 +39,16 @@ def workers() -> str:
     and every node test file is its own process, so one per CPU multiplied by
     several agents running at once exhausted 64 GB of RAM (2026-10-04). Four
     is the local default; ODYSSEUS_TEST_WORKERS overrides it.
+
+    An agent's shell (src/shell_sandbox.py sets ODYSSEUS_AGENT_SHELL) gets two,
+    even though it also sets CI: it shares the container's memory with the app,
+    and a full lane there once got uvicorn OOM-killed (2026-10-10).
     """
     configured = os.environ.get("ODYSSEUS_TEST_WORKERS", "").strip()
     if configured:
         return configured
+    if os.environ.get("ODYSSEUS_AGENT_SHELL"):
+        return "2"
     return "auto" if os.environ.get("CI") else "4"
 
 

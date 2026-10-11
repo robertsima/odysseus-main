@@ -555,6 +555,8 @@ argument, 10 s to an hour, carried on the block as `ToolBlockWithOptions`), or
 in the background with `#!bg`. On 2026-09-30 a `./mvnw -q test` whose
 integration test hung printed nothing for 43 minutes while the agent waited.
 
+Agent shells run test lanes with bounded workers: every shell sets `ODYSSEUS_AGENT_SHELL`, and `python -m tests.run` then starts 2 workers instead of one per CPU, although the sandbox also sets `CI=true` (`ODYSSEUS_TEST_WORKERS` still wins, and real CI keeps `auto`). On Linux, processes started by `bash` and `python` get `oom_score_adj` 1000, so the OOM killer picks them before uvicorn, and the app keeps only the first and last 60,000 characters of each output stream. A timeout or a stop sends SIGTERM to the command's whole process group and SIGKILL 2 seconds later, so pytest workers do not outlive it. On 2026-10-10 a test run from an agent's `bash` restarted the container twice with no shutdown lines, which fits the OOM killer taking PID 1, uvicorn, and every running agent with it.
+
 Delegated Claude Code runs may run the checkout's own tests and builds
 (`claude_code_test_commands`, on by default). `project_test_rules` finds npm
 scripts (test, typecheck, lint, build), Maven, Gradle and pytest projects at the
