@@ -153,7 +153,7 @@
         var agApple = document.querySelector("link[rel='apple-touch-icon']");
         if (!agApple) { agApple = document.createElement('link'); agApple.rel = 'apple-touch-icon'; document.head.appendChild(agApple); }
         agApple.href = '/static/branding/agamemnon-trojan-helmet.svg';
-        var agNames = {'/':'Scribe','/agents':'Phalanx','/workbench':'Workbench','/calendar':'Calendar','/notes':'Notes','/cookbook':'Cookbook','/email':'Email','/memory':'Memory','/gallery':'Gallery','/tasks':'Tasks','/library':'Library'};
+        var agNames = {'/':'Scribe','/agents':'Phalanx','/today':'Today','/workbench':'Workbench','/calendar':'Calendar','/notes':'Notes','/cookbook':'Cookbook','/email':'Email','/memory':'Memory','/gallery':'Gallery','/tasks':'Tasks','/library':'Library'};
         document.title = (agNames[path] || 'Scribe') + ' — Agamemnon';
         try {
           if (typeof Blob !== 'undefined') {
@@ -410,6 +410,16 @@
         <div class="wb-panel hidden" data-wb-panel="commits" id="wb-commits" role="tabpanel" aria-labelledby="wb-tab-commits"></div>
         <div class="wb-panel hidden" data-wb-panel="prs" id="wb-prs" role="tabpanel" aria-labelledby="wb-tab-prs"></div>
       </div>
+    </div>
+  </div>
+  <!-- Today: what needs you now, plus one-line capture (js/today.js) -->
+  <div id="today-modal" class="modal today-modal hidden" role="dialog" aria-labelledby="today-title" aria-modal="false" tabindex="-1" hidden>
+    <div class="modal-content today-modal-content">
+      <div class="modal-header today-header">
+        <h3 id="today-title">Today</h3>
+        <button type="button" class="modal-close" id="close-today" title="Close" aria-label="Close Today">&times;</button>
+      </div>
+      <div id="today-body" class="today-body"></div>
     </div>
   </div>
   <!-- Agent Control Room: draggable/dockable fleet monitor (js/agentsDashboard.js) -->
@@ -904,6 +914,7 @@
     <button class="icon-rail-btn rail-dynamic" id="rail-chats" title="Chat ready" style="display:none"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></button>
     <button class="icon-rail-btn rail-dynamic" id="rail-documents" title="Documents" style="display:none"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg></button>
     <!-- Tool launchers — always visible, alphabetical -->
+    <button class="icon-rail-btn" id="rail-today" title="Today — what needs you now"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M5.6 18.4 7 17M17 7l1.4-1.4"/></svg></button>
     <button class="icon-rail-btn" id="rail-calendar" title="Calendar"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></button>
     <button class="icon-rail-btn" id="rail-compare" title="Compare"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="7" height="16" rx="1.5"/><rect x="14" y="4" width="7" height="16" rx="1.5"/><path d="M10 8h4"/><path d="M10 16h4"/></svg></button>
     <button class="icon-rail-btn" id="rail-cookbook" title="Cookbook"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.7"><path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg></button>
@@ -1040,6 +1051,14 @@
       <div class="section" id="tools-section">
         <div class="section-header-flex">
           <span class="section-title"><svg class="section-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>Tools</span>
+        </div>
+        <div class="list-item" id="tool-today-btn" title="What needs you now, with a box to capture something new">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <circle cx="12" cy="12" r="4"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M5.6 18.4 7 17M17 7l1.4-1.4"/>
+          </svg>
+          <span class="grow">Today</span>
         </div>
         <div class="list-item" id="tool-memory-btn">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"

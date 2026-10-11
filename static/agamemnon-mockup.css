@@ -534,3 +534,10 @@ html[data-style] #agents-dashboard .ag-soldier-context{display:none}
  html[data-style="agamemnon"] #workbench-modal .wb-toolbar .wb-live{min-width:0;overflow:hidden;text-overflow:ellipsis}
  html[data-style="agamemnon"] #workbench-modal .wb-toolbar :is(#wb-pause,#wb-clear){width:100%;min-width:0}
 }
+html[data-style="agamemnon"] .today-modal{--wb-muted:var(--ag-muted);--wb-faint:var(--ag-faint);--wb-line:var(--ag-border)}
+html[data-style="agamemnon"] .today-modal-content{background:var(--ag-bg)!important;border-radius:0}
+html[data-style="agamemnon"] .today-header h3{font-family:var(--ui-font)}
+html[data-style="agamemnon"] .today-btn,html[data-style="agamemnon"] .today-capture-row input,html[data-style="agamemnon"] .today-wait input,html[data-style="agamemnon"] .today-blocker,html[data-style="agamemnon"] .today-clarify{border-radius:0}
+html[data-style="agamemnon"] #close-today{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;margin:0;padding:0;border:1px solid var(--ag-border-strong);border-radius:0;background:var(--ag-raised);color:var(--ag-text);opacity:1}
+html[data-style="agamemnon"] #close-today:hover{border-color:var(--ag-gold);color:var(--ag-gold)}
+@media (max-width:768px){html[data-style="agamemnon"] .today-modal-content{border-radius:0}}

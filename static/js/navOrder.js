@@ -21,6 +21,7 @@ export const NAV_ITEMS = Object.freeze([
   Object.freeze({ key: 'search', rail: 'rail-search-btn', sidebar: null }),
   Object.freeze({ key: 'new-chat', rail: 'rail-new-session', sidebar: null }),
   Object.freeze({ key: 'command', rail: 'rail-command', sidebar: null }),
+  Object.freeze({ key: 'today', rail: 'rail-today', sidebar: 'tool-today-btn' }),
   Object.freeze({ key: 'calendar', rail: 'rail-calendar', sidebar: 'tool-calendar-btn' }),
   Object.freeze({ key: 'compare', rail: 'rail-compare', sidebar: 'tool-compare-btn' }),
   Object.freeze({ key: 'cookbook', rail: 'rail-cookbook', sidebar: 'tool-cookbook-btn' }),
@@ -55,7 +56,15 @@ function normalize(order) {
     const value = String(key);
     if (KEYS.has(value) && !seen.has(value)) { seen.add(value); result.push(value); }
   }
-  for (const item of NAV_ITEMS) if (!seen.has(item.key)) result.push(item.key);
+  // A tool added after the order was saved goes where the default order puts it,
+  // not at the end: Today would otherwise be last for everyone with a saved order.
+  NAV_ITEMS.forEach((item, index) => {
+    if (seen.has(item.key)) return;
+    seen.add(item.key);
+    const successor = NAV_ITEMS.slice(index + 1).find((later) => result.includes(later.key));
+    if (successor) result.splice(result.indexOf(successor.key), 0, item.key);
+    else result.push(item.key);
+  });
   return result;
 }
 
