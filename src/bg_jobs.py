@@ -23,7 +23,9 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import signal
 import subprocess
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -52,6 +54,9 @@ _MAX_OUTPUT_CHARS = 16000
 # files) is kept before pruning, so neither the store nor data/bg_jobs/ grows
 # without bound. The agent has already consumed the result by then.
 _RETENTION_S = 3600  # 1 hour after follow-up
+# A stopped or timed-out job gets SIGTERM, then SIGKILL on its group this long
+# after, so a test worker that ignores SIGTERM does not outlive it.
+KILL_GRACE_S = 2.0
 
 
 def _load() -> Dict[str, Dict[str, Any]]:
@@ -142,8 +147,13 @@ def launch(command: str, session_id: str, cwd: Optional[str] = None,
         )
         argv = [os.environ.get("ComSpec", "cmd.exe"), "/c", str(script_path)]
 
+    # The same limits as foreground bash (src/shell_sandbox.py): worker bound
+    # in the env, OOM killer's first pick. The group comes from detached_popen_kwargs.
+    from src import shell_sandbox
+
     proc = subprocess.Popen(
-        argv,
+        shell_sandbox.oom_first(argv),
+        env=shell_sandbox.agent_shell_env(),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         stdin=subprocess.DEVNULL,
@@ -254,6 +264,18 @@ def refresh() -> Dict[str, Dict[str, Any]]:
 def _kill(pid: Optional[int]) -> None:
     # Cross-platform process-tree teardown (POSIX killpg / Windows taskkill /T).
     kill_process_tree(pid)
+    if pid and os.name == "posix":
+        timer = threading.Timer(KILL_GRACE_S, _sigkill_group, args=(pid,))
+        timer.daemon = True
+        timer.start()
+
+
+def _sigkill_group(pgid: int) -> None:
+    """The job leads its own group (``detached_popen_kwargs``); end whatever is left in it."""
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except OSError:
+        pass
 
 
 def pending_followups() -> List[Dict[str, Any]]:

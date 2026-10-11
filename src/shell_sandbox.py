@@ -72,7 +72,8 @@ _ENV_ALLOW = frozenset({
     "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
     "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
     "PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "PIP_TRUSTED_HOST",
-    "ODYSSEUS_TEST_WORKERS",   # an operator's explicit test worker count wins (tests/run.py)
+    # An operator's explicit test worker counts win (tests/run.py, pytest-xdist).
+    "ODYSSEUS_TEST_WORKERS", "PYTEST_XDIST_AUTO_NUM_WORKERS",
 })
 _ENV_ALLOW_PREFIXES = ("LC_", "GIT_CONFIG_")
 
@@ -117,6 +118,10 @@ QUIET_ENV = {
 # CI=true, which made `python -m tests.run full` start one pytest worker per CPU
 # inside the app's container (2026-10-10, twice).
 AGENT_SHELL_VAR = "ODYSSEUS_AGENT_SHELL"
+# What `pytest -n auto` counts as "auto" in an agent shell (pytest-xdist reads
+# this variable), so a pytest run typed into the shell is bounded like tests.run.
+XDIST_AUTO_VAR = "PYTEST_XDIST_AUTO_NUM_WORKERS"
+AGENT_TEST_WORKERS = "2"
 
 # What the kernel's OOM killer prefers: 1000 is "kill me first". Raising the
 # value needs no privilege, and children inherit it.
@@ -128,6 +133,7 @@ def agent_shell_env(base: Optional[Mapping[str, str]] = None) -> Dict[str, str]:
     the unsandboxed shell. The sandbox's own env gets the mark in ``sandbox_env``."""
     env = dict(base if base is not None else os.environ)
     env[AGENT_SHELL_VAR] = "1"
+    env.setdefault(XDIST_AUTO_VAR, AGENT_TEST_WORKERS)
     return env
 
 
@@ -178,6 +184,7 @@ def sandbox_env(base: Optional[Mapping[str, str]] = None, *, workspace: Optional
     env["PS1"] = ""
     env["PS2"] = ""
     env[AGENT_SHELL_VAR] = "1"
+    env.setdefault(XDIST_AUTO_VAR, AGENT_TEST_WORKERS)
     return env
 
 
