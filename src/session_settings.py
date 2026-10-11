@@ -256,8 +256,8 @@ def last_used_from_request(*, chat_mode: str, allow_web: Any, allow_bash: Any, p
                            use_rag: Any, workspace: Optional[str], preset_id: Optional[str]) -> Dict[str, Any]:
     """The ``toggles``/``workspace``/``preset_id`` patch describing one turn.
 
-    A turn without a workspace leaves out the key, so the chat keeps the folder
-    it was saved with. Clearing it is the settings PATCH with ``null``.
+    A turn without a workspace or preset leaves out the key, so the chat keeps
+    what it was saved with. Clearing one is the settings PATCH with ``null``.
     """
     def truthy(value):
         return None if value is None else str(value).strip().lower() == "true"
@@ -266,8 +266,9 @@ def last_used_from_request(*, chat_mode: str, allow_web: Any, allow_bash: Any, p
                "web": truthy(allow_web), "bash": truthy(allow_bash), "plan": bool(plan_mode),
                # use_rag is only ever sent as "false" (unchecked); absent means on.
                "rag": False if str(use_rag or "").lower() == "false" else True}
-    patch = {"toggles": {k: v for k, v in toggles.items() if v is not None},
-             "preset_id": preset_id or None}
+    patch = {"toggles": {k: v for k, v in toggles.items() if v is not None}}
     if workspace:
         patch["workspace"] = workspace
+    if preset_id:
+        patch["preset_id"] = preset_id
     return patch
