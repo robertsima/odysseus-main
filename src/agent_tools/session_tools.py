@@ -782,7 +782,9 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
                   "mode": mode, **({"profile": profile["name"]} if profile else {}),
                   # Recovery and the dashboard tell a sub-agent from the parent's own
                   # runs by this, not by the title.
-                  **({"kind": "sub_agent"} if mode == "agent" else {})},
+                  **({"kind": "sub_agent"} if mode == "agent" else {}),
+                  # Where the sub-agent runs, so a restart can put it back there.
+                  **({"workspace": preflight.workspace} if preflight and preflight.workspace else {})},
             detail=message[:1500],
         )
         activity.publish(session_id, "message", f"→ {sess.name or target_sid}: {message[:160]}",

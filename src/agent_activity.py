@@ -573,6 +573,7 @@ _RUN_SUMMARY_KEYS = frozenset({
     "unresolved_count", "verification_failed",
     "interrupted_reason", "interrupted_while", "restart_resumes", "resumed_from", "recover_on_start",
     "kind", "verification", "needs_user", "needs_parent", "open_first",
+    "workspace",
 })
 
 

@@ -1060,7 +1060,11 @@ parent chat gets one message either way. A worker that is not resumed ends it
 with a `Needs user:` line saying what the person can do. Both kinds of worker
 count: one started by the launch path, and a `send_to_session` agent-mode
 sub-agent (its run is filed under the parent chat with the worker chat in
-`target_session`). A graceful shutdown marks live workers `interrupted` with
+`target_session`). The resumed worker runs in the chat's saved workspace, else
+in the one its run recorded at launch (`workspace` on the lineage): a sub-agent
+handed a workspace on each call may have none saved, and on 2026-10-11 preflight
+refused such a resume with "this chat has none". A workspace taken from the run
+is saved on the chat. A graceful shutdown marks live workers `interrupted` with
 the reason "the app shut down at ..." before the loop closes, so a redeploy is
 resumed like a hard kill; a user Stop stays `cancelled` and is never resumed.
 A `send_to_session` exchange in agent mode runs as its own task: if the calling

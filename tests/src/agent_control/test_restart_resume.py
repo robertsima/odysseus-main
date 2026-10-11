@@ -75,16 +75,18 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(agent_control, "_continue_parent", continue_parent)
 
     def crash(*, restart_resumes=0, age_s=600, parent_session="p-1", source="session", command=COMMAND,
-              subagent=False, marker=False, title="Sub-agent · ↳ Lead Engineer: Implement the feature"):
+              subagent=False, marker=False, title="Sub-agent · ↳ Lead Engineer: Implement the feature",
+              message=SUBAGENT_MESSAGE, workspace=None):
         """Leave a live run in the registry, then 'restart': a new process loads the file."""
         if subagent:
             # What send_to_session records: filed under the PARENT chat, no
             # parent_session key, the worker chat in target_session.
             rid = act.run_started("p-1", "session", title,
-                                  owner="alice", detail=SUBAGENT_MESSAGE,
+                                  owner="alice", detail=message,
                                   data={"target_session": "w-1", "target_session_name": "Builder",
                                         "model": "m", "mode": "agent",
                                         **({"kind": "sub_agent"} if marker else {}),
+                                        **({"workspace": workspace} if workspace else {}),
                                         **({"restart_resumes": restart_resumes} if restart_resumes else {})})
         else:
             data = {"target_session": "w-1", "mode": "agent",
@@ -208,6 +210,33 @@ async def test_a_send_to_session_sub_agent_is_resumed_in_the_worker_chat(world):
     told = _to_parent(world)
     assert [m.content.split("]")[0] for m in told] == [
         "[Worker Builder was interrupted by an app restart and resumed", "[Worker Builder finished"]
+
+
+async def test_a_sub_agent_whose_chat_saved_no_workspace_resumes_in_the_one_its_run_recorded(world, monkeypatch):
+    """2026-10-11: the Lead Engineer sub-agent got its workspace from each
+    send_to_session call and never had one saved on its chat. After a restart,
+    recovery relaunched it with none and preflight refused: "Pass
+    workspace=<one of: ...>; this chat has none". The run record knows where
+    the worker was working; recovery uses that and saves it on the chat."""
+    import core.database as database
+    import src.tool_security as tool_security
+
+    repo = world["tmp"].parent / (world["tmp"].name + "-repo")
+    repo.mkdir()
+    saved = {}
+    monkeypatch.setattr(database, "update_session_settings",
+                        lambda sid, patch, **kw: saved.setdefault(sid, {}).update(patch) or {})
+    monkeypatch.setattr(tool_security, "owner_is_admin_or_single_user", lambda owner: True)
+    old = world["crash"](subagent=True, marker=True, workspace=str(repo),
+                         message="Fix the failing tests in the repository and push the branch")
+
+    result = await agent_control.recover_after_restart()
+    await _settle()
+
+    assert [r["run_id"] for r in result["resumed"]] == [old], _to_parent(world)[-1].content[:300]
+    new = next(r for r in act.list_runs(session_id="w-1") if r["run_id"] != old)
+    assert new["summary"]["workspace"] == os.path.realpath(str(repo))
+    assert saved["w-1"]["workspace"] == os.path.realpath(str(repo)), "the next resume would need the repair again"
 
 
 async def test_a_sub_agent_past_the_limit_tells_the_parent_once(world):

@@ -1038,6 +1038,11 @@ async def _launch_worker(*, owner: Optional[str], task: str, profile_name: Optio
         sess = manager.get_session(resume["session_id"])
         if sess is None or getattr(sess, "owner", None) != owner:
             raise ValueError("the worker's chat is gone")
+        if checked and checked.workspace and not _saved_workspace(sess.id):
+            # A chat resumed in a workspace it never had saved (a sub-agent
+            # handed one on each call) keeps it, so the next resume needs no repair.
+            from src.agent_tools.session_tools import _save_resume_workspace
+            _save_resume_workspace(sess.id, owner, checked.workspace)
     else:
         sess, err = _new_child_session(manager, parent_session, owner, task, profile, **child_kwargs)
         if err:
@@ -1092,6 +1097,8 @@ async def _launch_worker(*, owner: Optional[str], task: str, profile_name: Optio
               "mode": "agent", "launched_from": "dashboard", "max_rounds": rounds,
               **({"profile": profile["name"]} if profile and profile.get("name") and not profile.get("anonymous") else {}),
               **({"parent_session": parent_session} if parent_session else {}),
+              # Where the worker runs, so a restart can put it back there.
+              **({"workspace": checked.workspace} if checked and checked.workspace else {}),
               **(run_metadata or {})},
         detail=task[:1500],
     )
@@ -1519,7 +1526,9 @@ async def _recover_worker(rec: dict, now: float) -> bool:
             new_run = await launch_worker(
                 owner=owner, task=task, parent_session=parent_id,
                 profile_name=profile_name if profile_name and agent_profiles.get_profile(profile_name) else None,
-                workspace=_saved_workspace(worker_id),
+                # The chat's saved folder, else the one its run recorded: a
+                # sub-agent handed a workspace on each call may have none saved.
+                workspace=_saved_workspace(worker_id) or summary.get("workspace") or None,
                 run_metadata={"restart_resumes": resumes + 1, "resumed_from": rec["run_id"]},
                 resume={"session_id": worker_id, "note": _restart_resume_note(doing, resumes + 1, limit)})
         except Exception as exc:
