@@ -334,11 +334,14 @@ def document_access_warning(task: str, profile: Optional[Dict[str, Any]]) -> Opt
 
 def known_checkouts() -> List[str]:
     """Paths of the Git checkouts agents may work in (get_workspace lists
-    the same ones)."""
+    the same ones). Only paths ``vet_workspace`` accepts, so a candidate named
+    in a message is one the retry can bind."""
     try:
         from src.agent_tools.claude_code_tools import discover_repositories
+        from src.tool_execution import vet_workspace
 
-        return [str(repo["path"]) for repo in discover_repositories() if repo.get("path")]
+        return [str(repo["path"]) for repo in discover_repositories(limit=50)
+                if repo.get("path") and vet_workspace(str(repo["path"]))]
     except Exception:
         return []
 
