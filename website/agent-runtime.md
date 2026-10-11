@@ -228,7 +228,12 @@ so it can only ever clear `low_signal`, never set it.
   their tools. Read-only mail discovery does not add mutation schemas merely
   because they were nearby in the embedding index. Shared contact/UI tools and
   explicitly named tools remain eligible.
-- **Domain seeding** adds each detected domain's tools from `_DOMAIN_TOOL_MAP`.
+- **Domain seeding** adds each detected domain's tools from `_DOMAIN_TOOL_MAP`. The
+  `notes_calendar_tasks` domain includes `capture`, the default for one-line tasks,
+  reminders, appointments and follow-ups; the domain rule, the Todoist integration
+  prompt and the `harness-context-and-tool-routing` skill all say so. Edits,
+  queries and bulk work stay with `manage_notes`, `manage_calendar` and the
+  integration tools.
 - **Retained tools** carry over tools already used in this conversation, subject
   to the retention policy in
   [`specs/personal-directories-and-tool-routing.md`](../specs/personal-directories-and-tool-routing.md):

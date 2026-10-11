@@ -335,6 +335,7 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "manage_memory": "Memory management: list, add, edit, delete, or search persistent memories. For facts about the USER (their name, preferences, where they live). NOT for info about ANOTHER person — addresses, phones, emails belonging to a contact go in manage_contact, not memory.",
     "manage_skills": "Skill management: view a skill's full procedure (several in one call), search skills, or add, edit, patch, publish and delete reusable skills/presets.",
     "manage_outcomes": "Track what the person wants closed as outcomes: one record per intent that links to the real items (Todoist task, note, chat, run, branch, pull request) instead of copying them. action=list (optional states) and get (id) read; create, update (title, detail, next_action, waiting_on, follow_up_at, due_at, snoozed_until), set_state (open, active, waiting, blocked, done, dropped), link and unlink, add_evidence, set_blocker and clear_blocker write. An outcome becomes done only with evidence you attached (a commit, pull request, run, test result or review) or the person's own confirmation in the app; you cannot confirm for them and you cannot set a priority. waiting needs waiting_on. A blocker that needs the person must name the one step they take.",
+    "capture": "Capture one line the person wants remembered and route it exactly once. Default for 'remind me to ...', 'add a task ...', an appointment with a time, or 'waiting on / follow up with ...'. It files a task (Todoist for the admin, otherwise a note reminder), a calendar event, a reminder note or a waiting/project outcome, skips a duplicate of something already stored, and asks one question only when two destinations are both plausible. Pass idempotency_key to make a retry safe; to answer a question, resend the same text and key with destination (and due). Use manage_notes, manage_calendar and the Todoist tool to edit, query or bulk-change.",
     "manage_tasks": "Scheduled task management: list, create, edit, delete, pause, resume, or run cron tasks.",
     "manage_endpoints": "Endpoint management: list, add, delete, enable, or disable model API endpoints.",
     "manage_mcp": "MCP server management: list, add, delete, reconnect servers, or list available tools.",
@@ -771,6 +772,10 @@ class ToolIndex:
             {"manage_notes"},
         frozenset({"outcome", "outcomes"}):
             {"manage_outcomes"},
+        frozenset({"remind me", "add a task", "add task", "new task", "create a task", "todo",
+                   "to-do", "to do", "follow up", "follow up with", "waiting on", "waiting for",
+                   "appointment", "remember to", "don't forget", "dont forget"}):
+            {"capture"},
         # Wellbeing / mood check-ins (Lotus). "plan my day/week" is here on
         # purpose: energy patterns are what makes a plan realistic.
         frozenset({"mood", "moods", "wellbeing", "well-being", "burnout",

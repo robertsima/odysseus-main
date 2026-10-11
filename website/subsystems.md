@@ -118,7 +118,7 @@ files inside the vault**, not as database rows.
 | Server | `src/notes_store.py` (`MarkdownNotesStore`, exported as `STORE`), `src/notes_markdown.py` (the note ↔ Markdown codec), `src/notes_vault_migration.py` |
 | Frontend | `static/js/notes.js` (notes panel and the vault file browser) |
 | Data | `.md` files under `<vault>/Notes` and `<vault>/Notes/Archive`; folder names come from the `notes_directory` and `notes_archive_directory` settings |
-| Agent tools | `manage_notes` |
+| Agent tools | `manage_notes`; `capture` files a one-line reminder (see Capture) |
 
 The vault root is `vault_root()` in `src/rag_sensitivity.py`: the
 `vault_directory` setting when set, otherwise `PERSONAL_DIR`
@@ -309,7 +309,7 @@ A month/week/year calendar over local events, CalDAV accounts and Todoist tasks.
 | Server | `src/caldav_sync.py` (remote → local pull), `src/caldav_writeback.py` (local → remote push), `src/todoist_calendar_sync.py`, `src/oauth_errors.py`, `src/user_time.py` |
 | Frontend | `static/js/calendar.js`, `static/js/calendar/reminders.js`, `static/js/calendar/utils.js` |
 | Data | `calendars`, `calendar_events`, `caldav_deleted_events` tables. CalDAV **account credentials are not in the database** — they live in `data/user_prefs.json` under `caldav_accounts`, read and written by `_load_caldav_accounts` / `_save_caldav_accounts` in `src/caldav_sync.py` |
-| Agent tools | `manage_calendar` (`src/tools/calendar.py`) |
+| Agent tools | `manage_calendar` (`src/tools/calendar.py`); `capture` files a one-line appointment (see Capture); `quick_parse_event` in `routes/calendar_routes.py` is the parser behind `POST /api/calendar/quick-parse` and capture |
 
 Sync is two separate one-way halves. The pull maps each remote calendar to one
 `CalendarCal` row whose id is a stable hash of the remote URL, and prunes
@@ -515,6 +515,77 @@ the authenticated owner with no null-owner sharing, and another user's id is a 4
 agent cannot confirm, set a priority, or replace a due date the person set.
 `outcomes.record_worker_handback` applies a worker's final report to the
 outcomes linked to its chat, run or parent chat; it never raises.
+
+## Capture
+
+Capture takes one line of text and files it in the right existing system, once.
+It exists because a person had to choose between Todoist, the calendar, notes and
+scheduled tasks before writing anything down, and an agent asked to "remind me"
+chose differently each time.
+
+| | |
+|---|---|
+| Routes | `routes/capture_routes.py` (`POST /api/capture`, `POST /api/capture/{key}/move`) |
+| Server | `src/capture.py` (ledger, destinations, move), `src/capture_rules.py` (dates, routing rules, duplicate key) |
+| Data | `capture_requests` table, unique on (owner, key) |
+| Agent tools | `capture` (`src/agent_tools/capture_tools.py`) |
+
+**Routing.** Rules run first and use the person's clock and time zone
+(`parse_due_for_user` attaches the offset). An appointment word plus a time goes
+to the calendar. "Waiting on" and "follow up with" become an outcome in state
+`waiting`, with a linked note reminder at `follow_up_at` (three days out at 09:00
+when no date is given, and the result says `follow_up_defaulted`). An imperative
+or "remind me to" line is a task. A task goes to Todoist for the admin or the
+single user and to a note reminder for everyone else, and the result says
+`fallback_from: "todoist"`. A reminder with a time of day is a note for everyone,
+because the note ping loop delivers it. "Project", "build" or "plan" together with
+a multi-step cue becomes a project outcome. A Todoist task or calendar event
+made from such a sentence gets an outcome that links to it. The utility model is
+asked only when no rule fits, and a task is the fallback when there is no model.
+A date with no time on a reminder pings at 09:00 local.
+
+**Clarification.** The response is `needs_clarification` only when two
+destinations are both plausible and the choice changes where the item lives, as
+with "dentist friday" (an appointment or a call to make). A missing date on a
+plain task is not ambiguous and creates the task undated. Nothing is written,
+including the ledger row, until the answer arrives. The client resends the same
+`text` and `idempotency_key` with `destination` (and `due` when the chosen option
+carries one). A calendar option with `needs_due: true` needs a date from the
+person; without one the capture fails and writes nothing.
+
+**Exactly once, and its limits.** A `pending` row is inserted before any write.
+The unique constraint means a concurrent request with the same key waits for the
+first and returns its result with `replayed: true`. Without a client key the key
+is the normalised text plus the local date. Before every create, the destination
+is checked for an existing copy: open Todoist tasks by normalised content (date
+phrases, `@labels`, `#projects`, priorities and the "remind me to" lead-in
+removed on both sides), calendar events by summary and start, notes by
+normalised title and due. A `failed` row, or a `pending` row older than two
+minutes, is taken over by one retry, which runs that check first, so a Todoist
+create that timed out after succeeding is found and reported as `duplicate`
+instead of being repeated. If the check itself cannot run on a retry, the capture
+stays `failed` rather than guess. There is no transaction across Todoist and
+Odysseus. A crash between the two is reconciled by the duplicate check on the
+next attempt, not rolled back, and a person who edits the Todoist task's text
+heavily in between defeats the match.
+
+**Move.** `POST /api/capture/{key}/move` with `{to}` re-routes a capture made in
+the last 30 minutes. It creates the item at the new destination first, then
+removes only what this capture created (`created_refs`): a Todoist task through
+`td task delete`, an event, a note, or an outcome set to `dropped`. If the new
+destination fails, the original stays. A capture that resolved to `duplicate` is
+never moved, so a person's own task is never deleted. Past 30 minutes the move is
+a 409. Another user's key is a 404. The move is a person's action in the app and
+is not an agent tool.
+
+**Result.** `{status, destination, ref, open_url, title, due, outcome_id?}`, where
+`status` is `created`, `duplicate`, `needs_clarification` or `failed`. The key is
+returned as `key`.
+
+**Agent tool.** `capture` takes `text`, `idempotency_key`, `destination` and
+`due`. The owner comes from the tool context. It is the default for one-line
+tasks, reminders, appointments and follow-ups; `manage_notes`, `manage_calendar`
+and the Todoist tool remain for edits, queries and bulk changes.
 
 ## Workbench and agent worktrees
 

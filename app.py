@@ -846,6 +846,10 @@ app.include_router(setup_editor_draft_routes())
 from routes.outcome_routes import setup_outcome_routes
 app.include_router(setup_outcome_routes())
 
+# Capture: one line in, routed to Todoist, the calendar, a note or an outcome, once
+from routes.capture_routes import setup_capture_routes
+app.include_router(setup_capture_routes())
+
 # Scheduled tasks + event bus
 from src.task_scheduler import TaskScheduler
 task_scheduler = TaskScheduler(session_manager)

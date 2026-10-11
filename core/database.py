@@ -938,6 +938,28 @@ class OutcomeEvent(Base):
     detail_json = Column(Text, nullable=True)
 
 
+class CaptureRequest(Base):
+    """Ledger for one-line captures. A row is inserted `pending` before anything is written to
+    Todoist, the calendar, notes or outcomes; the unique (owner, key) makes a second request wait
+    for, or replay, the first."""
+    __tablename__ = "capture_requests"
+
+    id           = Column(String, primary_key=True)
+    owner        = Column(String, nullable=False)
+    key          = Column(String(200), nullable=False)
+    status       = Column(String, nullable=False, default="pending")  # pending | done | failed
+    text         = Column(Text, nullable=False, default="")
+    request_json = Column(Text, nullable=True)   # the routing decision, reused on retry
+    result_json  = Column(Text, nullable=True)
+    attempts     = Column(Integer, nullable=False, default=1)  # bumped when a retry takes the row over
+    created_at   = Column(DateTime, nullable=False, default=utcnow_naive)
+    updated_at   = Column(DateTime, nullable=False, default=utcnow_naive)
+
+    __table_args__ = (
+        UniqueConstraint('owner', 'key', name='uq_capture_requests_owner_key'),
+    )
+
+
 class TaskRun(Base):
     """Record of a single execution of a ScheduledTask."""
     __tablename__ = "task_runs"
