@@ -29,7 +29,7 @@ import re
 import threading
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from src import agent_activity as activity
 
@@ -1201,6 +1201,11 @@ async def _launch_worker(*, owner: Optional[str], task: str, profile_name: Optio
         # continuation lets the parent write to it again.
         from src import worktree_writers as _ww
         _ww.unregister(run_id)
+        if status == "cancelled" and (activity.get_run(run_id) or {}).get("status") == "interrupted":
+            # interrupt_workers_for_shutdown cancelled this task: not a user
+            # stop, so no "stopped" hand-back. Startup recovery resumes it.
+            _WORKERS.pop(run_id, None)
+            return
         try:
             meta: Dict[str, Any] = {"source": "worker", "model": sess.model, "run_id": run_id,
                                     "status": status, **(run_metadata or {})}
@@ -1372,13 +1377,35 @@ def _restart_resume_note(doing: str, resumes: int, limit: int) -> str:
             f"(Automatic resume {resumes} of {limit} after restarts.)")
 
 
-def _is_restart_resumable_worker(rec: dict) -> bool:
-    """A worker started by ``_launch_worker`` under a parent chat. Workflow
-    children are left to the workflow's own recovery."""
+def _restart_worker_ids(rec: dict) -> Optional[Tuple[str, str]]:
+    """(parent chat, worker chat) when this run is a worker recovery may resume.
+
+    Two shapes carry a worker: a run ``_launch_worker`` filed under the worker's
+    own chat with ``parent_session`` set, and a ``send_to_session`` agent-mode
+    "Sub-agent" run, which is filed under the PARENT chat with the worker chat
+    in ``target_session`` and no ``parent_session`` (the 2026-10-10 production
+    runs). The parent's own "Continuing after worker" run has the second shape
+    without the title. Workflow children are left to the workflow's recovery.
+    """
     summary = rec.get("summary") or {}
-    return bool(rec.get("source") == "session" and summary.get("parent_session")
-                and summary.get("target_session") == rec.get("session_id")
-                and not summary.get("workflow_id") and not summary.get("workflow_controller"))
+    if rec.get("source") != "session" or summary.get("workflow_id") or summary.get("workflow_controller"):
+        return None
+    target, sid, parent = summary.get("target_session"), rec.get("session_id"), summary.get("parent_session")
+    if parent and target and target == sid:
+        return str(parent), str(sid)
+    if (not parent and target and sid and target != sid and summary.get("mode") == "agent"
+            and str(rec.get("title") or "").startswith("Sub-agent")):
+        return str(sid), str(target)
+    return None
+
+
+def _subagent_request(rec: dict) -> str:
+    """The message a send_to_session run carried: only its run_started event
+    kept it, because the exchange is saved to the worker's chat when it ends."""
+    for ev in activity.run_events(rec["run_id"]):
+        if ev.get("kind") == "run_started" and ev.get("detail"):
+            return str(ev["detail"])
+    return str(rec.get("title") or "")
 
 
 def _saved_workspace(session_id: str) -> Optional[str]:
@@ -1421,14 +1448,25 @@ async def _recover_worker(rec: dict, now: float) -> bool:
     from src.ai_interaction import get_session_manager
 
     summary = rec.get("summary") or {}
-    parent_id, worker_id, owner = str(summary["parent_session"]), rec["session_id"], rec.get("owner")
+    parent_id, worker_id = _restart_worker_ids(rec)
+    owner = rec.get("owner")
     manager = get_session_manager()
     worker = manager.get_session(worker_id) if manager else None
     if worker is None:
         return False
     parent = manager.get_session(parent_id)
-    task = (next((str(m.content or "") for m in (worker.history or []) if m.role == "user"), "")
-            or str(rec.get("title") or ""))
+    if worker_id != rec["session_id"]:
+        # A send_to_session exchange: its request was never saved to the worker's chat.
+        task = _subagent_request(rec)
+        try:
+            worker.add_message(ChatMessage("user", task, {
+                "source": "agent", "from_session": parent_id, "direction": "inbound",
+                "from_session_name": getattr(parent, "name", "") or ""}))
+        except Exception:
+            logger.debug("restart recovery could not save the interrupted request", exc_info=True)
+    else:
+        task = (next((str(m.content or "") for m in (worker.history or []) if m.role == "user"), "")
+                or str(rec.get("title") or ""))
     reason = str(summary.get("interrupted_reason") or "Interrupted by an app restart")
     doing = str(summary.get("interrupted_while") or "")
     resumes = int(summary.get("restart_resumes") or 0)
@@ -1478,6 +1516,30 @@ async def _recover_worker(rec: dict, now: float) -> bool:
     return False
 
 
+async def interrupt_workers_for_shutdown(timeout: float = 3.0) -> int:
+    """On a graceful shutdown, mark the live workers interrupted and stop them.
+
+    Cancelling a worker's task at loop close made it look user-stopped
+    (`cancelled`, and its parent was told "the user stopped this worker"), so
+    startup never resumed it. The run is closed ``interrupted`` first
+    (agent_activity.interrupt_run) and the task cancelled; the cancel path
+    sees that status and hands nothing back. A real Stop does not come through
+    here and stays ``cancelled``. Returns how many were interrupted.
+    """
+    ids = [rec["run_id"] for rec in activity.list_runs(limit=400, active_only=True)
+           if rec.get("status") == "running" and _restart_worker_ids(rec)]
+    ids = [rid for rid in ids if activity.interrupt_run(rid)]
+    from src.agent_tools import session_tools
+
+    session_tools.cancel_children(ids)
+    tasks = [_WORKERS[rid] for rid in ids if rid in _WORKERS]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.wait(tasks, timeout=timeout)
+    return len(ids)
+
+
 async def recover_after_restart(interrupted: Optional[List[dict]] = None, *, delay_s: float = 0.0) -> dict:
     """Resume or report the workers the previous process left running.
 
@@ -1494,7 +1556,7 @@ async def recover_after_restart(interrupted: Optional[List[dict]] = None, *, del
     now = time.time()
     out: Dict[str, List[dict]] = {"resumed": [], "not_resumed": []}
     for rec in interrupted:
-        if not _is_restart_resumable_worker(rec):
+        if _restart_worker_ids(rec) is None:
             continue
         try:
             resumed = await _recover_worker(rec, now)

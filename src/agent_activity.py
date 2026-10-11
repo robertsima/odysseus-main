@@ -262,6 +262,12 @@ def _load_runs() -> None:
             rec.setdefault("summary", {}).update(interrupted_reason=reason, interrupted_while=doing)
             _restart_interrupted.append(str(rec.get("run_id")))
             flipped = True
+    for rec in _runs.values():
+        # Marked by interrupt_run when the last process shut down gracefully.
+        summary = rec.get("summary") or {}
+        if rec.get("status") == "interrupted" and summary.pop("recover_on_start", None):
+            _restart_interrupted.append(str(rec.get("run_id")))
+            flipped = True
     if flipped:
         # On disk before anything else can happen: a second kill must find these
         # runs already interrupted, not flip them again with a later restart time.
@@ -282,7 +288,7 @@ def _unfinished_tool(rec: dict) -> Optional[str]:
     return open_start
 
 
-def _interruption_reason(rec: dict, now: float) -> Tuple[str, str]:
+def _interruption_reason(rec: dict, now: float, shutdown: bool = False) -> Tuple[str, str]:
     """Why a run found live at load ended, and what it was doing: the restart
     time, and the tool and command it was in the middle of, from its progress
     or else its events."""
@@ -297,8 +303,27 @@ def _interruption_reason(rec: dict, now: float) -> Tuple[str, str]:
         except Exception:
             doing = ""
     doing = _clamp(doing, 400)
-    text = f"Interrupted by an app restart at {when}"
+    text = f"Interrupted because the app shut down at {when}" if shutdown else f"Interrupted by an app restart at {when}"
     return (f"{text} while running {doing}" if doing else text), doing
+
+
+def interrupt_run(run_id: str) -> Optional[dict]:
+    """Close a live run because the app is shutting down, and mark it for
+    recovery at the next start (a user Stop is ``cancelled`` and never is).
+    Saved at once: the process may be gone before the debounced write."""
+    with _lock:
+        _load_runs()
+        rec = _runs.get(str(run_id))
+        if rec is None or rec.get("status") not in LIVE_RUN_STATUSES:
+            return None
+        now = time.time()
+        reason, doing = _interruption_reason(rec, now, shutdown=True)
+        rec["status"] = "interrupted"
+        rec["finished_at"] = now
+        rec.setdefault("summary", {}).update(interrupted_reason=reason, interrupted_while=doing,
+                                             recover_on_start=True)
+        _save_runs()
+        return _copy_run(rec)
 
 
 def reconcile_interrupted() -> List[dict]:
@@ -546,7 +571,7 @@ _RUN_SUMMARY_KEYS = frozenset({
     "requested_agents", "launched_agents", "research_requested", "research_completed", "research_failed",
     "usable_handoffs", "synthesis_status", "handoff_count", "artifact_count",
     "unresolved_count", "verification_failed",
-    "interrupted_reason", "interrupted_while", "restart_resumes", "resumed_from",
+    "interrupted_reason", "interrupted_while", "restart_resumes", "resumed_from", "recover_on_start",
 })
 
 

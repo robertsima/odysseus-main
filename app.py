@@ -1416,6 +1416,14 @@ async def _shutdown_event():
     # turn has so far. A turn cut off by the 2026-09-29 redeploy left no trace
     # in its chat; after a reload it looked as if it had never run.
     try:
+        # Workers first, as interrupted rather than stopped, so the next start resumes them.
+        from src import agent_control as _agent_control
+        _interrupted = await _agent_control.interrupt_workers_for_shutdown()
+        if _interrupted:
+            logger.info("Interrupted %d running worker(s) for shutdown; they resume at the next start", _interrupted)
+    except Exception as e:
+        logger.warning(f"Interrupting workers at shutdown failed: {e}")
+    try:
         from src import agent_runs as _agent_runs
         _cut = await _agent_runs.stop_all()
         if _cut:

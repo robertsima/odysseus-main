@@ -528,6 +528,16 @@ def _point_to_stored_worker_result(out: Dict, target_sid: str, caller: Optional[
 _NO_CLOSING_TEXT = "(the sub-agent finished with tool calls but no closing text)"
 # Detached finishers, held so the event loop does not drop them mid-run.
 _DETACHED: set = set()
+# In-flight agent-mode child exchanges by run id, so shutdown can cancel them.
+_CHILDREN: Dict[str, "asyncio.Future"] = {}
+
+
+def cancel_children(run_ids) -> int:
+    """Cancel the in-flight child exchanges of these runs (app shutdown)."""
+    tasks = [_CHILDREN[r] for r in run_ids if r in _CHILDREN and not _CHILDREN[r].done()]
+    for task in tasks:
+        task.cancel()
+    return len(tasks)
 
 
 def _exchange_verdict(outcome: Dict) -> tuple:
@@ -749,6 +759,8 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
                             text = _NO_CLOSING_TEXT
                         status, _verb = _exchange_verdict(outcome)
                     except asyncio.CancelledError:
+                        if (activity.get_run(run_id) or {}).get("status") == "interrupted":
+                            return  # the app is shutting down; startup recovery resumes it
                         status, text = "cancelled", "(the sub-agent was cancelled before finishing)"
                     except Exception as exc:
                         status, error = "failed", str(exc)[:2000]
@@ -817,6 +829,8 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
                         wrap_up_round=(profile["max_rounds"]
                                        if profile and (profile.get("max_rounds") or 0) > 0 else 0),
                     )))
+                    _CHILDREN[run_id] = child
+                    child.add_done_callback(lambda _t, rid=run_id: _CHILDREN.pop(rid, None))
                     response, tool_events = await _await_child(child, running, finish_detached)
                     if not response.strip() and tool_events:
                         response = _NO_CLOSING_TEXT

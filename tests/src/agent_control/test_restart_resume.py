@@ -5,6 +5,7 @@ Nothing told the worker or its parent chat, and the person typed "finish it"
 again and again. The worker's run, its chat and the parent hand-back are real
 here; only the model stream and the parent's own continuation turn are faked.
 """
+import asyncio
 import json
 import os
 import time
@@ -15,6 +16,7 @@ from src import agent_activity as act
 from src import agent_control, agent_runs, constants
 
 TASK = "build the feature"
+SUBAGENT_MESSAGE = "Carry on with the plan and report back"
 COMMAND = "python -m pytest tests -q"
 
 
@@ -28,6 +30,7 @@ def world(tmp_path, monkeypatch):
     import core.database as database
     import core.models as core_models
     import src.agent_loop as agent_loop
+    import src.agent_tools.session_tools as session_tools
     import src.ai_interaction as ai_interaction
 
     monkeypatch.setattr(constants, "DATA_DIR", str(tmp_path))
@@ -52,13 +55,16 @@ def world(tmp_path, monkeypatch):
             pass
 
     monkeypatch.setattr(ai_interaction, "get_session_manager", lambda: _Manager())
+    monkeypatch.setattr(session_tools, "_new_child_session", lambda *a, **k: (worker, None))
     monkeypatch.setattr(database, "get_session_settings", lambda sid, **kw: dict(settings.get(sid, {})))
 
     state = {"calls": [], "followups": [], "parent": parent, "worker": worker, "settings": settings,
-             "tmp": tmp_path}
+             "tmp": tmp_path, "hold": None}
 
     async def model(url, model_id, messages, **kwargs):
         state["calls"].append([dict(m) for m in messages])
+        if state["hold"] is not None:  # a worker held mid-run
+            await state["hold"].wait()
         yield _sse({"delta": "Continued with a narrower lane."})
         yield "data: [DONE]\n\n"
 
@@ -68,12 +74,22 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(agent_loop, "stream_agent_loop", model)
     monkeypatch.setattr(agent_control, "_continue_parent", continue_parent)
 
-    def crash(*, restart_resumes=0, age_s=600, parent_session="p-1", source="session", command=COMMAND):
+    def crash(*, restart_resumes=0, age_s=600, parent_session="p-1", source="session", command=COMMAND,
+              subagent=False):
         """Leave a live run in the registry, then 'restart': a new process loads the file."""
-        data = {"target_session": "w-1", "mode": "agent",
-                **({"parent_session": parent_session} if parent_session else {}),
-                **({"restart_resumes": restart_resumes} if restart_resumes else {})}
-        rid = act.run_started("w-1", source, f"Worker · {TASK}", owner="alice", data=data)
+        if subagent:
+            # What send_to_session records: filed under the PARENT chat, no
+            # parent_session key, the worker chat in target_session.
+            rid = act.run_started("p-1", "session", "Sub-agent · ↳ Lead Engineer: Implement the feature",
+                                  owner="alice", detail=SUBAGENT_MESSAGE,
+                                  data={"target_session": "w-1", "target_session_name": "Builder",
+                                        "model": "m", "mode": "agent",
+                                        **({"restart_resumes": restart_resumes} if restart_resumes else {})})
+        else:
+            data = {"target_session": "w-1", "mode": "agent",
+                    **({"parent_session": parent_session} if parent_session else {}),
+                    **({"restart_resumes": restart_resumes} if restart_resumes else {})}
+            rid = act.run_started("w-1", source, f"Worker · {TASK}", owner="alice", data=data)
         if command:
             act.note_progress(rid, current_tool="bash", current_command=command, current_target=command)
         act.flush_runs()
@@ -91,8 +107,6 @@ def world(tmp_path, monkeypatch):
 
 
 async def _settle():
-    import asyncio
-
     tasks = list(agent_control._WORKERS.values())
     if tasks:
         await asyncio.gather(*tasks)
@@ -173,3 +187,96 @@ async def test_runs_that_are_not_recent_workers_are_not_resumed(world, kwargs):
 
     assert result["resumed"] == [] and not world["calls"]
     assert not agent_control._WORKERS
+
+
+async def test_a_send_to_session_sub_agent_is_resumed_in_the_worker_chat(world):
+    """The production shape: filed under the parent chat, worker chat in target_session."""
+    old = world["crash"](subagent=True)
+
+    result = await agent_control.recover_after_restart()
+    await _settle()
+
+    assert [r["run_id"] for r in result["resumed"]] == [old]
+    assert len(world["calls"]) == 1
+    context = world["calls"][0]
+    assert any(SUBAGENT_MESSAGE in str(m.get("content")) for m in context), "the interrupted request is lost"
+    assert f"bash: {COMMAND}" in context[-1]["content"]
+    new = next(r for r in act.list_runs(session_id="w-1") if r["run_id"] != old)
+    assert new["status"] == "completed" and new["summary"]["parent_session"] == "p-1"
+    assert new["summary"]["restart_resumes"] == 1
+    told = _to_parent(world)
+    assert [m.content.split("]")[0] for m in told] == [
+        "[Worker Builder was interrupted by an app restart and resumed", "[Worker Builder finished"]
+
+
+async def test_a_sub_agent_past_the_limit_tells_the_parent_once(world):
+    world["crash"](subagent=True, restart_resumes=2)
+
+    await agent_control.recover_after_restart()
+    await _settle()
+
+    assert not world["calls"]
+    told = _to_parent(world)
+    assert len(told) == 1 and "not resumed" in told[0].content
+
+
+async def test_parent_continuation_runs_are_not_mistaken_for_sub_agents(world):
+    """_continue_parent files a run under the parent too, with the worker as target_session."""
+    rid = act.run_started("p-1", "session", "Continuing after worker Builder", owner="alice",
+                          data={"target_session": "w-1", "target_session_name": "Builder", "mode": "agent"})
+    act.flush_runs()
+    act._reset_for_tests()
+
+    result = await agent_control.recover_after_restart()
+    await _settle()
+
+    assert result["resumed"] == [] and not world["calls"] and not _to_parent(world)
+    assert act.get_run(rid)["status"] == "interrupted"
+
+
+async def _held_worker(world):
+    world["hold"] = asyncio.Event()
+    started = await agent_control.launch_worker(owner="alice", task=TASK, parent_session="p-1", preflight=False)
+    for _ in range(200):
+        if world["calls"]:
+            break
+        await asyncio.sleep(0.01)
+    assert world["calls"], "the worker never reached its model"
+    return started["run_id"]
+
+
+async def test_graceful_shutdown_marks_a_running_worker_interrupted_and_startup_resumes_it(world):
+    run_id = await _held_worker(world)
+    act.note_progress(run_id, current_tool="bash", current_command=COMMAND)
+
+    assert await agent_control.interrupt_workers_for_shutdown() == 1
+    await asyncio.wait_for(asyncio.gather(*agent_control._WORKERS.values()), timeout=5) if agent_control._WORKERS else None
+
+    rec = act.get_run(run_id)
+    assert rec["status"] == "interrupted"
+    assert "the app shut down" in rec["summary"]["interrupted_reason"] and COMMAND in rec["summary"]["interrupted_reason"]
+    assert not _to_parent(world), "shutdown must not hand the parent a 'stopped' result"
+
+    act._reset_for_tests()  # the restart
+    world["hold"] = None
+    world["calls"].clear()
+    result = await agent_control.recover_after_restart()
+    await _settle()
+
+    assert [r["run_id"] for r in result["resumed"]] == [run_id]
+    assert f"bash: {COMMAND}" in world["calls"][0][-1]["content"]
+
+
+async def test_a_user_stop_stays_cancelled_and_is_not_resumed(world):
+    run_id = await _held_worker(world)
+    assert (await agent_control.stop_run(run_id, by="from the Workbench"))["stopped"]
+    await asyncio.wait_for(agent_control._WORKERS[run_id], timeout=5) if run_id in agent_control._WORKERS else None
+    assert act.get_run(run_id)["status"] == "cancelled"
+    before = len(world["calls"])
+
+    act._reset_for_tests()  # restart
+    result = await agent_control.recover_after_restart()
+    await _settle()
+
+    assert result["resumed"] == [] and len(world["calls"]) == before
+    assert act.get_run(run_id)["status"] == "cancelled"

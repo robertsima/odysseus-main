@@ -1008,9 +1008,15 @@ after restarts fewer than `agent_worker_auto_resume_limit` times (the count is
 `restart_resumes` on the run lineage). The harness note names the command and
 tells it to take a narrower step, such as `python -m tests.run affected`. The
 parent chat gets one message either way. A worker that is not resumed ends it
-with a `Needs user:` line saying what the person can do. A `send_to_session`
-exchange in agent mode runs as its own task: if the calling turn is cancelled
-(newer message, Stop, shutdown), the child finishes and hands back to that chat.
+with a `Needs user:` line saying what the person can do. Both kinds of worker
+count: one started by the launch path, and a `send_to_session` agent-mode
+sub-agent (its run is filed under the parent chat with the worker chat in
+`target_session`). A graceful shutdown marks live workers `interrupted` with
+the reason "the app shut down at ..." before the loop closes, so a redeploy is
+resumed like a hard kill; a user Stop stays `cancelled` and is never resumed.
+A `send_to_session` exchange in agent mode runs as its own task: if the calling
+turn is cancelled (newer message, Stop), the child finishes and hands back to
+that chat.
 A cancelled turn's log line names the cause (new message, Stop, shutdown, or
 unknown), not a client disconnect.
 
