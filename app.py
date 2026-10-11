@@ -845,6 +845,8 @@ app.include_router(setup_editor_draft_routes())
 # Outcomes: one record per intent, linked to the systems of record
 from routes.outcome_routes import setup_outcome_routes
 app.include_router(setup_outcome_routes())
+from routes.today_routes import setup_today_routes
+app.include_router(setup_today_routes())
 
 # Scheduled tasks + event bus
 from src.task_scheduler import TaskScheduler
@@ -1031,6 +1033,10 @@ async def serve_tasks(request: Request):
 
 @app.get("/library")
 async def serve_library(request: Request):
+    return await serve_index(request)
+
+@app.get("/today")
+async def serve_today(request: Request):
     return await serve_index(request)
 
 @app.get("/backgrounds")

@@ -19,6 +19,8 @@ On first setup, Agamemnon creates an admin account (`admin` unless
 For Docker installs, the same line is in `docker compose logs odysseus`.
 Use that for the first login, then change it in **Settings**.
 
+After you log in, open **Today** (first in the navigation, or `/today`). It lists what needs you now and has a box to capture a task or follow-up.
+
 Contributing? See [CONTRIBUTING.md](https://github.com/odysseus-dev/odysseus/blob/dev/CONTRIBUTING.md) for setup, testing, and pull request guidelines.
 
 ### Docker (recommended)
