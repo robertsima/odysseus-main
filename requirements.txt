@@ -52,6 +52,10 @@ PyYAML>=6.0,<7
 # Private speech-to-text. PyAV (installed transitively) bundles its decoding
 # libraries, so Odysseus does not need a system FFmpeg service or HTTPS.
 faster-whisper==1.2.1
+# faster-whisper 1.2.1 opens audio with av.open(metadata_errors="ignore"), an
+# argument PyAV 19 removed: on 2026-10-11 every local transcription failed with
+# TypeError. Lift the ceiling only with a faster-whisper that no longer passes it.
+av>=11,<19
 pyotp
 qrcode[pil]
 croniter

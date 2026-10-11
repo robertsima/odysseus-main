@@ -191,7 +191,9 @@ class STTService:
         except STTError:
             raise
         except Exception as exc:
-            logger.error("Local STT failed (%s)", type(exc).__name__)
+            # The person gets the generic message; the log keeps the traceback,
+            # which named the PyAV break of 2026-10-11 nowhere else.
+            logger.error("Local STT failed (%s)", type(exc).__name__, exc_info=True)
             raise STTError(
                 "transcription_failed", "Local transcription failed.", 422
             ) from exc
