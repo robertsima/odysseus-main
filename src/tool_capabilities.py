@@ -150,6 +150,7 @@ _register(
         "manage_documents",
         "manage_memory",
         "manage_notes",
+        "manage_outcomes",
         "manage_research",
         "manage_session",
         "manage_skills",
@@ -384,6 +385,7 @@ _PRIVATE_ACTION_READS: Mapping[str, frozenset[str]] = MappingProxyType(
         "manage_documents": frozenset({"list", "read", "view", "open", "get"}),
         "manage_memory": frozenset({"list", "search"}),
         "manage_notes": frozenset({"list", "search", "find", "view"}),
+        "manage_outcomes": frozenset({"list", "get"}),
         "manage_research": frozenset({"list", "read", "open", "view", "get"}),
         "manage_session": frozenset({"list", "switch", "open", "select", "view"}),
         "manage_skills": frozenset({"list", "index", "view", "view_ref", "search"}),
@@ -404,6 +406,9 @@ _PRIVATE_ACTION_WRITES: Mapping[str, frozenset[str]] = MappingProxyType(
         "manage_documents": frozenset({"delete", "tidy"}),
         "manage_memory": frozenset({"add", "edit", "delete"}),
         "manage_notes": frozenset({"add", "update", "delete", "toggle_item"}),
+        "manage_outcomes": frozenset(
+            {"create", "update", "set_state", "link", "unlink", "add_evidence", "set_blocker", "clear_blocker"}
+        ),
         "manage_research": frozenset({"delete"}),
         "manage_session": frozenset(
             {
@@ -456,6 +461,7 @@ _ACTION_DEFAULTS: Mapping[str, str] = MappingProxyType(
         "manage_agent_loadout": "list",
         "manage_calendar": "list_events",
         "manage_documents": "list",
+        "manage_outcomes": "list",
         "manage_research": "list",
         "manage_tasks": "list",
     }

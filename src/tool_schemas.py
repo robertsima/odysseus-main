@@ -1895,6 +1895,46 @@ FUNCTION_TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_outcomes",
+            "description": (
+                "Track what the person wants closed. An outcome links to the real items (task, note, chat, run, PR) and copies none. list/get read. set_state moves it; done needs evidence you attached with add_evidence (commit, PR, run, tests, review) or the person's confirmation, which you cannot give. waiting needs waiting_on. set_blocker needs user_action when the person must act. No priority."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["list", "get", "create", "update", "set_state", "link", "unlink",
+                                 "add_evidence", "set_blocker", "clear_blocker"],
+                        "description": "What to do (default: list)",
+                    },
+                    "id": {"type": "string", "description": "Outcome id, for every action except list and create."},
+                    "title": {"type": "string", "description": "The person's words, for create or update."},
+                    "detail": {"type": "string", "description": "Longer description for create or update; for add_evidence, one line on what the evidence shows."},
+                    "kind": {"type": "string", "enum": ["project", "obligation"], "description": "create/update: project = multi-step work, obligation = something to do and close."},
+                    "next_action": {"type": "string", "description": "One concrete next step."},
+                    "state": {"type": "string", "enum": ["open", "active", "waiting", "blocked", "done", "dropped"], "description": "Target state for set_state; blocked is set by set_blocker. For list, a state filter."},
+                    "states": {"type": "array", "items": {"type": "string"}, "description": "list: only outcomes in these states."},
+                    "waiting_on": {"type": "string", "description": "Who or what you are waiting for; required to move to waiting."},
+                    "follow_up_at": {"type": "string", "description": "ISO 8601 UTC time a waiting outcome should resurface."},
+                    "due_at": {"type": "string", "description": "ISO 8601 UTC. Only when no linked item owns a due date."},
+                    "snoozed_until": {"type": "string", "description": "ISO 8601 UTC; hides the outcome until then."},
+                    "link_kind": {"type": "string", "enum": ["todoist_task", "calendar_event", "note", "chat", "agent_run", "scheduled_task", "worktree", "branch", "pull_request", "url"], "description": "link: what the ref points to."},
+                    "ref": {"type": "string", "description": "link: the target's id or URL. add_evidence: sha, URL or run id."},
+                    "label": {"type": "string", "description": "link: short display label."},
+                    "link_id": {"type": "string", "description": "unlink: the link id from get."},
+                    "evidence_kind": {"type": "string", "enum": ["commit", "pull_request", "run", "tests", "review", "note"], "description": "add_evidence: what kind of proof."},
+                    "summary": {"type": "string", "description": "set_blocker: one plain sentence on what is stopping the work."},
+                    "user_action": {"type": "string", "description": "set_blocker: the one concrete step the person takes. Required when recovery is user."},
+                    "recovery": {"type": "string", "enum": ["user", "retry"], "description": "set_blocker: user = needs the person (default), retry = safe to run again as-is."},
+                },
+                "required": ["action"],
+            },
+        },
+    },
 ]
 
 

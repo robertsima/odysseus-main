@@ -27,6 +27,7 @@ from .delegation_tools import DelegationTool
 from .worktree_tools import AgentWorktreeTool, ReadAppLogsTool
 from .git_tools import GitTool
 from .introspection_tools import InspectRuntimeTool
+from .outcome_tools import ManageOutcomesTool
 from .document_tools import CreateDocumentTool, UpdateDocumentTool, EditDocumentTool, SuggestDocumentTool, ManageDocumentTool
 from .rag_tools import SearchDocumentsTool, RecallToolOutputTool
 from src.chat_archive import RecallChatHistoryTool
@@ -56,6 +57,7 @@ TOOL_HANDLERS = {
     "manage_git": GitTool().execute,
     "read_app_logs": ReadAppLogsTool().execute,
     "inspect_runtime": InspectRuntimeTool().execute,
+    "manage_outcomes": ManageOutcomesTool().execute,
     "ls": LsTool().execute,
     "glob": GlobTool().execute,
     "grep": GrepTool().execute,
