@@ -146,6 +146,10 @@ async def test_without_the_grant_the_shell_runs_sandboxed(tool, content, tmp_pat
     _, result = await _run(tool, content, str(ws))
     assert result.get("exit_code") == 0, result
     argv = captured_exec["argv"]
+    if argv[:2] == ["/bin/sh", "-c"]:
+        # On Linux the sandbox runs behind the OOM-score wrapper (shell_sandbox.oom_first).
+        assert "oom_score_adj" in argv[2]
+        argv = argv[4:]
     assert argv[:2] == [argv[0], "-i"] and any(os.path.basename(a).startswith("bwrap") for a in argv)
     binds = _flag_pairs(argv, "--bind")
     # The workspace, read-write at its own path ...
