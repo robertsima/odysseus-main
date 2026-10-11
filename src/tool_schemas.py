@@ -1935,6 +1935,25 @@ FUNCTION_TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "capture",
+            "description": (
+                "Default for one-line tasks, reminders, appointments and follow-ups ('remind me', 'add a task', 'waiting on'). Files it once: Todoist task (admin) or note reminder, calendar event, or outcome. Skips duplicates; same idempotency_key is safe to retry. On needs_clarification, resend text, key and the chosen destination."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "The person's line, as they said it."},
+                    "idempotency_key": {"type": "string", "description": "Reuse on retry or when answering a question, so the line is filed once."},
+                    "destination": {"type": "string", "enum": ["todoist", "calendar", "note", "outcome"], "description": "Only when answering needs_clarification: the option the person chose."},
+                    "due": {"type": "string", "description": "With destination: the chosen option's due, or a date/time the person gave."},
+                },
+                "required": ["text"],
+            },
+        },
+    },
 ]
 
 

@@ -820,6 +820,153 @@ def _expand_rrule(
 
 # ── Routes ──
 
+async def quick_parse_event(owner: str, text: str, tz: str = "", tz_offset=None) -> dict:
+    """Parse a natural-language event description into structured fields.
+
+    Input: {"text": "lunch with sara friday 1pm downtown", "tz": "America/New_York"}
+    Output: {"ok": true, "event": {"summary", "dtstart", "dtend",
+              "all_day", "location", "description"}, "confidence": 0.0-1.0}
+
+    Anchored on the server's current date/time so phrases like
+    "tomorrow", "next Tuesday", "in 30 minutes" resolve correctly.
+    Uses the "utility" endpoint (small / fast model) to keep latency low.
+    """
+    from src.endpoint_resolver import resolve_endpoint
+    from src.llm_core import llm_call_async
+    from src.text_helpers import strip_think
+    import json as _json
+    import re as _re
+
+    from src.user_time import (
+        clear_user_time_context,
+        current_datetime_prompt,
+        set_user_tz_name,
+        set_user_tz_offset,
+    )
+
+    clear_user_time_context()
+    tz_hint = (tz or "").strip()
+    if tz_offset is not None:
+        set_user_tz_offset(tz_offset)
+    if tz_hint:
+        set_user_tz_name(tz_hint)
+
+    url, model, headers = resolve_endpoint("utility", owner=owner or None)
+    if not url:
+        url, model, headers = resolve_endpoint("default", owner=owner or None)
+    if not url or not model:
+        return {"ok": False, "error": "No LLM endpoint configured"}
+
+    # 2026-10-01 (A4-13): the date block already carries today, the local
+    # clock and the zone, so the old second "current timestamp" line is gone.
+    # The 60-minute default lives in the code below, not in the prompt.
+    system_prompt = (
+        current_datetime_prompt()
+        + "Parse the user's one-line description into one calendar event as "
+        "strict JSON. Resolve relative dates and times (\"tomorrow\", "
+        "\"friday\", \"next monday\", \"in 30 minutes\") against the date and "
+        "time above. A date with no time is an all-day event.\n\n"
+        "Output only this JSON shape:\n"
+        "{\n"
+        '  "summary": "<event title, capitalized>",\n'
+        '  "dtstart": "<YYYY-MM-DDTHH:MM:00>",\n'
+        '  "dtend":   "<YYYY-MM-DDTHH:MM:00, or empty when no end time is stated>",\n'
+        '  "all_day": <true|false>,\n'
+        '  "location": "<place or empty>",\n'
+        '  "description": "",\n'
+        '  "confidence": <0.0-1.0>\n'
+        "}\n"
+        "For all-day events use \"YYYY-MM-DD\" (no time) for both fields."
+    )
+
+    try:
+        raw = await llm_call_async(
+            url=url, model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text},
+            ],
+            headers=headers,
+            temperature=0.0,
+            max_tokens=512,
+            timeout=20,
+        )
+    except Exception as e:
+        return {"ok": False, "error": f"LLM call failed: {e}"}
+
+    cleaned = strip_think(raw or "", prose=False, prompt_echo=True)
+    cleaned = _re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=_re.MULTILINE).strip()
+    m = _re.search(r"\{[\s\S]*\}", cleaned)
+    if not m:
+        return {"ok": False, "error": "Could not extract JSON", "raw": cleaned[:400]}
+    try:
+        parsed = _json.loads(m.group())
+    except Exception as e:
+        return {"ok": False, "error": f"Invalid JSON: {e}", "raw": cleaned[:400]}
+
+    # Light validation / defaults so the frontend can trust the shape.
+    summary = (parsed.get("summary") or text)[:200]
+    # Strip stale relative/absolute time tokens that the LLM (or the
+    # user's raw input) sometimes leaks into the summary — these
+    # would otherwise be displayed verbatim in reminder notifications
+    # that fire much later, when "in 29 min" is no longer true. The
+    # actual timing lives in dtstart/dtend.
+    summary = _re.sub(r'\bin\s+\d+\s*(min|minute|hour|hr|day)s?\b', '', summary, flags=_re.IGNORECASE)
+    summary = _re.sub(r'\(\s*\d{1,2}:\d{2}\s*\)', '', summary)
+    summary = _re.sub(r'\b\d{1,2}(:\d{2})?\s*(am|pm)\b', '', summary, flags=_re.IGNORECASE)
+    summary = _re.sub(r'\s+@\s+(?=\d)', ' ', summary)  # drop "@" when right before a time
+    summary = _re.sub(r'\s+', ' ', summary).strip(' -—,@')
+    all_day = bool(parsed.get("all_day"))
+    dtstart = (parsed.get("dtstart") or "").strip()
+    dtend   = (parsed.get("dtend") or "").strip()
+    # Force naive-local on LLM output. The model is anchored on the
+    # user's local "now" via the system prompt, so its emitted
+    # datetime is already meant to be the user's wall-clock time.
+    # Some models append `Z` or a tz offset anyway, which would
+    # make `_parse_dt_pair` flag the row as UTC and shift the
+    # displayed time forward by the user's tz offset. Strip any
+    # trailing tz marker so the time is stored exactly as the LLM
+    # wrote it.
+    def _strip_tz(s):
+        if not s:
+            return s
+        s = s.strip()
+        # Strip "Z"
+        if s.endswith('Z') or s.endswith('z'):
+            s = s[:-1]
+        # Strip "+HH:MM" / "-HH:MM" if it followed a T-time
+        s = _re.sub(r'[+-]\d{2}:?\d{2}$', '', s)
+        return s
+    dtstart = _strip_tz(dtstart)
+    dtend   = _strip_tz(dtend)
+    if not dtstart:
+        return {"ok": False, "error": "Model did not produce a start time", "raw": cleaned[:400]}
+    if not dtend:
+        # Auto-fill +60 min for timed events; +0 for all-day (single-day).
+        try:
+            if all_day:
+                dtend = dtstart
+            else:
+                dt = datetime.fromisoformat(dtstart)
+                dtend = (dt + timedelta(minutes=60)).strftime("%Y-%m-%dT%H:%M:00")
+        except Exception:
+            dtend = dtstart
+
+    return {
+        "ok": True,
+        "event": {
+            "summary": summary,
+            "dtstart": dtstart,
+            "dtend": dtend,
+            "all_day": all_day,
+            "location": (parsed.get("location") or "").strip()[:200],
+            "description": (parsed.get("description") or "").strip()[:2000],
+        },
+        "confidence": float(parsed.get("confidence", 0.7) or 0.7),
+    }
+
+
+
 def setup_calendar_routes(upload_handler=None) -> APIRouter:
     router = APIRouter(prefix="/api/calendar", tags=["calendar"])
 
@@ -1944,153 +2091,12 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
 
     @router.post("/quick-parse")
     async def quick_parse(request: Request):
-        """Parse a natural-language event description into structured fields.
-
-        Input: {"text": "lunch with sara friday 1pm downtown", "tz": "America/New_York"}
-        Output: {"ok": true, "event": {"summary", "dtstart", "dtend",
-                  "all_day", "location", "description"}, "confidence": 0.0-1.0}
-
-        Anchored on the server's current date/time so phrases like
-        "tomorrow", "next Tuesday", "in 30 minutes" resolve correctly.
-        Uses the "utility" endpoint (small / fast model) to keep latency low.
-        """
+        """Parse a natural-language event description into structured fields. See quick_parse_event."""
         owner = _require_user(request)
-        from src.endpoint_resolver import resolve_endpoint
-        from src.llm_core import llm_call_async
-        from src.text_helpers import strip_think
-        import json as _json
-        import re as _re
-
         body = await request.json()
         text = (body.get("text") or "").strip()
         if not text:
             raise HTTPException(400, "text is required")
-        from src.user_time import (
-            clear_user_time_context,
-            current_datetime_prompt,
-            set_user_tz_name,
-            set_user_tz_offset,
-        )
-
-        clear_user_time_context()
-        tz_hint = (body.get("tz") or "").strip()
-        if body.get("tz_offset") is not None:
-            set_user_tz_offset(body.get("tz_offset"))
-        if tz_hint:
-            set_user_tz_name(tz_hint)
-
-        url, model, headers = resolve_endpoint("utility", owner=owner or None)
-        if not url:
-            url, model, headers = resolve_endpoint("default", owner=owner or None)
-        if not url or not model:
-            return {"ok": False, "error": "No LLM endpoint configured"}
-
-        # 2026-10-01 (A4-13): the date block already carries today, the local
-        # clock and the zone, so the old second "current timestamp" line is gone.
-        # The 60-minute default lives in the code below, not in the prompt.
-        system_prompt = (
-            current_datetime_prompt()
-            + "Parse the user's one-line description into one calendar event as "
-            "strict JSON. Resolve relative dates and times (\"tomorrow\", "
-            "\"friday\", \"next monday\", \"in 30 minutes\") against the date and "
-            "time above. A date with no time is an all-day event.\n\n"
-            "Output only this JSON shape:\n"
-            "{\n"
-            '  "summary": "<event title, capitalized>",\n'
-            '  "dtstart": "<YYYY-MM-DDTHH:MM:00>",\n'
-            '  "dtend":   "<YYYY-MM-DDTHH:MM:00, or empty when no end time is stated>",\n'
-            '  "all_day": <true|false>,\n'
-            '  "location": "<place or empty>",\n'
-            '  "description": "",\n'
-            '  "confidence": <0.0-1.0>\n'
-            "}\n"
-            "For all-day events use \"YYYY-MM-DD\" (no time) for both fields."
-        )
-
-        try:
-            raw = await llm_call_async(
-                url=url, model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": text},
-                ],
-                headers=headers,
-                temperature=0.0,
-                max_tokens=512,
-                timeout=20,
-            )
-        except Exception as e:
-            return {"ok": False, "error": f"LLM call failed: {e}"}
-
-        cleaned = strip_think(raw or "", prose=False, prompt_echo=True)
-        cleaned = _re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=_re.MULTILINE).strip()
-        m = _re.search(r"\{[\s\S]*\}", cleaned)
-        if not m:
-            return {"ok": False, "error": "Could not extract JSON", "raw": cleaned[:400]}
-        try:
-            parsed = _json.loads(m.group())
-        except Exception as e:
-            return {"ok": False, "error": f"Invalid JSON: {e}", "raw": cleaned[:400]}
-
-        # Light validation / defaults so the frontend can trust the shape.
-        summary = (parsed.get("summary") or text)[:200]
-        # Strip stale relative/absolute time tokens that the LLM (or the
-        # user's raw input) sometimes leaks into the summary — these
-        # would otherwise be displayed verbatim in reminder notifications
-        # that fire much later, when "in 29 min" is no longer true. The
-        # actual timing lives in dtstart/dtend.
-        summary = _re.sub(r'\bin\s+\d+\s*(min|minute|hour|hr|day)s?\b', '', summary, flags=_re.IGNORECASE)
-        summary = _re.sub(r'\(\s*\d{1,2}:\d{2}\s*\)', '', summary)
-        summary = _re.sub(r'\b\d{1,2}(:\d{2})?\s*(am|pm)\b', '', summary, flags=_re.IGNORECASE)
-        summary = _re.sub(r'\s+@\s+(?=\d)', ' ', summary)  # drop "@" when right before a time
-        summary = _re.sub(r'\s+', ' ', summary).strip(' -—,@')
-        all_day = bool(parsed.get("all_day"))
-        dtstart = (parsed.get("dtstart") or "").strip()
-        dtend   = (parsed.get("dtend") or "").strip()
-        # Force naive-local on LLM output. The model is anchored on the
-        # user's local "now" via the system prompt, so its emitted
-        # datetime is already meant to be the user's wall-clock time.
-        # Some models append `Z` or a tz offset anyway, which would
-        # make `_parse_dt_pair` flag the row as UTC and shift the
-        # displayed time forward by the user's tz offset. Strip any
-        # trailing tz marker so the time is stored exactly as the LLM
-        # wrote it.
-        def _strip_tz(s):
-            if not s:
-                return s
-            s = s.strip()
-            # Strip "Z"
-            if s.endswith('Z') or s.endswith('z'):
-                s = s[:-1]
-            # Strip "+HH:MM" / "-HH:MM" if it followed a T-time
-            s = _re.sub(r'[+-]\d{2}:?\d{2}$', '', s)
-            return s
-        dtstart = _strip_tz(dtstart)
-        dtend   = _strip_tz(dtend)
-        if not dtstart:
-            return {"ok": False, "error": "Model did not produce a start time", "raw": cleaned[:400]}
-        if not dtend:
-            # Auto-fill +60 min for timed events; +0 for all-day (single-day).
-            try:
-                if all_day:
-                    dtend = dtstart
-                else:
-                    dt = datetime.fromisoformat(dtstart)
-                    dtend = (dt + timedelta(minutes=60)).strftime("%Y-%m-%dT%H:%M:00")
-            except Exception:
-                dtend = dtstart
-
-        return {
-            "ok": True,
-            "event": {
-                "summary": summary,
-                "dtstart": dtstart,
-                "dtend": dtend,
-                "all_day": all_day,
-                "location": (parsed.get("location") or "").strip()[:200],
-                "description": (parsed.get("description") or "").strip()[:2000],
-            },
-            "confidence": float(parsed.get("confidence", 0.7) or 0.7),
-        }
+        return await quick_parse_event(owner, text, tz=body.get("tz") or "", tz_offset=body.get("tz_offset"))
 
     return router

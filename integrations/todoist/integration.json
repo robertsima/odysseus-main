@@ -24,7 +24,7 @@
   "settings": [],
   "tools": "from_server",
   "function_calling": true,
-  "prompt": "Actionable work (tasks, due dates, projects) belongs in Todoist; fixed appointments and reservations belong in Calendar.",
+  "prompt": "Actionable work (tasks, due dates, projects) belongs in Todoist; fixed appointments and reservations belong in Calendar. For a one-line task, reminder, appointment or follow-up, call `capture` first; use the Todoist tool to edit, query or bulk-change tasks.",
   "skills": [
     "skills"
   ],

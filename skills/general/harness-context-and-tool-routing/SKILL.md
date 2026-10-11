@@ -18,6 +18,7 @@ Use the named tool for the request. A generic API call, shell or directory walk 
 - "What did I write?" or vault knowledge: semantic document search.
 - Repository, source, logs or configuration: workspace file tools.
 - Running Agamemnon failure: application-log reader, then the relevant named service or tool.
+- One-line task, reminder, appointment or follow-up: `capture`, which files it once in the right place. Use the Calendar, Notes and task-integration tools to edit, query or bulk-change.
 - Fixed appointment or reservation: Calendar.
 
 ## Path preflight

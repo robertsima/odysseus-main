@@ -441,7 +441,7 @@ _DOMAIN_RULES = {
 - After a successful serve, verify with `list_served_models`; if an external server is running but invisible, use `adopt_served_model`.""",
     "notes_calendar_tasks": """\
 ## Notes/calendar/tasks rules
-- Notes/todos/reminders use `manage_notes`, not memory.
+- Notes/todos/reminders use `manage_notes`, not memory. For a one-line task, reminder, appointment or follow-up, `capture` is the default: it picks the destination and skips duplicates. Use `manage_notes`, `manage_calendar` and the Todoist tool to edit, query or bulk-change.
 - Pass `calendar` only when the user names one; call `list_calendars` when a name is unclear or the tool reports an unknown calendar. Update and delete need the event `uid` from `list_events`.
 - Recurring/automatic/scheduled requests create a `manage_tasks` task; do not just perform the action once.""",
     "ui": """\
@@ -481,7 +481,7 @@ _DOMAIN_TOOL_MAP = {
     # exact tool the Rolling Job Application report task needs.
     "email": {"list_email_accounts", "list_emails", "read_email", "audit_emails", "scan_email_unsubscribes", "unsubscribe_email", "send_email", "reply_to_email", "bulk_email", "archive_email", "delete_email", "mark_email_read", "resolve_contact", "manage_contact"},
     "cookbook": {"download_model", "serve_model", "serve_preset", "list_serve_presets", "list_served_models", "stop_served_model", "tail_serve_output", "list_downloads", "cancel_download", "search_hf_models", "list_cached_models", "list_cookbook_servers", "adopt_served_model"},
-    "notes_calendar_tasks": {"manage_notes", "manage_calendar", "manage_tasks", "manage_outcomes"},
+    "notes_calendar_tasks": {"manage_notes", "manage_calendar", "manage_tasks", "manage_outcomes", "capture"},
     "ui": {"ui_control"},
     "sessions": {"create_session", "list_sessions", "manage_session", "send_to_session", "search_chats"},
     "files": {"bash", "python", "read_file", "write_file", "edit_file", "apply_patch", "todowrite", "grep", "glob", "ls", "get_workspace", "manage_bg_jobs", "preview_file"},

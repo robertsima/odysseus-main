@@ -144,6 +144,7 @@ _register(
 )
 _register(
     {
+        "capture",
         "create_document",
         "manage_calendar",
         "manage_contact",
