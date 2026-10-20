@@ -2483,6 +2483,17 @@ async function _diagErrorText(res) {
   }
 }
 
+// The last bundle's object URL. It lives until the next export (or ten
+// minutes), so the Save link below still works after the automatic download.
+let _diagBundleUrl = null;
+let _diagBundleUrlTimer = null;
+function _setDiagBundleUrl(url) {
+  if (_diagBundleUrl) URL.revokeObjectURL(_diagBundleUrl);
+  clearTimeout(_diagBundleUrlTimer);
+  _diagBundleUrl = url;
+  if (url) _diagBundleUrlTimer = setTimeout(() => _setDiagBundleUrl(null), 10 * 60 * 1000);
+}
+
 function initDiagnosticsBundle() {
   const exportBtn = el('diag-bundle-export-btn');
   if (!exportBtn) return;
@@ -2553,15 +2564,28 @@ function initDiagnosticsBundle() {
       const blob = await res.blob();
       const disposition = res.headers.get('Content-Disposition') || '';
       const match = disposition.match(/filename="?([^";]+)"?/);
+      const filename = match ? match[1] : 'odysseus-diagnostics.zip';
+      _setDiagBundleUrl(URL.createObjectURL(blob));
+      // The download starts after the build finishes, outside the click that
+      // asked for it, and a browser may refuse it as an automatic download
+      // (2026-10-20: bundles built on the server but never reached Downloads).
+      // Try it, and offer a Save link: clicking that is the person's own
+      // action, which the browser allows.
       const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = match ? match[1] : 'odysseus-diagnostics.zip';
+      a.href = _diagBundleUrl;
+      a.download = filename;
       document.body.appendChild(a);
       a.click();
       a.remove();
-      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-      setMsg(`Downloaded ${a.download} (${Math.max(1, Math.round(blob.size / 1024))} KB).`
-        + (includeMessages ? ' It contains chat messages.' : ''), 'admin-success');
+      msgBox.className = 'settings-diag-bundle-msg admin-success';
+      msgBox.textContent = `Ready: ${filename} (${Math.max(1, Math.round(blob.size / 1024))} KB).`
+        + (includeMessages ? ' It contains chat messages.' : '') + ' Not in your downloads? ';
+      const save = document.createElement('a');
+      save.href = _diagBundleUrl;
+      save.download = filename;
+      save.className = 'settings-diag-bundle-save';
+      save.textContent = 'Save it';
+      msgBox.appendChild(save);
     } catch (e) {
       setMsg('Export failed: ' + e.message, 'admin-error');
     } finally {

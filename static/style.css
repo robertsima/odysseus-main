@@ -42121,6 +42121,12 @@ body.theme-frosted .modal {
 .settings-diag-bundle-msg:empty {
   display: none;
 }
+.settings-diag-bundle-save {
+  color: var(--accent, var(--red));
+  font-weight: 600;
+  text-decoration: underline;
+  cursor: pointer;
+}
 .settings-system-logs-placeholder {
   color: var(--color-text-dim, #7f8c8d);
   font-style: italic;
