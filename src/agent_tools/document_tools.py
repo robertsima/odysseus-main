@@ -195,6 +195,33 @@ def _target_error(message: str, candidates: List[Dict[str, str]], **extra) -> Di
     return out
 
 
+def _deleted_document_error(db, Document, ref: str, owner: Optional[str]) -> Optional[Dict]:
+    """The error for an id that names one of the owner's deleted documents.
+
+    Deleted documents stay readable through the document APIs, so without
+    this the model saw a document it could read but "not find": on
+    2026-10-20 an agent spent 37 rounds reading the app's source to work out
+    why. Say what happened and what to do instead.
+    """
+    doc = _get_owned_document(db, Document, ref, owner)
+    if doc is None or doc.is_active:
+        return None
+    when = f" on {doc.updated_at:%Y-%m-%d %H:%M}" if getattr(doc, "updated_at", None) else ""
+    return {
+        "error": (
+            f"Document '{doc.title}' ({doc.id}) was deleted{when}, so it cannot be edited and "
+            "there is no way to restore it from here. Its last text is in `deleted_document_content`. "
+            "To carry on, create a new document from that text with create_document and apply the "
+            "change there, then tell the person the original had been deleted. Do not retry this id "
+            "or investigate the app."
+        ),
+        "exit_code": 1,
+        "deleted_document_id": doc.id,
+        "deleted_document_title": doc.title,
+        "deleted_document_content": doc.current_content or "",
+    }
+
+
 def _lookup_document_ref(db, Document, ref: str, owner: Optional[str]):
     """Resolve an explicit reference to exactly one owned document.
 
@@ -233,6 +260,9 @@ def _lookup_document_ref(db, Document, ref: str, owner: Optional[str]):
             )
     except Exception:
         logger.debug("document reference lookup failed for %r", ref, exc_info=True)
+    deleted = _deleted_document_error(db, Document, ref, owner)
+    if deleted:
+        return None, deleted
     return None, _target_error(
         f"Document '{ref}' was not found among your documents. {VAULT_NOTE_HINT}",
         _document_candidates(db, Document, owner),
