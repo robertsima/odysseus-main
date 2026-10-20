@@ -56,7 +56,10 @@ logger = logging.getLogger(__name__)
 SETTING = "chatgpt_stable_tools"
 # A declared list past this starts over from the round's selection (one miss):
 # schemas the model reads on every request still cost context, cached or not.
-MAX_DECLARED = 160
+# 128 is also the most tools an OpenAI request may carry: on 2026-10-20 a
+# 252-tool request to the ChatGPT route came back empty, and the chat showed
+# only "All model candidates returned no substantive output".
+MAX_DECLARED = 128
 _MAX_SESSIONS = 256
 # A bounded loadout is declared whole when it is at most this many tools AND its
 # definitions are at most this many tokens (chars/4 over the compact schemas).
@@ -164,6 +167,12 @@ def _load(session_id: str) -> "collections.OrderedDict[str, dict]":
                     entry[name] = schema
     except (OSError, ValueError, AttributeError):
         pass
+    if len(entry) > MAX_DECLARED:
+        # Saved before the cap matched the provider's limit. Kept, it would be
+        # re-sent on every request and fail every one.
+        logger.warning("[stable-tools] session=%s saved list has %d tools (cap %d); starting over",
+                       session_id, len(entry), MAX_DECLARED)
+        entry.clear()
     _DECLARED[session_id] = entry
     while len(_DECLARED) > _MAX_SESSIONS:
         _DECLARED.popitem(last=False)
@@ -270,6 +279,15 @@ def declare(session_id: Optional[str], schemas: List[dict],
             entry.clear()
             for schema in base + active:
                 entry[_name(schema)] = schema
+            if len(entry) > MAX_DECLARED:
+                # The round alone is past the provider's limit. Its own tools
+                # go first, in its order, then the bounded set.
+                keep = set(list(dict.fromkeys(allowed + [_name(s) for s in base]))[:MAX_DECLARED])
+                logger.warning("[stable-tools] session=%s round offers %d tools; sending the first %d",
+                               session_id, len(entry), MAX_DECLARED)
+                for name in [n for n in entry if n not in keep]:
+                    del entry[name]
+                allowed = [n for n in allowed if n in entry]
         changed = list(entry.items()) != before
         if changed:
             added = [n for n in entry if n not in dict(before)]

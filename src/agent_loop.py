@@ -1895,11 +1895,27 @@ _WORKSPACE_CODE_TARGET_RE = re.compile(
     r"|(?:~?/[^\"'\s`<>]+)",
     re.IGNORECASE,
 )
+# "this project" is not here: people say it of a proposal or a client job as
+# often as of code, and a chat without a workspace already tells the model to
+# ask for one when the work needs a folder.
 _EXPLICIT_WORKSPACE_REFERENCE_RE = re.compile(
     r"\b(?:in|inside|within|from|this|current|active)\s+(?:the\s+)?workspace\b"
-    r"|\b(?:this|current|active)\s+(?:workspace|repo|project)\b",
+    r"|\b(?:this|current|active)\s+(?:workspace|repo|repository)\b",
     re.IGNORECASE,
 )
+# Where src/document_processor.build_user_content appends an attached file's
+# text to the user's message. What follows is the file, not the person.
+_ATTACHMENT_TEXT_START_RE = re.compile(
+    r"\n\n\[(?:Document content \u2014 |PDF content\]|Page \d+ text\]|Attached document)"
+    r"|\n=== File: "
+)
+
+
+def _typed_user_text(text: str) -> str:
+    """The user's message up to the first attached file's extracted text."""
+    text = str(text or "")
+    match = _ATTACHMENT_TEXT_START_RE.search(text)
+    return text[:match.start()] if match else text
 _LOCAL_COMPUTER_REFERENCE_RE = re.compile(
     r"\b(?:on|from|in|using|with)\s+(?:this|my|the)\s+(?:computer|machine|pc|laptop|device|system)\b"
     r"|\b(?:local|host)\s+(?:computer|machine|files?|system)\b"
@@ -1939,9 +1955,16 @@ def _looks_like_local_computer_request(text: str) -> bool:
 
 
 def _explicitly_references_missing_workspace(text: str, workspace: Optional[str]) -> bool:
+    """Whether the person asked for "this workspace" in a chat that has none.
+
+    Only their own words count. 2026-10-20: two attached contracts said "this
+    Project", the turn got the canned "No active workspace is set" reply
+    without reaching the model, and setting a workspace to get past it led
+    straight into the next failure.
+    """
     if workspace:
         return False
-    text = str(text or "")
+    text = _spoken_user_text(_typed_user_text(text))
     if not text.strip():
         return False
     return bool(_EXPLICIT_WORKSPACE_REFERENCE_RE.search(text))
@@ -5624,40 +5647,76 @@ def _core_toolset_enabled() -> bool:
     return bool(value)
 
 
+# The most tools a core turn offers. The core set and ``extra`` always fit;
+# the loadout's picks and the chat's earlier tools fill the rest, and anything
+# past it is one `discover_tools` call away. 2026-10-20: an admin chat whose
+# `enabled_tools` held `mcp__*` and ~90 Penpot names was offered 258 tools,
+# twice OpenAI's 128-tool limit, and every turn failed with no output.
+_CORE_TOOLSET_MAX_TOOLS = 96
+
+
 def _core_toolset(
     permitted: Set[str],
     *,
     disabled_tools: Set[str],
     enabled_tools: Iterable[str] = (),
     extra: Iterable[str] = (),
+    carried: Iterable[str] = (),
+    allowlist_active: bool = True,
     shell_offered: bool = True,
     allow_private: bool = False,
     mcp_mgr=None,
+    max_tools: int = _CORE_TOOLSET_MAX_TOOLS,
 ) -> Set[str]:
-    """A workspace turn's tools: the core set, the loadout's enabled tools and
-    ``extra`` (forced tools, profile skill tools, tools the chat already
-    declared), cut to what ``permitted`` allows.
+    """A workspace turn's tools: the core set and ``extra`` (forced tools,
+    profile skill tools, an open document's tools), then the loadout's enabled
+    tools and ``carried`` (tools the chat already declared) up to
+    ``max_tools``, all cut to what ``permitted`` allows.
 
     ``permitted`` is the permission view `discover_tools` gets
     (`TurnToolDiscovery.permitted_names`), so the offer and the executor agree.
     ``enabled_tools`` may hold `mcp__<server>__*` patterns; they are read the
-    way execution reads them (`allowlist_permits`).
+    way execution reads them (`allowlist_permits`), and only when
+    ``allowlist_active``: under ``tool_access="all"`` a pattern restricts
+    nothing, so it must not offer every tool it matches either.
     """
     from src.private_access import tool_requires_private_grant
     from src.tool_policy import allowlist_permits
 
     permitted = set(permitted or ()) - set(disabled_tools or ())
     enabled = [str(name) for name in (enabled_tools or ()) if name]
-    wanted = set(_CORE_TOOLSET) | set(extra or ())
-    wanted = _expand_browser_mcp_tools(wanted | set(enabled), mcp_mgr)
-    if enabled:
-        wanted |= {name for name in permitted if allowlist_permits(name, "selected", enabled)}
-    chosen = wanted & permitted
-    if not shell_offered:
-        chosen -= {"bash", "python"}
-    if allow_private is not True:
-        chosen = {name for name in chosen
-                  if name in ("bash", "python") or not tool_requires_private_grant(name)}
+    exact = [name for name in enabled if "*" not in name]
+    patterns = [name for name in enabled if "*" in name] if allowlist_active else []
+
+    def _offerable(names) -> Set[str]:
+        out = set(names) & permitted
+        if not shell_offered:
+            out -= {"bash", "python"}
+        if allow_private is not True:
+            out = {name for name in out
+                   if name in ("bash", "python") or not tool_requires_private_grant(name)}
+        return out
+
+    chosen = _offerable(_expand_browser_mcp_tools(set(_CORE_TOOLSET) | set(extra or ()), mcp_mgr))
+    # Most deliberate first: the loadout's named tools, then what the chat
+    # already declared, then what a pattern reaches. Sorted within each tier so
+    # the same inputs always give the same set.
+    tiers = [
+        _expand_browser_mcp_tools(set(exact), mcp_mgr)
+        | ({name for name in permitted if allowlist_permits(name, "selected", exact)} if exact else set()),
+        set(carried or ()),
+        {name for name in permitted if allowlist_permits(name, "selected", patterns)} if patterns else set(),
+    ]
+    left_out = 0
+    for tier in tiers:
+        for name in sorted(_offerable(tier) - chosen):
+            if len(chosen) < max_tools:
+                chosen.add(name)
+            else:
+                left_out += 1
+    if left_out:
+        logger.info("[core-tools] %d more tool(s) past the %d-tool cap stay behind discover_tools",
+                    left_out, max_tools)
     return chosen
 
 
@@ -7192,15 +7251,18 @@ async def stream_agent_loop(
         _core_extra = set(forced_tools or ()) | _skill_required_tools | _routing_protected
         if active_document:
             _core_extra |= _CORE_DOCUMENT_TOOLS
+        _core_carried: Set[str] = set()
         if session_id and stable_tools.route_supported(endpoint_url, model):
             # Tools this chat already declared to the provider stay callable,
             # so the declared list and the callable list are the same.
-            _core_extra |= stable_tools.preview(session_id, ())
+            _core_carried = stable_tools.preview(session_id, ())
         _relevant_tools = _core_toolset(
             _core_permitted,
             disabled_tools=disabled_tools,
             enabled_tools=_enabled_tools,
             extra=_core_extra,
+            carried=_core_carried,
+            allowlist_active=_allowlist_on,
             shell_offered=_shell_offered,
             allow_private=allow_private,
             mcp_mgr=mcp_mgr,

@@ -210,3 +210,26 @@ def test_a_group_that_raises_is_ignored():
 
     declared, _ = stable_tools.declare("s2", [_schema("mcp__x__a")], group=boom)
     assert [s["function"]["name"] for s in declared] == ["mcp__x__a"]
+
+
+# ── the provider's tool limit ────────────────────────────────────────────────
+# OpenAI takes at most 128 tools a request. 2026-10-20: a chat declared 252 and
+# every request after that came back empty.
+
+def test_a_round_past_the_provider_limit_sends_128_and_only_those_are_callable():
+    round_ = [_schema(f"t{i:03d}") for i in range(200)]
+    sent, allowed = stable_tools.declare("c1", round_)
+
+    assert len(sent) == 128
+    assert _names(sent) == [f"t{i:03d}" for i in range(128)]
+    assert allowed == _names(sent)
+
+
+def test_an_oversized_saved_list_is_dropped_on_load():
+    stable_tools.declare("c1", [_schema("read_file")])
+    with open(stable_tools._store_path("c1"), "w", encoding="utf-8") as fh:
+        json.dump({"tools": [_schema(f"t{i}") for i in range(252)]}, fh)
+    stable_tools.reset_for_tests()          # the process restarted
+
+    # Core mode re-offers what `preview` returns; 252 names here failed every turn.
+    assert stable_tools.preview("c1", ["bash"]) == {"bash"}

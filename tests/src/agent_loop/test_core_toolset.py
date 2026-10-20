@@ -174,3 +174,40 @@ def test_an_open_document_brings_the_document_tools(monkeypatch, tmp_path):
                      active_document={"id": "doc-1", "title": "Release notes", "content": "Intro"})
 
     assert {"edit_document", "update_document"} <= set(requests[0][0])
+
+
+# 2026-10-20: an admin chat (tool_access "all", a workspace) stored
+# `enabled_tools` with `mcp__*` and ~130 exact names. Core mode offered every
+# tool those reached, 258 in all, and OpenAI refuses past 128: each turn ended
+# with "All model candidates returned no substantive output".
+_MCP_TOOLS = {f"mcp__srv{s}__tool{t}" for s in range(4) for t in range(60)}
+_PERMITTED = set(_CORE_TOOLSET) | _MCP_TOOLS | {"manage_calendar"}
+
+
+def test_a_wildcard_under_tool_access_all_offers_nothing_extra():
+    chosen = al._core_toolset(_PERMITTED, disabled_tools=set(),
+                              enabled_tools=["mcp__*"], allowlist_active=False)
+
+    assert chosen == _CORE_TOOLSET
+
+
+def test_an_oversized_loadout_is_capped_and_the_core_set_survives():
+    exact = sorted(_MCP_TOOLS)[:130]
+    chosen = al._core_toolset(_PERMITTED, disabled_tools=set(),
+                              enabled_tools=["mcp__*", "manage_calendar", *exact],
+                              carried={"mcp__srv3__tool59"}, allowlist_active=True)
+
+    assert len(chosen) == al._CORE_TOOLSET_MAX_TOOLS
+    assert _CORE_TOOLSET <= chosen
+    # The loadout's named tools fill the room before a pattern's matches.
+    assert "manage_calendar" in chosen
+    assert not chosen - _CORE_TOOLSET - set(exact) - {"manage_calendar"}
+
+
+def test_forced_tools_are_kept_past_the_cap():
+    forced = set(sorted(_MCP_TOOLS)[:al._CORE_TOOLSET_MAX_TOOLS])
+    chosen = al._core_toolset(_PERMITTED, disabled_tools=set(), extra=forced,
+                              enabled_tools=["manage_calendar"])
+
+    assert forced | _CORE_TOOLSET <= chosen
+    assert "manage_calendar" not in chosen
