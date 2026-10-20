@@ -2483,15 +2483,22 @@ async function _diagErrorText(res) {
   }
 }
 
-// The last bundle's object URL. It lives until the next export (or ten
-// minutes), so the Save link below still works after the automatic download.
-let _diagBundleUrl = null;
-let _diagBundleUrlTimer = null;
-function _setDiagBundleUrl(url) {
-  if (_diagBundleUrl) URL.revokeObjectURL(_diagBundleUrl);
-  clearTimeout(_diagBundleUrlTimer);
-  _diagBundleUrl = url;
-  if (url) _diagBundleUrlTimer = setTimeout(() => _setDiagBundleUrl(null), 10 * 60 * 1000);
+// Export runs as a download the browser makes itself: a hidden frame loads
+// the bundle URL, and the server's attachment response lands in Downloads like
+// any file link. 2026-10-20: the page fetched the zip and started the download
+// from script once the 3-second build finished, and the browser dropped it.
+// A download never fires the frame's load event; an error page does, though
+// the server's framing headers keep it unreadable. onFailed runs then.
+function _startDiagBundleDownload(url, onFailed) {
+  el('diag-bundle-frame')?.remove();
+  const frame = document.createElement('iframe');
+  frame.id = 'diag-bundle-frame';
+  frame.hidden = true;
+  frame.tabIndex = -1;
+  frame.setAttribute('aria-hidden', 'true');
+  document.body.appendChild(frame);
+  frame.addEventListener('load', onFailed, { once: true });
+  frame.src = url;
 }
 
 function initDiagnosticsBundle() {
@@ -2554,44 +2561,23 @@ function initDiagnosticsBundle() {
     if (includeMessages && !await uiModule.styledConfirm(
       'The bundle will contain the last messages of each included chat. They can hold private vault notes, email and anything else those chats saw. Export anyway?',
       { confirmText: 'Export with messages', danger: true })) return;
-    const label = exportBtn.textContent;
     exportBtn.disabled = true;
-    exportBtn.textContent = 'Building...';
-    setMsg('');
-    try {
-      const res = await fetch(`/api/diagnostics/bundle?${_diagBundleParams(includeMessages)}`, { credentials: 'same-origin' });
-      if (!res.ok) throw new Error(await _diagErrorText(res));
-      const blob = await res.blob();
-      const disposition = res.headers.get('Content-Disposition') || '';
-      const match = disposition.match(/filename="?([^";]+)"?/);
-      const filename = match ? match[1] : 'odysseus-diagnostics.zip';
-      _setDiagBundleUrl(URL.createObjectURL(blob));
-      // The download starts after the build finishes, outside the click that
-      // asked for it, and a browser may refuse it as an automatic download
-      // (2026-10-20: bundles built on the server but never reached Downloads).
-      // Try it, and offer a Save link: clicking that is the person's own
-      // action, which the browser allows.
-      const a = document.createElement('a');
-      a.href = _diagBundleUrl;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      msgBox.className = 'settings-diag-bundle-msg admin-success';
-      msgBox.textContent = `Ready: ${filename} (${Math.max(1, Math.round(blob.size / 1024))} KB).`
-        + (includeMessages ? ' It contains chat messages.' : '') + ' Not in your downloads? ';
-      const save = document.createElement('a');
-      save.href = _diagBundleUrl;
-      save.download = filename;
-      save.className = 'settings-diag-bundle-save';
-      save.textContent = 'Save it';
-      msgBox.appendChild(save);
-    } catch (e) {
-      setMsg('Export failed: ' + e.message, 'admin-error');
-    } finally {
+    setMsg('Building the bundle. Your browser saves it to Downloads in a few seconds.'
+      + (includeMessages ? ' It will contain chat messages.' : ''), 'admin-success');
+    const enable = setTimeout(() => { exportBtn.disabled = false; }, 4000);
+    _startDiagBundleDownload(`/api/diagnostics/bundle?${_diagBundleParams(includeMessages)}`, async () => {
+      clearTimeout(enable);
       exportBtn.disabled = false;
-      exportBtn.textContent = label;
-    }
+      // The summary takes the same checks without building the zip.
+      let reason = 'the server could not build the bundle; its log has the reason.';
+      try {
+        const res = await fetch(`/api/diagnostics/bundle/summary?${_diagBundleParams(false)}`, { credentials: 'same-origin' });
+        if (!res.ok) reason = await _diagErrorText(res);
+      } catch (e) {
+        reason = e.message;
+      }
+      setMsg('Export failed: ' + reason, 'admin-error');
+    });
   });
 }
 
