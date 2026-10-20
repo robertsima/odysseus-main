@@ -57,7 +57,7 @@ def test_third_fourth_fifth_section_and_responsive_restore(workspace_page):
     page.locator('#chat-history').evaluate("el => el.insertAdjacentHTML('beforeend', '<ol><li>Visible list marker</li></ol>')")
     assert page.locator('#chat-history ol').last.evaluate("el => parseFloat(getComputedStyle(el).paddingInlineStart) >= 30")
     page.evaluate("window.workbenchModule.open()")
-    page.wait_for_function("document.querySelectorAll('#workspace-section-tabs button').length === 5")
+    page.wait_for_function("document.querySelectorAll('#workspace-section-tabs [data-section-tab]').length === 5")
     assert_sections(page, 4)
     page.set_viewport_size({'width': 720, 'height': 900})
     page.wait_for_timeout(100)
@@ -110,11 +110,11 @@ def test_pointer_fullscreen_minimize_restore_and_observer_quiescence(workspace_p
     page.evaluate("""async () => {
       const m = await import('/static/js/modalManager.js'); m.minimize('agents-dashboard');
     }""")
-    page.wait_for_function("document.querySelectorAll('#workspace-section-tabs button').length === 3")
+    page.wait_for_function("document.querySelectorAll('#workspace-section-tabs [data-section-tab]').length === 3")
     page.evaluate("""async () => {
       const m = await import('/static/js/modalManager.js'); m.restore('agents-dashboard');
     }""")
-    page.wait_for_function("document.querySelectorAll('#workspace-section-tabs button').length === 4")
+    page.wait_for_function("document.querySelectorAll('#workspace-section-tabs [data-section-tab]').length === 4")
     page.evaluate("""() => {
       window.workspaceMutations = 0;
       new MutationObserver(r => window.workspaceMutations += r.length).observe(document.body,
@@ -155,3 +155,53 @@ def test_running_progress_does_not_clip_composer(open_app, width, height):
     })""")
     page.locator('.chat-input-bar textarea:visible').fill('Composer remains usable')
     assert page.locator('.chat-input-bar textarea:visible').input_value() == 'Composer remains usable'
+
+
+# 2026-10-20: with chat, Workbench and a document open the grid was a fixed
+# 50/50 split with no handle to move and no way to set a section aside.
+
+def test_gutters_resize_the_sections_and_the_split_is_remembered(workspace_page):
+    page = workspace_page
+    open_sections(page)
+    gutter = page.locator('.workspace-gutter-col')
+    gutter.wait_for(state='visible')
+    chat_before = page.locator('#chat-container').bounding_box()['width']
+    box = gutter.bounding_box()
+    x, y = box['x'] + box['width'] / 2, box['y'] + box['height'] / 2
+    page.mouse.move(x, y)
+    page.mouse.down()
+    page.mouse.move(x + 250, y, steps=5)
+    page.mouse.up()
+    chat_after = page.locator('#chat-container').bounding_box()['width']
+    assert chat_after > chat_before + 200
+    assert_sections(page, 3)
+    row = page.locator('.workspace-gutter-row').bounding_box()
+    page.mouse.move(row['x'] + 40, row['y'] + row['height'] / 2)
+    page.mouse.down()
+    page.mouse.move(row['x'] + 40, row['y'] - 120, steps=5)
+    page.mouse.up()
+    assert_sections(page, 3)
+    page.reload()
+    open_sections(page)
+    page.locator('.workspace-gutter-col').wait_for(state='visible')
+    assert abs(page.locator('#chat-container').bounding_box()['width'] - chat_after) < 4
+    page.locator('.workspace-gutter-col').dblclick()
+    assert abs(page.locator('#chat-container').bounding_box()['width'] - chat_before) < 4
+
+
+def test_a_section_minimizes_and_maximizes_from_its_tab(workspace_page):
+    page = workspace_page
+    open_sections(page)
+    assert_sections(page, 3)
+    page.get_by_role('button', name='Minimize Chat').click()
+    assert_sections(page, 2)
+    assert not page.locator('#chat-container').is_visible()
+    # Still open behind its tab; the tab brings it back.
+    page.get_by_role('button', name='Chat', exact=True).click()
+    assert_sections(page, 3)
+    assert page.locator('#chat-container').is_visible()
+    page.get_by_role('button', name='Maximize Chat').click()
+    assert_sections(page, 1)
+    assert page.locator('#chat-container').bounding_box()['width'] > 1000
+    page.get_by_role('button', name='Show all sections').click()
+    assert_sections(page, 3)

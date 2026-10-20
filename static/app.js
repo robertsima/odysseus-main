@@ -5,7 +5,7 @@
 import Storage from './js/storage.js';
 import uiModule from './js/ui.js';
 import workspaceModule from './js/workspace.js';
-import './js/workspaceLayout.js';
+import './js/workspaceLayout.js?v=20261020split2';
 import './js/modelOverride.js';
 import './js/agentMenu.js';
 import fileHandlerModule from './js/fileHandler.js';
@@ -32,7 +32,7 @@ import memoryModule from './js/memory.js?v=20260722memoryloading1';
 // that had it cached kept the old strip logic across three rounds of fixes.
 import workbenchModule from './js/workbench.js?v=20260930agentroom1';
 // Per-chat settings + the status line under the composer (self-initialising).
-import './js/chatSettings.js?v=20260918approvals1';
+import './js/chatSettings.js?v=20261020who1';
 // Agents dashboard: fleet view, approvals hub, steer/stop/launch (self-initialising).
 import './js/agentsDashboard.js?v=20260930agentroom1';
 // Today: the calm entry point, what needs you now plus one-line capture (self-initialising).

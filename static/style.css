@@ -42569,9 +42569,9 @@ table.wb-diff tr.wb-hunk:first-child td.wb-hunk-cell { border-top: 0; }
 :root.light .approval-approve { background: color-mix(in srgb, var(--wb-ok) 20%, transparent); }
 
 /* Status line under the composer (chatSettings.js). */
-.chat-status-line { display: flex; align-items: center; flex-wrap: wrap; gap: 2px 4px; max-width: 800px; width: 100%; margin: 4px auto 0; padding: 0 12px; box-sizing: border-box; font-size: 11px; color: var(--wb-muted); }
+.chat-status-line { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; max-width: 800px; width: 100%; margin: 6px auto 0; padding: 0 12px; box-sizing: border-box; font-size: 12px; color: var(--wb-muted); }
 .chat-status-line[hidden] { display: none; }
-.csl-item { display: inline-flex; align-items: center; gap: 5px; height: 20px; margin: 0; padding: 0 6px; border: 0; border-radius: 4px; background: transparent; color: inherit; font: inherit; font-size: 11px; line-height: 1; white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+.csl-item { display: inline-flex; align-items: center; gap: 5px; height: 24px; margin: 0; padding: 0 8px; border: 1px solid color-mix(in srgb, var(--fg) 10%, transparent); border-radius: 5px; background: color-mix(in srgb, var(--fg) 4%, transparent); color: inherit; font: inherit; font-size: 12px; line-height: 1; white-space: nowrap; max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
 button.csl-item { cursor: pointer; }
 button.csl-item:hover { color: var(--fg); background: var(--wb-hover); }
 .csl-model { color: var(--fg); font-family: var(--wb-mono); }
@@ -42585,26 +42585,37 @@ button.csl-item:hover { color: var(--fg); background: var(--wb-hover); }
 .csl-attn { color: var(--fg); }
 .csl-fork { font-family: var(--wb-mono); }
 .csl-spacer { flex: 1 1 auto; }
-.csl-gear { opacity: 0.75; }
+.csl-gear { color: var(--fg); border-color: color-mix(in srgb, var(--fg) 22%, transparent); }
+.csl-who { color: var(--fg); font-weight: 600; }
+.csl-who-agent { border-color: color-mix(in srgb, var(--wb-accent) 55%, transparent); background: color-mix(in srgb, var(--wb-accent) 12%, transparent); }
+.csl-who-persona { border-color: color-mix(in srgb, var(--wb-run) 50%, transparent); background: color-mix(in srgb, var(--wb-run) 10%, transparent); }
 .chat-status-line button { margin-top: 0; }
-:root.light .csl-item { background: transparent; }
+:root.light .csl-item { background: color-mix(in srgb, var(--fg) 4%, transparent); }
 :root.light button.csl-item:hover { background: var(--wb-hover); }
 
-/* Chat settings panel — opens above the status line. */
-.chat-settings-panel { max-width: 800px; width: calc(100% - 16px); margin: 0 auto 6px; box-sizing: border-box; max-height: min(60vh, 520px); overflow: auto; padding: 10px 12px 12px; font-size: 12px; color: var(--fg); background: var(--panel); border: 1px solid var(--wb-line); border-radius: var(--wb-r); box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35); }
+/* Chat settings panel — floats over the conversation above the composer;
+   chatSettings.js positionPanel sets left/width/top|bottom/max-height. */
+.chat-settings-panel { position: fixed; z-index: 11050; margin: 0; box-sizing: border-box; max-height: 60vh; overflow: auto; padding: 10px 14px 14px; font-size: 13px; color: var(--fg); background: var(--panel); border: 1px solid var(--wb-line); border-radius: var(--wb-r); box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45); }
+.csp-who { display: flex; flex-direction: column; gap: 3px; padding: 8px 10px; border: 1px solid var(--wb-line); border-radius: var(--wb-r-sm); }
+.csp-who-name { font-size: 14px; font-weight: 600; }
+.csp-who small, .csp-facts, .csp-hint { color: var(--wb-muted); font-size: 12px; line-height: 1.45; }
+.csp-facts { margin: 6px 2px 0; }
+.csp-agent-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
+.csp-btn { margin: 0; padding: 5px 10px; border: 1px solid var(--wb-line); border-radius: var(--wb-r-sm); background: transparent; color: var(--fg); font: inherit; font-size: 12px; cursor: pointer; }
+.csp-btn:hover { background: var(--wb-hover); }
 .csp-head { position: sticky; top: -10px; z-index: 1; display: flex; align-items: center; gap: 8px; margin: -10px -12px 8px; padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--wb-line); }
 .csp-title { font-weight: 600; font-size: 13px; }
 .csp-sub { color: var(--wb-muted); font-size: 11px; }
 .csp-close { margin: 0 0 0 auto; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--wb-muted); font-size: 16px; line-height: 1; cursor: pointer; }
 .csp-close:hover { color: var(--fg); background: var(--wb-hover); }
 .csp-section { margin-bottom: 12px; }
-.csp-section h4 { display: flex; align-items: baseline; gap: 8px; margin: 4px 0 6px; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--wb-muted); }
+.csp-section h4 { display: flex; align-items: baseline; gap: 8px; margin: 4px 0 6px; font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--wb-muted); }
 .csp-count { font-weight: normal; letter-spacing: 0; text-transform: none; color: var(--wb-faint); }
 .csp-radio { display: flex; gap: 8px; align-items: flex-start; padding: 6px 8px; border-radius: var(--wb-r-sm); cursor: pointer; }
 .csp-radio:hover { background: var(--wb-hover); }
 .csp-radio input { margin: 2px 0 0; accent-color: var(--wb-accent); }
 .csp-radio span { display: flex; flex-direction: column; gap: 2px; }
-.csp-radio small { color: var(--wb-muted); font-size: 11px; line-height: 1.4; }
+.csp-radio small { color: var(--wb-muted); font-size: 12px; line-height: 1.4; }
 .csp-tools-actions { display: flex; justify-content: flex-end; margin: -4px 0 4px; }
 .csp-link { margin: 0; padding: 0; border: 0; background: none; color: var(--wb-muted); font: inherit; font-size: 11px; cursor: pointer; text-decoration: underline; }
 .csp-link:hover { color: var(--fg); }
@@ -42615,6 +42626,10 @@ button.csl-item:hover { color: var(--fg); background: var(--wb-hover); }
 .csp-tool input { margin: 0; accent-color: var(--wb-accent); }
 .csp-tool code { font-family: var(--wb-mono); font-size: 11px; background: none; padding: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .csp-tool.is-global { opacity: 0.5; cursor: default; }
+.csp-privacy .csp-tool { align-items: flex-start; }
+.csp-privacy .csp-tool input { margin-top: 3px; }
+.csp-privacy .csp-tool > span { display: flex; flex-direction: column; gap: 2px; }
+.csp-privacy .csp-tool small { color: var(--wb-muted); font-size: 12px; line-height: 1.4; }
 .csp-note { margin: 4px 0 0; font-size: 11px; color: var(--wb-faint); }
 .csp-empty { padding: 10px; color: var(--wb-muted); }
 .chat-settings-panel button { margin-top: 0; }

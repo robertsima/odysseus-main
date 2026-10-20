@@ -9,13 +9,16 @@
  *     every turn and restored here when the chat is reopened, so a chat no
  *     longer inherits whatever the previous chat left in the browser)
  *
- * The status line shows the chat's model, context use, approval mode,
- * workspace, tool restrictions, always-allowed tools and fork source, and
- * opens the settings panel.
+ * The status line shows who answers (the loadout's agent in Agent mode, the
+ * shared Prompt persona otherwise), delegation, the chat's model, context use,
+ * approval mode, workspace, tool restrictions and fork source, and opens the
+ * settings panel. The panel floats over the conversation above the composer,
+ * so opening it never squeezes the chat.
  */
 
 import uiModule from './ui.js';
 import workspaceModule from './workspace.js';
+import presetsModule from './presets.js';
 
 const API = '';
 // How bash/python run in this chat (src/shell_access.py). Separate from vault access.
@@ -30,6 +33,13 @@ const MODE_INFO = {
   ask_risky: { label: 'Ask for risky', desc: 'Destructive or outward-facing actions ask first: deleting files, git push, publishing, sending or deleting email, sudo.' },
   ask_all: { label: 'Ask for everything', desc: 'Every tool that can change something asks first, including any shell command, and so does anything high-impact once web, email or file content has entered the run.' },
 };
+const DELEGATION_INFO = {
+  never: { label: 'Never', short: 'never', desc: 'This chat never starts sub-agents or hands work to coding agents.' },
+  explicit: { label: 'Only when I ask', short: 'when asked', desc: 'It delegates only when your message asks for another agent or names a loadout.' },
+  auto: { label: 'Agent decides', short: 'agent decides', desc: 'It may start sub-agents and hand off work whenever it judges that useful.' },
+};
+// Settings that give a chat its own voice; mirrors agentMenu.js VOICE_KEYS.
+const VOICE_KEYS = ['agent_profile', 'agent_instructions', 'agent_persona_name', 'agent_temperature', 'agent_max_tokens'];
 // Group tool names for the per-chat tools picker.
 const TOOL_GROUPS = [
   ['Shell & code', (t) => ['bash', 'python', 'manage_bg_jobs', 'delegate_to_claude_code', 'manage_agent_worktree'].includes(t)],
@@ -133,6 +143,38 @@ function ensureLine() {
   return line;
 }
 
+const isAgentMode = () => document.body.classList.contains('composer-agent-mode');
+
+/** Who answers the next turn, by the rule chat.js uses: in Agent mode a chat
+ *  with its own loadout voice speaks as that agent; otherwise the shared
+ *  Prompt persona applies, if one is active. */
+function identity() {
+  const s = (state.data && state.data.settings) || {};
+  const agent = isAgentMode();
+  const voice = VOICE_KEYS.some((key) => s[key] != null && s[key] !== '');
+  if (agent && voice) {
+    const name = s.agent_persona_name || s.agent_profile || 'Custom agent';
+    return { kind: 'agent', name, loadout: s.agent_profile || '', persona: s.agent_persona_name || '' };
+  }
+  let shared = '';
+  try { shared = presetsModule.getCharacterName ? presetsModule.getCharacterName() : ''; } catch (_) {}
+  if (shared) return { kind: 'persona', name: shared, agent };
+  return agent ? { kind: 'default-agent', name: 'Default agent' } : null;
+}
+
+/** Whether the chat's tool allowlist (a loadout with tool_access "selected")
+ *  lets it call `name`. Reads entries the way src/tool_policy.allowlist_permits
+ *  does for plain names and `*` patterns. */
+function allowlistPermits(name, settings) {
+  if ((settings.tool_access || 'all') === 'all') return true;
+  if (settings.tool_access !== 'selected') return false;
+  return (settings.enabled_tools || []).some((entry) => {
+    if (!entry.includes('*')) return entry === name;
+    const re = new RegExp('^' + entry.split('*').map((p) => p.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$');
+    return re.test(name);
+  });
+}
+
 function currentModelLabel() {
   try {
     const m = window.sessionModule?.getCurrentModel?.() || '';
@@ -150,6 +192,21 @@ function render() {
   const mode = d.approval_mode || 'auto';
   const modesEnforced = Array.isArray(d.approval_modes) && d.approval_modes.length > 0;
   const items = [];
+  const who = identity();
+  if (who) {
+    const label = who.kind === 'persona' ? `Persona: ${who.name}` : `Agent: ${who.name}`;
+    const title = who.kind === 'agent'
+      ? `This chat runs as ${who.loadout || 'its own agent setup'}${who.persona ? ` (persona ${who.persona})` : ''}. Its instructions replace the shared Prompt persona. Click for details.`
+      : who.kind === 'persona'
+        ? `The shared Prompt persona ${who.name} answers${who.agent ? ' (this chat has no loadout of its own)' : ''}. Click for details.`
+        : 'Agent mode with no loadout: the default agent setup answers. Click to pick a loadout.';
+    items.push(`<button type="button" class="csl-item csl-who csl-who-${esc(who.kind)}" data-csl="panel-agent" title="${esc(title)}">${esc(label)}</button>`);
+  }
+  if (isAgentMode()) {
+    const policy = s.delegation_policy || 'explicit';
+    const info = DELEGATION_INFO[policy] || { short: policy, desc: '' };
+    items.push(`<button type="button" class="csl-item${policy === 'auto' ? ' csl-attn' : ''}" data-csl="panel-agent" title="${esc(`Delegation: ${info.desc} Click to change.`)}">Delegation: ${esc(info.short)}</button>`);
+  }
   const model = currentModelLabel();
   if (model) items.push(`<span class="csl-item csl-model" title="Model for this chat">${esc(model)}</span>`);
   const ctx = state.context;
@@ -161,7 +218,11 @@ function render() {
   if (modesEnforced) items.push(`<button type="button" class="csl-item csl-approval csl-mode-${esc(mode)}" data-csl="mode-menu" title="${esc((MODE_INFO[mode]?.desc || '') + ' Click to change.')}">Approvals: ${esc(MODE_INFO[mode]?.label || mode)}</button>`);
   if (s.workspace) items.push(`<span class="csl-item csl-workspace" title="${esc(`Workspace: ${s.workspace}`)}">${esc(basename(s.workspace))}</span>`);
   const off = (s.disabled_tools || []).length;
-  items.push(`<button type="button" class="csl-item${off ? ' csl-attn' : ''}" data-csl="panel-tools" title="Choose which tools this chat may use">${off ? `${off} tool${off === 1 ? '' : 's'} off` : 'All tools'}</button>`);
+  const selected = s.tool_access === 'selected';
+  const toolsLabel = selected
+    ? `Loadout tools${off ? ` · ${off} off` : ''}`
+    : off ? `${off} tool${off === 1 ? '' : 's'} off` : 'All tools';
+  items.push(`<button type="button" class="csl-item${off || selected ? ' csl-attn' : ''}" data-csl="panel-tools" title="${selected ? 'This chat\'s loadout allows only the tools it names. Click to see them.' : 'Choose which tools this chat may use'}">${esc(toolsLabel)}</button>`);
   const shell = d.shell_access || 'sandbox';
   items.push(`<button type="button" class="csl-item${shell === 'host' ? ' csl-attn' : ''}" data-csl="panel-privacy" title="${esc(SHELL_INFO[shell]?.desc || '')} Click to change.">Shell: ${esc(SHELL_INFO[shell]?.short || shell)}</button>`);
   const privateVault = s.private_vault_access === true;
@@ -174,7 +235,7 @@ function render() {
     items.push(`<button type="button" class="csl-item csl-fork" data-csl="fork" data-id="${esc(d.forked_from.id)}" title="Open the chat this was forked from">⫝ ${esc(d.forked_from.name || 'source chat')}</button>`);
   }
   items.push('<span class="csl-spacer"></span>');
-  items.push('<button type="button" class="csl-item csl-gear" data-csl="panel" aria-label="Chat settings" title="Chat settings"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>');
+  items.push('<button type="button" class="csl-item csl-gear" data-csl="panel" aria-label="Chat settings" title="Chat settings"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span>Settings</span></button>');
   line.innerHTML = items.join('');
 }
 
@@ -185,6 +246,7 @@ async function onLineClick(e) {
   if (act === 'panel') togglePanel();
   else if (act === 'panel-tools') togglePanel('tools');
   else if (act === 'panel-privacy') togglePanel('privacy');
+  else if (act === 'panel-agent') togglePanel('agent');
   else if (act === 'mode-menu') toggleModeMenu(b);
   else if (act === 'context') document.getElementById('chat-context-pill')?.click();
   else if (act === 'fork') window.sessionModule?.selectSession?.(b.dataset.id);
@@ -225,6 +287,35 @@ function closePanel() {
   if (p) p.remove();
   document.removeEventListener('mousedown', outsideClose, true);
   document.removeEventListener('keydown', escClose, true);
+  window.removeEventListener('resize', positionPanel);
+  state.panelObserver?.disconnect();
+  state.panelObserver = null;
+}
+
+/** Float the panel over the conversation, anchored to the composer: above it
+ *  when there is room (the usual case), below the status line otherwise. */
+function positionPanel() {
+  const panel = $('chat-settings-panel');
+  const bar = document.querySelector('.chat-input-bar');
+  if (!panel || !bar) return;
+  const r = bar.getBoundingClientRect();
+  const line = $('chat-status-line')?.getBoundingClientRect();
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const width = Math.min(Math.max(r.width, 360), vw - 16);
+  const left = Math.min(Math.max(8, r.left + (r.width - width) / 2), vw - width - 8);
+  const above = r.top - 8 - 50;
+  const below = vh - (line ? line.bottom : r.bottom) - 14;
+  panel.style.left = `${left}px`;
+  panel.style.width = `${width}px`;
+  if (above >= 420 || above >= below) {
+    panel.style.top = '';
+    panel.style.bottom = `${vh - r.top + 8}px`;
+    panel.style.maxHeight = `${Math.max(160, Math.min(above, 640))}px`;
+  } else {
+    panel.style.bottom = '';
+    panel.style.top = `${(line ? line.bottom : r.bottom) + 6}px`;
+    panel.style.maxHeight = `${Math.max(160, Math.min(below, 640))}px`;
+  }
 }
 function outsideClose(e) {
   const p = $('chat-settings-panel');
@@ -243,15 +334,24 @@ async function togglePanel(section) {
   panel.setAttribute('role', 'dialog');
   panel.setAttribute('aria-label', 'Chat settings');
   panel.innerHTML = '<div class="csp-empty">Loading…</div>';
-  line.parentNode.insertBefore(panel, line);
+  document.body.appendChild(panel);
+  positionPanel();
+  window.addEventListener('resize', positionPanel);
+  if (window.ResizeObserver && line) {
+    state.panelObserver = new ResizeObserver(() => positionPanel());
+    state.panelObserver.observe(line);
+    const bar = document.querySelector('.chat-input-bar');
+    if (bar) state.panelObserver.observe(bar);
+  }
   document.addEventListener('mousedown', outsideClose, true);
   document.addEventListener('keydown', escClose, true);
   if (!state.tools) {
     try { state.tools = ((await api('/api/tools')).tools || []); } catch (_) { state.tools = []; }
   }
   renderPanel();
-  if (section === 'tools') $('chat-settings-panel')?.querySelector('.csp-tools')?.scrollIntoView({ block: 'start' });
-  if (section === 'privacy') $('chat-settings-panel')?.querySelector('[data-csp="private-vault"]')?.scrollIntoView({ block: 'start' });
+  positionPanel();
+  const target = { tools: '.csp-tools-section', privacy: '[data-csp="private-vault"]', agent: '.csp-agent' }[section];
+  if (target) $('chat-settings-panel')?.querySelector(target)?.scrollIntoView({ block: 'start' });
 }
 
 function renderPanel() {
@@ -267,6 +367,29 @@ function renderPanel() {
   const shellRows = Object.keys(SHELL_INFO).map((key) => `<label class="csp-radio"><input type="radio" name="csp-shell" value="${esc(key)}"${shell === key ? ' checked' : ''}><span><b>${esc(SHELL_INFO[key].label)}</b><small>${esc(SHELL_INFO[key].desc)}</small></span></label>`).join('');
   const off = new Set(s.disabled_tools || []);
   const globallyOff = new Set((state.tools || []).filter((t) => t.enabled === false).map((t) => t.id));
+  const notInLoadout = new Set((state.tools || []).map((t) => t.id).filter((name) => !allowlistPermits(name, s)));
+  const who = identity();
+  const agentMode = isAgentMode();
+  const policy = s.delegation_policy || 'explicit';
+  const delegationRows = Object.keys(DELEGATION_INFO).map((key) => `<label class="csp-radio"><input type="radio" name="csp-delegation" value="${esc(key)}"${policy === key ? ' checked' : ''}><span><b>${esc(DELEGATION_INFO[key].label)}</b><small>${esc(DELEGATION_INFO[key].desc)}</small></span></label>`).join('');
+  let whoHtml;
+  if (who && who.kind === 'agent') {
+    const facts = [who.loadout ? `Loadout <b>${esc(who.loadout)}</b>` : 'Its own agent setup (no saved loadout)'];
+    if (who.persona) facts.push(`persona <b>${esc(who.persona)}</b>`);
+    whoHtml = `<div class="csp-who"><span class="csp-who-name">${esc(who.name)}</span><small>${facts.join(' · ')}. Its instructions replace the shared Prompt persona for this chat.</small></div>`;
+  } else if (who && who.kind === 'persona') {
+    whoHtml = `<div class="csp-who"><span class="csp-who-name">${esc(who.name)}</span><small>The shared Prompt persona${agentMode ? '. This chat has no loadout of its own, so the persona applies in Agent mode too' : ''}.</small></div>`;
+  } else if (who) {
+    whoHtml = '<div class="csp-who"><span class="csp-who-name">Default agent</span><small>No loadout and no persona: the app\'s default agent setup answers.</small></div>';
+  } else {
+    whoHtml = '<div class="csp-who"><span class="csp-who-name">Plain chat</span><small>No persona is active. Pick one in the composer\'s Prompt menu.</small></div>';
+  }
+  const accessFacts = [];
+  if (s.tool_access === 'selected') accessFacts.push(`Tools: only the ${(s.enabled_tools || []).length} the loadout names`);
+  else if (s.tool_access === 'none') accessFacts.push('Tools: none');
+  if (s.memory_access) accessFacts.push(`Memory: ${esc(s.memory_access)}`);
+  if (s.model_access && s.model_access !== 'current') accessFacts.push(`Worker models: ${esc(s.model_access)}`);
+  if (s.max_parallel_workers != null) accessFacts.push(`Up to ${esc(s.max_parallel_workers)} parallel worker${Number(s.max_parallel_workers) === 1 ? '' : 's'}`);
   const modeRows = ['', ...Object.keys(MODE_INFO)].map((key) => {
     const info = key ? MODE_INFO[key] : { label: 'Default', desc: `Follow the app default (currently ${MODE_INFO[effective]?.label || effective} for this chat).` };
     return `<label class="csp-radio"><input type="radio" name="csp-mode" value="${esc(key)}"${mode === key ? ' checked' : ''}><span><b>${esc(info.label)}</b><small>${esc(info.desc)}</small></span></label>`;
@@ -283,11 +406,26 @@ function renderPanel() {
     <fieldset class="csp-group"><legend>${esc(group)}</legend>
       ${grouped.get(group).map((name) => {
         const global = globallyOff.has(name);
-        return `<label class="csp-tool${global ? ' is-global' : ''}" title="${global ? 'Switched off for the whole app in Settings' : ''}"><input type="checkbox" data-tool="${esc(name)}"${!off.has(name) && !global ? ' checked' : ''}${global ? ' disabled' : ''}><code>${esc(name)}</code></label>`;
+        const outside = !global && notInLoadout.has(name);
+        const locked = global || outside;
+        const why = global ? 'Switched off for the whole app in Settings' : outside ? 'Not in this chat\'s loadout. Change it in the loadout editor.' : '';
+        return `<label class="csp-tool${locked ? ' is-global' : ''}" title="${why}"><input type="checkbox" data-tool="${esc(name)}"${!off.has(name) && !locked ? ' checked' : ''}${locked ? ' disabled' : ''}><code>${esc(name)}</code></label>`;
       }).join('')}
     </fieldset>`).join('');
+  const usable = names.filter((n) => !off.has(n) && !globallyOff.has(n) && !notInLoadout.has(n)).length;
   panel.innerHTML = `
     <div class="csp-head"><span class="csp-title">Chat settings</span><span class="csp-sub">Only this chat</span><button type="button" class="csp-close" data-csp="close" aria-label="Close">×</button></div>
+    <section class="csp-section csp-agent">
+      <h4>Who answers</h4>
+      ${whoHtml}
+      ${accessFacts.length ? `<p class="csp-facts">${accessFacts.join(' · ')}</p>` : ''}
+      <div class="csp-agent-actions">
+        ${agentMode ? '<button type="button" class="csp-btn" data-csp="pick-loadout">Change loadout</button>' : ''}
+        ${agentMode && who && who.kind === 'agent' ? '<button type="button" class="csp-btn" data-csp="edit-agent">Edit this agent</button>' : ''}
+        ${!agentMode ? '<span class="csp-hint">Switch the composer to Agent to run this chat under a loadout.</span>' : ''}
+      </div>
+    </section>
+    ${agentMode ? `<section class="csp-section csp-delegation"><h4>Delegation <span class="csp-count">sub-agents and coding-agent handoffs</span></h4>${delegationRows}</section>` : ''}
     ${modesEnforced ? `<section class="csp-section"><h4>Approvals</h4>${modeRows}</section>` : ''}
     <section class="csp-section csp-privacy">
       <h4>Vault privacy</h4>
@@ -300,8 +438,8 @@ function renderPanel() {
       <h4>Shell (bash, python)</h4>
       ${shellRows}
     </section>
-    <section class="csp-section">
-      <h4>Tools <span class="csp-count">${names.length - off.size - globallyOff.size} of ${names.length} on</span></h4>
+    <section class="csp-section csp-tools-section">
+      <h4>Tools <span class="csp-count">${usable} of ${names.length} on${s.tool_access === 'selected' ? ', limited by the loadout' : ''}</span></h4>
       <div class="csp-tools-actions"><button type="button" class="csp-link" data-csp="all-on">Turn all on</button></div>
       <div class="csp-tools">${toolRows || '<div class="csp-empty">No tool list available.</div>'}</div>
     </section>
@@ -321,6 +459,17 @@ function renderPanel() {
     if (input.checked) next.delete(input.dataset.tool); else next.add(input.dataset.tool);
     save({ disabled_tools: [...next] });
   }));
+  panel.querySelectorAll('input[name="csp-delegation"]').forEach((input) => input.addEventListener('change', () => {
+    save({ delegation_policy: input.value }, `Delegation: ${DELEGATION_INFO[input.value]?.label || input.value}`);
+  }));
+  panel.querySelector('[data-csp="pick-loadout"]')?.addEventListener('click', () => {
+    closePanel();
+    window.agentMenuModule?.openMenu?.({ focus: true });
+  });
+  panel.querySelector('[data-csp="edit-agent"]')?.addEventListener('click', () => {
+    closePanel();
+    if (state.sessionId) window.agentsDashboard?.editLoadout?.(state.sessionId);
+  });
   panel.querySelector('[data-csp="close"]')?.addEventListener('click', closePanel);
   panel.querySelector('[data-csp="all-on"]')?.addEventListener('click', () => save({ disabled_tools: null }, 'All tools on for this chat'));
 }
@@ -347,6 +496,10 @@ function init() {
     if (e.detail && e.detail.sessionId === state.sessionId) { state.context = e.detail; render(); }
   });
   document.addEventListener('odysseus:model-picked', () => setTimeout(render, 50));
+  // A loadout applied or edited elsewhere (Agents menu, Control Room).
+  document.addEventListener('odysseus:loadout-changed', () => {
+    if (state.sessionId) api(`/api/session/${encodeURIComponent(state.sessionId)}/settings`).then((d) => { state.data = d; render(); renderPanel(); }).catch(() => {});
+  });
   // The workspace picker saves on the chat; show the new folder in the line.
   document.addEventListener('odysseus:chat-settings-changed', (e) => {
     if (state.sessionId && e.detail?.sessionId === state.sessionId) {
@@ -359,9 +512,15 @@ function init() {
   });
   // Follow the open chat. Chats are opened, created and materialised from
   // many places with no single event, so watch the id (as the Workbench does).
+  // The Agent/Chat toggle and the Prompt persona have no events either; the
+  // same tick re-renders when what the line would say about them changes.
+  let lastWho = '';
   const tick = () => {
     const sid = window.sessionModule?.getCurrentSessionId?.() || null;
-    if (sid !== state.sessionId) onSessionSwitch(sid);
+    if (sid !== state.sessionId) { onSessionSwitch(sid); return; }
+    const who = identity();
+    const key = `${isAgentMode()}:${who ? who.kind + ':' + who.name : ''}`;
+    if (key !== lastWho) { lastWho = key; render(); renderPanel(); }
   };
   tick();
   setInterval(tick, 700);

@@ -40,11 +40,52 @@ html body.workspace-split #chat-container .chat-input-bar { flex: 0 0 auto; }
   padding: 3px 6px; box-sizing: border-box;
   background: var(--panel); border-bottom: 1px solid var(--border);
 }
-#workspace-section-tabs button {
-  flex: 0 0 auto; padding: 6px 12px; color: var(--fg); background: var(--bg);
-  border: 1px solid var(--border); border-radius: 4px; font: inherit; cursor: pointer;
+/* One tab per open section: its name (focus / restore) plus minimize and
+   maximize controls (workspaceLayout.js sectionTab). */
+#workspace-section-tabs .ws-tab {
+  flex: 0 0 auto; display: inline-flex; align-items: stretch; height: 32px;
+  border: 1px solid var(--border); border-radius: 4px; background: var(--bg); overflow: hidden;
 }
-#workspace-section-tabs button[aria-pressed="true"] { border-color: var(--red); background: color-mix(in srgb, var(--red) 15%, var(--bg)); }
+#workspace-section-tabs .ws-tab:has(> [aria-pressed="true"]) { border-color: var(--red); background: color-mix(in srgb, var(--red) 15%, var(--bg)); }
+#workspace-section-tabs .ws-tab.is-minimized { border-style: dashed; opacity: .65; }
+#workspace-section-tabs .ws-tab.is-minimized:hover { opacity: 1; }
+#workspace-section-tabs button {
+  flex: 0 0 auto; margin: 0; padding: 0 12px; color: var(--fg); background: transparent;
+  border: 0; border-radius: 0; font: inherit; cursor: pointer;
+}
+#workspace-section-tabs button.ws-tab-ctl {
+  display: inline-flex; align-items: center; justify-content: center; width: 28px; padding: 0;
+  color: color-mix(in srgb, var(--fg) 65%, transparent); border-left: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+}
+#workspace-section-tabs button:hover { background: color-mix(in srgb, var(--fg) 8%, transparent); color: var(--fg); }
+#workspace-section-tabs button:focus-visible { outline: 2px solid var(--red); outline-offset: -2px; }
+/* Drag handles between sections. 8px hit area, a hairline that lights up. */
+.workspace-gutter {
+  position: fixed; z-index: 11001; box-sizing: border-box; touch-action: none;
+  display: flex; align-items: center; justify-content: center; outline: none;
+}
+.workspace-gutter[hidden] { display: none; }
+.workspace-gutter-col { width: 8px; cursor: col-resize; }
+.workspace-gutter-row { height: 8px; cursor: row-resize; }
+.workspace-gutter::before {
+  content: ''; background: transparent; border-radius: 2px; transition: background .12s;
+}
+.workspace-gutter-col::before { width: 2px; height: 100%; }
+.workspace-gutter-row::before { height: 2px; width: 100%; }
+.workspace-gutter::after {
+  content: ''; position: absolute; border-radius: 3px;
+  background: color-mix(in srgb, var(--fg) 35%, transparent);
+}
+.workspace-gutter-col::after { width: 4px; height: 36px; }
+.workspace-gutter-row::after { height: 4px; width: 36px; }
+.workspace-gutter:hover::before, .workspace-gutter:focus-visible::before,
+body.workspace-resizing .workspace-gutter::before { background: var(--red); }
+.workspace-gutter:hover::after, .workspace-gutter:focus-visible::after { background: var(--red); }
+body.workspace-resizing { user-select: none !important; }
+body.workspace-resizing-col, body.workspace-resizing-col * { cursor: col-resize !important; }
+body.workspace-resizing-row, body.workspace-resizing-row * { cursor: row-resize !important; }
+/* Iframes and editors would swallow the pointer mid-drag. */
+body.workspace-resizing .workspace-section { pointer-events: none !important; }
 .model-override-control { display: flex; flex-wrap: wrap; gap: 6px; width: 100%; min-width: 0; }
 .model-override-control > :is(select, input, textarea) { width: 100%; min-width: 0; box-sizing: border-box; }
 .model-override-control [hidden] { display: none !important; }
