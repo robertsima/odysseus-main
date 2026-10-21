@@ -188,6 +188,9 @@ document.addEventListener('DOMContentLoaded', markComposerUserEdited, { once: tr
   const chatBar = document.querySelector('.chat-input-bar');
   const attachStrip = document.getElementById('attach-strip');
   const chatContainer = document.getElementById('chat-container');
+  // The chat settings line sits under the composer and appears after load,
+  // pushing the bar up without resizing it.
+  const statusLine = document.getElementById('chat-status-line');
   const _syncComposerClearance = () => {
     let top = window.innerHeight;
     for (const el of [attachStrip, chatBar]) {
@@ -203,6 +206,7 @@ document.addEventListener('DOMContentLoaded', markComposerUserEdited, { once: tr
     const ro = new ResizeObserver(_syncComposerClearance);
     if (chatBar) ro.observe(chatBar);
     if (attachStrip) ro.observe(attachStrip);
+    if (statusLine) ro.observe(statusLine);
   }
   if (chatContainer && typeof MutationObserver !== 'undefined') {
     new MutationObserver(_syncComposerClearance).observe(chatContainer, {
