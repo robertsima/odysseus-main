@@ -9,7 +9,9 @@ export function buildNavDom(doc = document) {
   const clicks = [];
   const rail = NAV_ITEMS.filter((item) => item.rail)
     .map((item) => `<button class="icon-rail-btn" id="${item.rail}" title="${item.label}"><svg></svg></button>`).join('');
-  const row = (item) => `<div class="list-item" id="${item.sidebar}" title="${item.label}"><svg data-icon="${item.key}"></svg><span class="grow">${item.label}</span>`
+  const email = '<div class="section list-item nav-email-row" id="email-section" title="Email"><div class="section-header-flex"><span class="section-title" id="email-section-title"><svg></svg><span>Email</span></span>'
+    + '<button type="button" id="email-compose-btn">new</button><span id="email-unread-dot" class="sidebar-notif-dot" style="display:none"></span></div></div>';
+  const row = (item) => item.key === 'email' ? email : `<div class="list-item" id="${item.sidebar}" title="${item.label}"><svg data-icon="${item.key}"></svg><span class="grow">${item.label}</span>`
     + (item.key === 'tasks' ? '<span id="assistant-notif-dot" class="sidebar-notif-dot" style="display:none"></span>' : '')
     + (item.key === 'agents' ? '<span id="tool-agents-dot" class="sidebar-notif-dot" style="display:none"></span>' : '')
     + '</div>';
@@ -17,9 +19,9 @@ export function buildNavDom(doc = document) {
     + NAV_ITEMS.filter((item) => item.group === entry.id && item.sidebar).map(row).join('') + '</div>';
   doc.body.innerHTML = `<div id="icon-rail" class="icon-rail"><button id="rail-search-btn"></button><div id="rail-nav-groups" class="rail-nav-groups"></div>`
     + `<button id="rail-chats" class="rail-dynamic" style="display:none"></button>${rail}<div style="flex:1"></div><button id="rail-settings"></button></div>`
-    + `<nav id="sidebar"><div class="sidebar-inner"><div id="email-section"><span id="email-unread-dot" style="display:none"></span></div>`
+    + `<nav id="sidebar"><div class="sidebar-inner">`
     + `${BUILTIN_GROUPS.map(group).join('')}<div id="after-groups"></div></div></nav>`;
-  for (const node of doc.querySelectorAll('[id^="tool-"], [id^="rail-"]')) {
+  for (const node of doc.querySelectorAll('[id^="tool-"], [id^="rail-"], #email-section-title, #email-compose-btn')) {
     if (node.id === 'rail-nav-groups') continue;
     node.addEventListener('click', (event) => { if (event.target === node || node.contains(event.target)) clicks.push(node.id); });
   }

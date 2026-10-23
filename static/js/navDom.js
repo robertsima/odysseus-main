@@ -20,7 +20,9 @@ export function railNode(key, doc) {
 
 /** The node whose click handler opens the tool. */
 export function launcherNode(key, doc) {
-  return sidebarNode(key, doc) || railNode(key, doc);
+  const item = itemInfo(key);
+  const named = item?.launcher ? docOf(doc)?.getElementById(item.launcher) : null;
+  return named || sidebarNode(key, doc) || railNode(key, doc);
 }
 
 function hiddenSelf(node) {
@@ -37,8 +39,7 @@ export function isItemShown(key, doc) {
   return !hiddenSelf(node);
 }
 
-/** Shown in the sidebar: it has a row there (Email does not) and the account
- *  has not hidden it. */
+/** Shown in the sidebar: it has a row there and the account has not hidden it. */
 export function isRowShown(key, doc) {
   const node = sidebarNode(key, doc);
   return !!node && !hiddenSelf(node);

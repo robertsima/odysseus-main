@@ -82,9 +82,9 @@ def test_sidebar_crest_takes_the_brand_colour_and_customization_keeps_navigation
     assert probe(page, ".sidebar")["width"] == 240
     hamburger = probe(page, "#hamburger-btn")
     assert box["left"] - hamburger["right"] >= 8, (hamburger, box)
-    # Each style keeps its own sidebar entry point.
+    # Both styles show the New chat and Search rows in the open sidebar.
     assert probe(page, "#sidebar-command-toggle", wait=False) is None
-    assert probe(page, "#sidebar-new-chat-btn")["visible"] == (style == "classic")
+    assert probe(page, "#sidebar-new-chat-btn")["visible"]
     # The "Agamemnon crest" colour in Customize > Advanced reaches the mark.
     page.evaluate("document.documentElement.style.setProperty('--brand-color', 'rgb(1, 2, 3)')")
     assert background(page, ".sidebar-brand-icon") == "rgb(1, 2, 3)"

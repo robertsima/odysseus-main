@@ -42,7 +42,7 @@ beforeEach(async () => {
 
 test('the default layout draws three groups holding the original row nodes', () => {
   assert.deepEqual(groupIds(document), ['work', 'agents', 'more']);
-  assert.deepEqual(rowIds(document, 'work'), ['tool-today-btn', 'tool-library-btn', 'tool-notes-btn', 'tool-tasks-btn', 'tool-calendar-btn']);
+  assert.deepEqual(rowIds(document, 'work'), ['tool-today-btn', 'email-section', 'tool-library-btn', 'tool-notes-btn', 'tool-tasks-btn', 'tool-calendar-btn']);
   assert.deepEqual(rowIds(document, 'agents'), ['tool-agents-btn', 'tool-workbench-btn']);
   byId('tool-tasks-btn').click();
   assert.deepEqual(clicks, ['tool-tasks-btn'], 'a moved row keeps the listener the app installed');
@@ -120,7 +120,7 @@ test('an id the build does not know is kept in the layout and draws nothing', ()
   layout.groups[0].items.push('future-tool');
   L.writeLayout(layout);
   assert.ok(L.getLayout().groups[0].items.includes('future-tool'));
-  assert.deepEqual(rowIds(document, 'work').length, 5);
+  assert.deepEqual(rowIds(document, 'work').length, 6);
 });
 
 test('dragging a tool onto another row of its group drops it before that row, with a line shown', () => {
@@ -172,11 +172,26 @@ test('dragging a group header onto another group reorders the groups', () => {
 test('Alt+ArrowDown on a focused row moves it down one place', () => {
   const event = new window.KeyboardEvent('keydown', { key: 'ArrowDown', altKey: true, bubbles: true, cancelable: true });
   byId('tool-today-btn').dispatchEvent(event);
-  assert.deepEqual(rowIds(document, 'work').slice(0, 2), ['tool-library-btn', 'tool-today-btn']);
+  assert.deepEqual(rowIds(document, 'work').slice(0, 2), ['email-section', 'tool-today-btn']);
 });
 
 test('the Command menu is gone: no rail trigger, no sidebar menu', () => {
   assert.equal(document.getElementById('rail-command'), null);
   assert.equal(document.getElementById('sidebar-command-menu'), null);
   assert.equal(L.NAV_ITEMS.some((item) => item.key === 'command'), false);
+});
+
+test('moving Email moves the Email row, and its title, compose button and unread dot still work', async () => {
+  await sleep(350); // let the click guard from the drag tests expire
+  const row = byId('email-section');
+  L.updateLayout((layout) => L.moveItem(layout, 'email', 'agents'));
+  assert.equal(byId('email-section'), row, 'the same node, not a copy');
+  assert.deepEqual(rowIds(document, 'agents'), ['tool-agents-btn', 'tool-workbench-btn', 'email-section']);
+  assert.ok(!rowIds(document, 'work').includes('email-section'));
+  byId('email-section-title').click();
+  byId('email-compose-btn').click();
+  assert.deepEqual(clicks, ['email-section-title', 'email-compose-btn']);
+  assert.ok(row.contains(byId('email-unread-dot')), 'the unread dot travels with the row');
+  byId('email-unread-dot').style.display = 'inline-block';
+  assert.equal(D.itemSignal('email', document).active, true);
 });

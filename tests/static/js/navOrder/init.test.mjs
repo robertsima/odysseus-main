@@ -26,7 +26,7 @@ const tasksRow = document.getElementById('tool-tasks-btn');
 await import('../../../../static/js/navOrder.js');
 
 test('a browser that only has the v1 order opens with its placement and fold state', () => {
-  assert.deepEqual(rowIds(document, 'work'), ['tool-tasks-btn', 'tool-today-btn', 'tool-calendar-btn', 'tool-library-btn', 'tool-notes-btn']);
+  assert.deepEqual(rowIds(document, 'work'), ['tool-tasks-btn', 'tool-today-btn', 'tool-calendar-btn', 'email-section', 'tool-library-btn', 'tool-notes-btn']);
   assert.deepEqual(rowIds(document, 'agents'), ['tool-workbench-btn', 'tool-agents-btn']);
   assert.deepEqual(rowIds(document, 'more')[0], 'tool-gallery-btn');
   assert.equal(document.getElementById('more-section').classList.contains('collapsed'), false);

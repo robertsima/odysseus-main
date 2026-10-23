@@ -51,7 +51,7 @@ test('Move up and Move down reorder a tool inside its group and keep focus on th
   editor.openNavEditor();
   act('item-down', { item: 'today' }).click();
   assert.deepEqual(ids('work').slice(0, 2), ['email', 'today']);
-  assert.deepEqual(rowIds(document, 'work').slice(0, 2), ['tool-today-btn', 'tool-library-btn'], 'Email has no sidebar row; the others keep their order');
+  assert.deepEqual(rowIds(document, 'work').slice(0, 2), ['email-section', 'tool-today-btn'], 'the Email row is an item like the others');
   assert.equal(document.activeElement, act('item-down', { item: 'today' }));
   act('item-up', { item: 'today' }).click();
   assert.deepEqual(ids('work').slice(0, 2), ['today', 'email']);
