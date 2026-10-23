@@ -14,7 +14,7 @@ CORE_RAIL = ["rail-delete-session", "rail-chats", "rail-documents", "rail-settin
 
 
 def tool_order(page) -> list[str]:
-    return page.evaluate("[...document.querySelectorAll('#tools-section [id^=\"tool-\"][id$=\"-btn\"]')].map(b => b.id)")
+    return page.evaluate("[...document.querySelectorAll('#sidebar .nav-group [id^=\"tool-\"][id$=\"-btn\"]')].map(b => b.id)")
 
 
 def modals_open(page) -> list[str]:
@@ -25,12 +25,13 @@ def modals_open(page) -> list[str]:
 def test_dragging_a_sidebar_tool_moves_it_without_opening_it_and_the_order_survives_a_reload(open_app, static_app):
     page = open_app(1440, chat=False)
     before = tool_order(page)
-    assert before.index("tool-calendar-btn") < before.index("tool-notes-btn")
+    # Work lists Notes before Calendar; dragging Notes onto Calendar swaps them.
+    assert before.index("tool-notes-btn") < before.index("tool-calendar-btn")
     opened = modals_open(page)
-    page.drag_and_drop("#tool-calendar-btn", "#tool-notes-btn")
+    page.drag_and_drop("#tool-notes-btn", "#tool-calendar-btn")
     page.wait_for_function("(id) => localStorage.getItem(id) !== null", arg=KEY)
     after = tool_order(page)
-    assert after.index("tool-calendar-btn") > after.index("tool-notes-btn")
+    assert after.index("tool-notes-btn") > after.index("tool-calendar-btn")
     assert sorted(after) == sorted(before), "a tool was lost or duplicated"
     # The browser may follow a drop with a click on the dragged button.
     page.wait_for_timeout(400)

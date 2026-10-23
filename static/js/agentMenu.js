@@ -24,6 +24,7 @@
 
 import uiModule from './ui.js';
 import presetsModule from './presets.js';
+import agentActions from './agentActions.js';
 
 const state = {
   mode: 'chat',
@@ -216,12 +217,21 @@ function ensureMenu() {
   return menu;
 }
 
-function loadoutItem(name, title, detail) {
+function loadoutItem(name, title, detail, { agent = false } = {}) {
   const on = (state.current || '') === (name || '');
-  return `<button type="button" class="overflow-menu-item agent-menu-loadout${on ? ' active' : ''}" role="menuitemradio" aria-checked="${on}" data-loadout="${esc(name)}">
-    <span class="agent-menu-radio" aria-hidden="true"></span>
-    <span class="agent-menu-text"><span>${esc(title)}</span>${detail ? `<small>${esc(detail)}</small>` : ''}</span>
+  const text = `<span class="agent-menu-text"><span>${esc(title)}</span>${detail ? `<small>${esc(detail)}</small>` : ''}</span>`;
+  if (!agent) {
+    return `<button type="button" class="overflow-menu-item agent-menu-loadout${on ? ' active' : ''}" role="menuitemradio" aria-checked="${on}" data-loadout="${esc(name)}">
+    <span class="agent-menu-radio" aria-hidden="true"></span>${text}
   </button>`;
+  }
+  // An agent: two task buttons, and the old "apply to this chat" one step away.
+  return `<div class="agent-menu-row${on ? ' active' : ''}" role="group" aria-label="${esc(title)}">
+    <div class="agent-menu-row-head">${text}
+      <button type="button" class="agent-menu-more-btn" data-agent-more aria-haspopup="true" aria-expanded="false" aria-label="More for ${esc(title)}" title="More">⋯</button></div>
+    <button type="button" class="overflow-menu-item agent-menu-more-item" role="menuitem" data-loadout="${esc(name)}" hidden>${on ? 'Used in this chat' : 'Use in this chat'}</button>
+    ${agentActions.actionButtonsHtml(name)}
+  </div>`;
 }
 
 /** The persona or custom prompt the next turn sends, if any. It applies in
@@ -240,19 +250,17 @@ function menuHtml() {
   let loadouts;
   if (!profiles) loadouts = '<div class="agent-menu-note">Loading loadouts…</div>';
   else {
-    loadouts = loadoutItem('', 'Default', 'No loadout: uses the shared prompt and this chat\'s settings');
+    loadouts = loadoutItem('', 'Default', 'No agent: uses the shared prompt and this chat\'s settings');
     // A chat can still carry a loadout that was since renamed or deleted.
     if (state.current && !profiles.some((p) => p.name === state.current)) {
       loadouts += loadoutItem(state.current, state.current, 'No longer configured');
     }
     loadouts += profiles.map((p) => loadoutItem(p.name, p.name,
-      [p.persona_name ? `as ${p.persona_name}` : '',
-        p.description || [p.tool_access === 'all' ? 'all tools' : `${p.tool_access} tools`, `${p.memory_access} memory`].join(' · ')]
-        .filter(Boolean).join(' — '))).join('');
+      [p.persona_name ? `as ${p.persona_name}` : '', p.description || ''].filter(Boolean).join(' — '), { agent: true })).join('');
     if (!profiles.length) loadouts += '<div class="agent-menu-note">No loadouts configured yet.</div>';
   }
-  return `<div class="agent-menu-head">Loadout${sessionId() ? '' : ' <small>for the next message</small>'}</div>
-    <p class="agent-menu-sub">A loadout sets what this agent may do (tools, memory, approvals) and how it sounds (persona, temperature).</p>
+  return `<div class="agent-menu-head">Agents</div>
+    <p class="agent-menu-sub">Talk to an agent in a new chat, or assign it a task and get the result back here.</p>
     <div class="agent-menu-loadouts" role="group" aria-label="Loadouts">${loadouts}</div>
     <div class="agent-menu-sep" role="separator"></div>
     ${state.voice ? `<button type="button" class="overflow-menu-item" role="menuitem" data-agent-action="edit-agent">${ICONS.prompt}<span class="agent-menu-text"><span>Edit this agent's persona</span><small>${esc(state.voice.persona ? `Answers as ${state.voice.persona}` : 'Persona, instructions, temperature')}</small></span></button>` : ''}
@@ -314,6 +322,13 @@ export function closeMenu() {
 }
 
 function onMenuClick(e) {
+  const more = e.target.closest('[data-agent-more]');
+  if (more) {
+    const item = more.closest('.agent-menu-row')?.querySelector('.agent-menu-more-item');
+    if (item) { item.hidden = !item.hidden; more.setAttribute('aria-expanded', String(!item.hidden)); }
+    return;
+  }
+  if (agentActions.handleActionClick(e)) { closeMenu(); return; }
   const loadout = e.target.closest('[data-loadout]');
   if (loadout) {
     const name = loadout.dataset.loadout || '';
@@ -332,7 +347,7 @@ function onMenuClick(e) {
 
 function onMenuKey(e) {
   if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
-  const items = [...e.currentTarget.querySelectorAll('[data-loadout], [data-agent-action]')];
+  const items = [...e.currentTarget.querySelectorAll('[data-loadout], [data-agent-action], [data-agent-act]')];
   if (!items.length) return;
   e.preventDefault();
   const i = items.indexOf(document.activeElement);

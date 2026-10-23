@@ -43,7 +43,7 @@ def _map():
 
 # Selectors (kept in one place so the tests read as plain assertions).
 EMAIL = "#email-section, #rail-email"
-TOOLS = "#tools-section"
+TOOLS = ".nav-group"
 CAL = "#tool-calendar-btn, #rail-calendar"
 COMPARE = "#tool-compare-btn, #rail-compare"
 LIB = "#tool-library-btn, #rail-archive"
@@ -140,3 +140,28 @@ def test_rail_new_chat_off_hides_new_session():
 def test_explicit_false_takes_precedence_over_default_on():
     m = _resolve({"rag-toggle-btn": True})
     assert m[RAG] is True
+
+NEW_ITEMS = {
+    "tool-today": "#tool-today-btn, #rail-today",
+    "tool-lotus": "#tool-lotus-btn",
+    "tool-agents": "#tool-agents-btn, #rail-agents",
+    "tool-workbench": "#tool-workbench-btn, #rail-workbench",
+}
+
+
+def test_today_lotus_agents_and_workbench_can_each_be_hidden():
+    """Every sidebar item has a Customize UI key; hiding one leaves the others."""
+    ui_vis_map = _map()
+    for key, selector in NEW_ITEMS.items():
+        assert ui_vis_map[key] == selector, key
+        m = _resolve({key: False})
+        assert m[selector] is False, key
+        assert all(visible for other, visible in m.items() if other != selector), key
+
+
+
+def test_navigation_groups_off_hides_the_new_items_too():
+    m = _resolve({"tools-section": False, "tool-agents": True})
+    assert m[TOOLS] is False
+    for selector in NEW_ITEMS.values():
+        assert m[selector] is False, selector

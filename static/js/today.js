@@ -123,10 +123,13 @@ function safeHref(url) {
   return (text.startsWith('/') && !text.startsWith('//')) || /^https?:\/\//i.test(text) ? text : '';
 }
 const linkAttr = (url) => (safeHref(url) ? ` href="${esc(safeHref(url))}" data-today-link="${esc(safeHref(url))}"` : '');
-function blockerHtml(b) {
+function blockerHtml(b, title = '') {
   if (!b) return '';
   const action = b.user_action ? `<span class="today-blocker-action"><strong>You need to:</strong> ${esc(b.user_action)}</span>` : '';
-  return `<p class="today-blocker"><span class="today-blocker-summary">${esc(b.summary || 'Work is blocked.')}</span> ${action}</p>`;
+  // Recovery actions the server attached (what the person can do about it).
+  const buttons = (b.actions || []).filter((a) => a && a.id && a.label).map((a) => (
+    `<button type="button" class="today-btn" data-today-blocker-action="${esc(JSON.stringify(a))}" data-task="${esc(title)}">${esc(a.label)}</button>`)).join('');
+  return `<p class="today-blocker"><span class="today-blocker-summary">${esc(b.summary || 'Work is blocked.')}</span> ${action}</p>${buttons ? `<div class="today-blocker-actions">${buttons}</div>` : ''}`;
 }
 function actionButtons(item) {
   return (item.actions || []).filter((a) => ACTION_LABEL[a]).map((a) => (
@@ -153,7 +156,7 @@ function itemHtml(item) {
     <div class="today-item-main">
       ${title}
       <p class="today-why">${esc(item.why)}</p>
-      ${blockerHtml(item.blocker)}
+      ${blockerHtml(item.blocker, item.title)}
       <p class="today-meta"><span class="today-source">${esc(SOURCE_LABEL[item.source] || item.source)}</span>${hint ? `<span class="today-due">${esc(hint)}</span>` : ''}</p>
     </div>
     <div class="today-actions">${actionButtons(item)}</div>
@@ -240,7 +243,7 @@ function detailHtml() {
     <article class="today-detail" data-outcome="${esc(o.id)}">
       <h3 class="today-detail-title">${esc(o.title)}</h3>
       <p class="today-why">${esc(STATE_LABEL[o.state] || o.state)}${o.confirmed_by_person ? ', confirmed by you' : ''}</p>
-      ${blockerHtml(o.blocker)}
+      ${blockerHtml(o.blocker, o.title)}
       ${rows.length ? `<dl class="today-facts">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>` : ''}
       <h4 class="today-section-title">Links</h4>
       ${links ? `<ul class="today-plain">${links}</ul>` : '<p class="today-muted">Nothing linked yet.</p>'}
@@ -431,6 +434,14 @@ function onClick(e) {
   if (pick && state.clarify) {
     const option = state.clarify.options[Number(pick.dataset.todayPick)];
     if (option) submitCapture({ destination: option.destination, ...(option.due ? { due: option.due } : {}) });
+    return;
+  }
+  const recovery = t.closest('[data-today-blocker-action]');
+  if (recovery) {
+    let action = null;
+    try { action = JSON.parse(recovery.dataset.todayBlockerAction); } catch (_) { /* malformed: ignore */ }
+    const run = (mod) => mod.applyBlockerAction(action, { task: recovery.dataset.task || '' });
+    if (action) { if (window.agentActions) run(window.agentActions); else import('./agentActions.js').then((m) => run(m.default)); }
     return;
   }
   const row = t.closest('.today-item');

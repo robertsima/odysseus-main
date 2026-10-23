@@ -1,0 +1,99 @@
+/* context-strip.css — the strip above the conversation (#chat-status-line).
+ *
+ *   who · project · Editing <document>                    [moved indicators] Change
+ *   File editing allowed · External actions require approval     [target selector]
+ *
+ * Built by static/js/chatSettings.js. The persona, workspace and context-use
+ * indicators are the original nodes, moved here; their own rules still apply.
+ * Palette comes from the --wb-* tokens the chat settings already use.
+ */
+.chat-status-line.ctx-strip {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 auto;
+  gap: 3px;
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 6px 12px 6px;
+  box-sizing: border-box;
+  min-width: 0;
+  text-align: left;
+  align-self: stretch;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--wb-muted);
+  border-bottom: 1px solid color-mix(in srgb, var(--fg) 7%, transparent);
+}
+.chat-status-line.ctx-strip[hidden] { display: none; }
+
+.ctx-l1 { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.ctx-main { display: flex; align-items: center; gap: 6px; flex: 1 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; }
+.ctx-main:empty { flex: 0 0 0; }
+.ctx-dot { opacity: 0.55; }
+.ctx-project, .ctx-doc { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ctx-doc { color: var(--fg); }
+.ctx-who {
+  flex: 0 1 auto; min-width: 0; max-width: 60%; margin: 0; padding: 0; border: 0; background: none;
+  color: var(--fg); font: inherit; font-weight: 600; cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ctx-who:hover { text-decoration: underline; }
+
+.ctx-slot { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+.ctx-slot > * { margin: 0; }
+.ctx-slot .tool-indicator { height: 22px; }
+.ctx-slot .tool-indicator > span { display: inline !important; font-size: 12px; }
+.ctx-quick-actions { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
+.ctx-quick-actions:empty { display: none; }
+
+.ctx-change { flex: 0 0 auto; margin-left: auto; }
+.ctx-change-btn {
+  height: 22px; margin: 0; padding: 0 10px; border: 1px solid color-mix(in srgb, var(--fg) 18%, transparent);
+  border-radius: 5px; background: transparent; color: var(--fg); font: inherit; font-size: 12px; cursor: pointer;
+}
+.ctx-change-btn:hover { background: var(--wb-hover); }
+
+.ctx-l2 { display: none; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 12px; min-width: 0; }
+.ctx-l2:has(.ctx-access-btn, .ctx-access-text, .ctx-link, .ctx-seg) { display: flex; }
+.ctx-l1, .ctx-l2 { width: 100%; box-sizing: border-box; }
+.ctx-access { flex: 1 1 auto; display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; min-width: 0; }
+.ctx-access-btn, .ctx-link {
+  margin: 0; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+.ctx-access-btn:hover, .ctx-link:hover { color: var(--fg); text-decoration: underline; }
+.ctx-access-btn.csl-mode-ask_risky::after, .ctx-access-btn.csl-mode-ask_all::after {
+  content: ''; display: inline-block; width: 6px; height: 6px; margin-left: 6px; border-radius: 50%;
+  background: var(--wb-warn); vertical-align: middle;
+}
+.ctx-link { font-family: var(--wb-mono); }
+
+/* Target selector: one choice of three. */
+.ctx-seg { display: inline-flex; max-width: 100%; border: 1px solid color-mix(in srgb, var(--fg) 14%, transparent); border-radius: 6px; overflow: hidden; }
+.ctx-seg-btn {
+  height: 22px; margin: 0; padding: 0 9px; border: 0; border-left: 1px solid color-mix(in srgb, var(--fg) 14%, transparent);
+  background: transparent; color: inherit; font: inherit; font-size: 12px; white-space: nowrap; cursor: pointer;
+}
+.ctx-seg-btn:first-child { border-left: 0; }
+.ctx-seg-btn:hover { color: var(--fg); background: var(--wb-hover); }
+.ctx-seg-btn.on { color: var(--fg); font-weight: 600; background: color-mix(in srgb, var(--wb-accent) 16%, transparent); }
+.ctx-seg-btn:focus-visible, .ctx-who:focus-visible, .ctx-change-btn:focus-visible, .ctx-access-btn:focus-visible {
+  outline: 2px solid var(--wb-accent); outline-offset: 1px;
+}
+
+/* The approval menu now opens below the strip instead of above the composer. */
+.ctx-strip .csl-mode-menu { top: calc(100% + 2px); bottom: auto; }
+
+@media (max-width: 600px) {
+  .chat-status-line.ctx-strip { padding: 4px 4px 6px; }
+  .ctx-l1 { flex-wrap: wrap; row-gap: 4px; }
+  .ctx-main { flex-basis: 100%; order: 1; }
+  .ctx-slot { order: 2; }
+  .ctx-change { order: 3; }
+  .ctx-quick-actions { order: 4; flex-basis: 100%; }
+  .ctx-l2 { flex-direction: column; align-items: stretch; }
+  .ctx-seg { display: flex; width: 100%; }
+  .ctx-seg-btn { flex: 1 1 auto; padding: 0 6px; font-size: 11px; }
+}
+
+

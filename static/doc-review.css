@@ -1,0 +1,170 @@
+/* Review changes: the read-only side sheet opened from the document export menu.
+   Added and removed lines carry a + / minus prefix and strike-through on
+   removals, so meaning never rests on colour alone. */
+
+.doc-review {
+  --dr-add: var(--green, #2f9e5b);
+  --dr-del: var(--danger, #d6453d);
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 10020; /* above the phone-width editor pane (10010) */
+  display: flex;
+  flex-direction: column;
+  width: min(400px, 100vw);
+  box-sizing: border-box;
+  background: var(--panel);
+  color: var(--fg);
+  border-left: 1px solid var(--border);
+  box-shadow: -6px 0 18px rgba(0, 0, 0, 0.25);
+  font-size: 12px;
+}
+
+.doc-review * { box-sizing: border-box; }
+
+.dr-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.dr-title { margin: 0; font-size: 13px; font-weight: 600; }
+.dr-close {
+  min-width: 32px;
+  min-height: 32px;
+  background: none;
+  border: none;
+  color: var(--fg);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.dr-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 12px 14px;
+}
+
+.dr-decision {
+  margin-bottom: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  font-weight: 600;
+}
+
+.dr-summary { list-style: none; margin: 0 0 12px; padding: 0; display: grid; gap: 3px; }
+.dr-note { margin: 4px 0 10px; opacity: 0.75; }
+.dr-h { margin: 14px 0 6px; font-size: 11px; font-weight: 600; text-transform: none; opacity: 0.8; }
+
+.dr-compare { display: grid; gap: 4px; margin-bottom: 8px; }
+.dr-compare select {
+  width: 100%;
+  min-width: 0;
+  min-height: 32px;
+  padding: 4px 6px;
+  background: var(--input-bg, var(--panel));
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font: inherit;
+}
+
+.dr-section {
+  margin-bottom: 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.dr-section > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 8px;
+  cursor: pointer;
+  min-height: 32px;
+}
+.dr-badge {
+  flex: none;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-size: 10px;
+}
+.dr-heading { min-width: 0; overflow-wrap: anywhere; }
+
+.dr-diff {
+  border-top: 1px solid var(--border);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  overflow-x: hidden;
+}
+.dr-line { display: flex; gap: 6px; padding: 1px 8px; }
+.dr-mark { flex: none; width: 1ch; font-weight: 700; }
+.dr-text { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.dr-add { background: color-mix(in srgb, var(--dr-add) 16%, transparent); }
+.dr-add .dr-mark { color: var(--dr-add); }
+.dr-del { background: color-mix(in srgb, var(--dr-del) 16%, transparent); }
+.dr-del .dr-mark { color: var(--dr-del); }
+.dr-del .dr-text { text-decoration: line-through; text-decoration-thickness: 1px; }
+.dr-gap { opacity: 0.5; }
+
+.dr-placeholders { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.dr-ph {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  height: auto;
+  min-height: 32px;
+  padding: 4px 8px;
+  line-height: 1.4;
+  white-space: normal;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.dr-ph:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.dr-ph code { flex: 0 1 auto; min-width: 0; max-width: 60%; word-break: break-all; }
+.dr-where { min-width: 0; opacity: 0.7; overflow-wrap: anywhere; }
+
+.dr-foot {
+  display: flex;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+}
+.dr-btn {
+  min-height: 32px;
+  padding: 4px 12px;
+  background: none;
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font: inherit;
+  cursor: pointer;
+}
+.dr-btn:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.dr-primary { border-color: var(--accent); }
+.dr-link { text-decoration: underline; }
+
+.dr-close:focus-visible, .dr-btn:focus-visible, .dr-ph:focus-visible,
+.dr-section > summary:focus-visible, .dr-compare select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+@media (max-width: 700px) {
+  .doc-review { width: 100vw; border-left: none; }
+  .dr-foot .dr-btn { flex: 1; }
+}

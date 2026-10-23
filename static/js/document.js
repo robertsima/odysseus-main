@@ -15,6 +15,7 @@ import { langIcon } from './langIcons.js';
 import spinnerModule from './spinner.js';
 import { openLibrary, closeLibrary, isLibraryOpen, initLibrary } from './documentLibrary.js';
 import signatureModule from './signature.js';
+import { mountReviewPanel } from './docReview.js';
 import * as Modals from './modalManager.js';
 import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
 
@@ -139,15 +140,6 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     } else {
       localStorage.removeItem(_docOpenKey(sessionId));
       localStorage.removeItem(_docMinimizedKey(sessionId));
-    }
-  }
-
-  /** Switch chat to agent mode if not already */
-  function _ensureAgentMode() {
-    const ab = document.getElementById('mode-agent-btn');
-    const cb = document.getElementById('mode-chat-btn');
-    if (ab && !ab.classList.contains('active')) {
-      ab.click();
     }
   }
 
@@ -4756,7 +4748,8 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     // Doc was opened last → it goes in front of the email windows (clears the
     // email-front flag; the doc/email z-index alternation lives in CSS).
     document.body.classList.remove('email-front');
-    _ensureAgentMode();
+    // Opening a document no longer flips the chat to Agent mode: the context
+    // strip's target selector decides what the document is for.
     _markDocVisibleState(_lastSessionId, 'open');
 
     document.body.classList.add('doc-view');
@@ -6499,7 +6492,8 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     menu.style.position = 'fixed';
     menu.style.top = (rect.bottom + 4) + 'px';
     menu.style.left = rect.left + 'px';
-    menu.style.zIndex = '9999';
+    // Above the phone-width editor pane (10010) and the Review sheet (10020).
+    menu.style.zIndex = '10030';
     items.forEach(([md, label, ico]) => {
       const it = document.createElement('button');
       it.className = 'doc-overflow-item';
@@ -9623,7 +9617,8 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     menu.style.top = (rect.bottom + 2) + 'px';
     menu.style.right = (window.innerWidth - rect.right) + 'px';
     menu.style.left = 'auto';
-    menu.style.zIndex = '9999';
+    // Above the phone-width editor pane (10010) and the Review sheet (10020).
+    menu.style.zIndex = '10030';
 
     const langLabel = lang ? lang.toUpperCase() : 'TXT';
     // Form-backed markdown doc → primary export is the filled PDF, not the
@@ -9632,6 +9627,8 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       || docs.get(activeDocId)?.content || '';
     const isForm = _isFormBackedDoc(liveContent);
     const options = [];
+    // Review comes first: look over what changed before anything leaves the app.
+    options.push({ label: 'Review changes', fn: () => openReviewPanel(), _divider: true });
     // Import lives at the top of the same dropdown — it's a sibling action
     // ("bring something IN" vs "send something OUT"), and the footer was
     // getting too cramped for dedicated icons.
@@ -9669,6 +9666,46 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     // Outside-click AND Escape both route through the central esc-stack via
     // bindMenuDismiss; onClose owns the actual node removal.
     const close = bindMenuDismiss(menu, () => { menu.remove(); });
+  }
+
+  /** Scroll the editor to a 1-based line and select it (used by the review panel). */
+  function _jumpToEditorLine(line) {
+    const lang = (docs.get(activeDocId)?.language || document.getElementById('doc-language-select')?.value || '').toLowerCase();
+    if (lang === 'markdown') { try { _setMarkdownPreviewActive(false, { remember: false }); } catch (_) {} }
+    const ta = document.getElementById('doc-editor-textarea');
+    if (!ta) return;
+    const rows = ta.value.split(/\r\n?|\n/);
+    const idx = Math.max(0, Math.min(rows.length - 1, line - 1));
+    let start = 0;
+    for (let i = 0; i < idx; i++) start += rows[i].length + 1;
+    ta.focus();
+    try { ta.setSelectionRange(start, start + rows[idx].length); } catch (_) {}
+    const per = ta.scrollHeight / Math.max(1, rows.length);
+    ta.scrollTop = Math.max(0, idx * per - ta.clientHeight / 3);
+    if (window.matchMedia?.('(max-width: 700px)').matches) document.getElementById('doc-review-panel')?.remove();
+  }
+
+  /** Read-only "Review changes" sheet; reachable from the export menu. */
+  function openReviewPanel() {
+    if (!activeDocId) return;
+    const docId = activeDocId;
+    const content = () => document.getElementById('doc-editor-textarea')?.value ?? docs.get(docId)?.content ?? '';
+    mountReviewPanel({
+      apiBase: API_BASE,
+      getDocId: () => docId,
+      getContent: content,
+      getSuggestionCount: () => _activeSuggestions.length,
+      jumpToLine: _jumpToEditorLine,
+      showSuggestions: () => {
+        if (!document.getElementById('doc-suggestion-active')) _showCurrentSuggestion();
+        document.getElementById('doc-review-panel')?.remove();
+        document.getElementById('doc-suggestion-active')?.scrollIntoView?.({ block: 'center' });
+      },
+      // Same path as the menu's own PDF item: form documents show the filled-PDF
+      // confirmation, everything else goes through Print as PDF.
+      previewPdf: () => (_isFormBackedDoc(content()) ? _downloadFilledPdf() : exportAsPdf()),
+      openExport: (rect) => showExportMenu(null, rect),
+    });
   }
 
   function exportAsHtml() {
@@ -11124,6 +11161,12 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     return activeDocId;
   }
 
+  /** Title of the visible document, for the context strip. */
+  export function getCurrentDocTitle() {
+    const doc = activeDocId ? docs.get(activeDocId) : null;
+    return doc && doc.title ? String(doc.title) : '';
+  }
+
   export function getActiveEmailComposerContext() {
     if (!activeDocId) return null;
     const doc = docs.get(activeDocId);
@@ -11182,6 +11225,7 @@ const documentModule = {
   exitDiffMode,
   isDiffModeActive,
   getCurrentDocId,
+  getCurrentDocTitle,
   getActiveEmailComposerContext,
   findEmailDocId,
   getSelectionContext,

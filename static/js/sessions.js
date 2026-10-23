@@ -3358,7 +3358,8 @@ const _lib = { tab: 'chats', search: '', sort: 'recent', debounce: null, selectM
 export function openLibrary(defaultTab) {
   // Delegate everything to the document module's library (has tabs for Chats/Documents/Archive)
   if (window.documentModule && window.documentModule.openLibrary) {
-    window.documentModule.openLibrary({ tab: defaultTab || 'documents' });
+    // No tab given: the Library picks its own default (All).
+    window.documentModule.openLibrary(defaultTab ? { tab: defaultTab } : {});
     return;
   }
   if (document.getElementById('library-modal')) return;

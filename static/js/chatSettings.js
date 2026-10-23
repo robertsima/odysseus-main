@@ -1,4 +1,4 @@
-/* chatSettings.js — per-chat settings and the status line under the composer.
+/* chatSettings.js — per-chat settings and the context strip above the conversation.
  *
  * Each chat keeps its own setup (routes/session_routes.py /session/{id}/settings):
  *   · approval mode — whether risky tool calls stop for approval first
@@ -9,11 +9,15 @@
  *     every turn and restored here when the chat is reopened, so a chat no
  *     longer inherits whatever the previous chat left in the browser)
  *
- * The status line shows who answers (the loadout's agent in Agent mode, the
- * shared Prompt persona otherwise), delegation, the chat's model, context use,
- * approval mode, workspace, tool restrictions and fork source, and opens the
- * settings panel. The panel floats over the conversation above the composer,
- * so opening it never squeezes the chat.
+ * The strip (#chat-status-line, between the top bar and the history) says who
+ * answers (the loadout's agent in Agent mode, the shared Prompt persona
+ * otherwise), the project, the open document and what the chat may do. Its
+ * Change button opens the settings panel. With a document open it also holds
+ * the target selector (this document / this project / general conversation),
+ * saved as the chat's doc_target. The persona, workspace and context-use
+ * indicators are moved into it (nodes and handlers unchanged). The panel
+ * floats over the conversation above the composer, so opening it never
+ * squeezes the chat.
  */
 
 import uiModule from './ui.js';
@@ -58,6 +62,9 @@ const state = {
   data: null,        // GET /settings payload
   context: null,     // last odysseus:context-usage detail for this chat
   tools: null,       // cached /api/tools list
+  carriedDoc: null,  // document already open on entering this chat (not opened here)
+  localTarget: null, // doc target picked in this chat
+  quickActionsFor: '', // agent whose quick-action chips the strip shows
   loadSeq: 0,
 };
 
@@ -85,6 +92,12 @@ function patchSettings(patch) {
 // ── restore on chat switch ────────────────────────────────────────────────
 async function onSessionSwitch(sessionId) {
   const fromNewChat = !state.sessionId;
+  // A chat created from the new-chat screen keeps the document opened there.
+  if (!(fromNewChat && sessionId)) {
+    state.carriedDoc = (window.documentModule?.getCurrentDocId?.()) || null;
+    state.localTarget = null;
+  }
+  const pendingTarget = fromNewChat && sessionId ? state.localTarget : null;
   state.sessionId = sessionId || null;
   state.data = null;
   state.context = null;
@@ -103,6 +116,7 @@ async function onSessionSwitch(sessionId) {
     if (seq !== state.loadSeq) return;
     state.data = data;
     restore(data.settings || {}, { fromNewChat });
+    if (pendingTarget && !(data.settings || {}).doc_target) save({ doc_target: pendingTarget });
   } catch (_) {
     if (seq !== state.loadSeq) return;
     state.data = null;
@@ -127,23 +141,74 @@ function restore(settings, { fromNewChat = false } = {}) {
   else if (next && !saved) workspaceModule.setWorkspace(next);
 }
 
-// ── status line ───────────────────────────────────────────────────────────
+// ── context strip ─────────────────────────────────────────────────────────
+// Indicators that already own their behavior elsewhere (presets.js, workspace.js,
+// chat.js). They move into the strip once; render() never rewrites them.
+const MOVED_NODES = ['chat-context-pill', 'character-indicator-btn', 'workspace-indicator-btn'];
+const DOC_TARGETS = [
+  ['document', 'This document'],
+  ['project', 'This project'],
+  ['general', 'General conversation'],
+];
+
 function ensureLine() {
   let line = $('chat-status-line');
   if (line) return line;
-  const bar = document.querySelector('.chat-input-bar');
-  if (!bar || !bar.parentNode) return null;
+  const top = document.querySelector('#chat-container > .chat-top-bar');
+  if (!top || !top.parentNode) return null;
   line = document.createElement('div');
   line.id = 'chat-status-line';
-  line.className = 'chat-status-line';
+  line.className = 'chat-status-line ctx-strip';
   line.setAttribute('role', 'toolbar');
-  line.setAttribute('aria-label', 'Chat status and settings');
-  bar.parentNode.insertBefore(line, bar.nextSibling);
+  line.setAttribute('aria-label', 'Chat context');
+  line.innerHTML = '<div class="ctx-l1"><span class="ctx-main" data-ctx="main"></span>'
+    + '<span class="ctx-slot" data-ctx="slot"></span>'
+    + '<div class="ctx-quick-actions"></div>'
+    + '<span class="ctx-change" data-ctx="change"></span></div>'
+    + '<div class="ctx-l2"><span class="ctx-access" data-ctx="access"></span><span class="ctx-target" data-ctx="target"></span></div>';
+  top.parentNode.insertBefore(line, top.nextSibling);
+  const slot = line.querySelector('[data-ctx="slot"]');
+  MOVED_NODES.forEach((id) => { const n = $(id); if (n) slot.appendChild(n); });
   line.addEventListener('click', onLineClick);
   return line;
 }
+const part = (line, name) => line.querySelector(`[data-ctx="${name}"]`);
 
 const isAgentMode = () => document.body.classList.contains('composer-agent-mode');
+
+/** Whether an owner-managed indicator is currently showing. */
+function nodeShown(id) {
+  const n = $(id);
+  return !!n && !n.hidden && n.style.display !== 'none';
+}
+
+/** The document open in the editor, if any. */
+function openDoc() {
+  const dm = window.documentModule;
+  const id = (dm && dm.getCurrentDocId && dm.getCurrentDocId()) || null;
+  if (!id) return null;
+  let title = (dm.getCurrentDocTitle && dm.getCurrentDocTitle()) || '';
+  const ctxDoc = state.data && state.data.context && state.data.context.document;
+  if (!title && ctxDoc && ctxDoc.id === id) title = ctxDoc.title || '';
+  return { id, title: title || 'Untitled' };
+}
+
+/** What the open document stands for in the next message: the pick made in this
+ *  chat, else the saved one, else the document itself when it was opened here,
+ *  else a general conversation. A document that was already open when the chat
+ *  was entered never aims the chat at it on its own. */
+function effectiveTarget() {
+  const saved = state.localTarget || ((state.data && state.data.settings) || {}).doc_target;
+  if (DOC_TARGETS.some(([key]) => key === saved)) return saved;
+  const doc = openDoc();
+  return doc && doc.id !== state.carriedDoc ? 'document' : 'general';
+}
+
+/** For the send path: the open document and the target to send with it. */
+function docTarget() {
+  const doc = openDoc();
+  return { docId: doc ? doc.id : null, target: effectiveTarget() };
+}
 
 /** Who answers the next turn, by the rule chat.js uses: in Agent mode a chat
  *  with its own loadout voice speaks as that agent; otherwise the shared
@@ -175,68 +240,82 @@ function allowlistPermits(name, settings) {
   });
 }
 
-function currentModelLabel() {
-  try {
-    const m = window.sessionModule?.getCurrentModel?.() || '';
-    return m ? String(m).split('/').pop() : '';
-  } catch (_) { return ''; }
+/** Whether the chat's access differs from what a fresh chat has. */
+function accessIsCustom(d, s) {
+  return (d.approval_mode || 'auto') !== 'auto'
+    || (s.tool_access && s.tool_access !== 'all')
+    || (s.disabled_tools || []).length > 0
+    || (d.shell_access || 'sandbox') !== 'sandbox';
 }
 
 function render() {
   const line = ensureLine();
   if (!line) return;
-  if (!state.sessionId) { line.hidden = true; line.innerHTML = ''; return; }
-  line.hidden = false;
   const d = state.data || {};
   const s = d.settings || {};
+  const context = d.context || null;
+  const doc = openDoc();
+  const target = effectiveTarget();
+  const who = identity();
+  const dot = '<span class="ctx-dot" aria-hidden="true">·</span>';
+
+  // Line 1: who · project · document
+  const bits = [];
+  if (who && !(who.kind === 'persona' && nodeShown('character-indicator-btn'))) {
+    const label = who.kind === 'persona' ? `Persona: ${who.name}` : who.name;
+    const title = who.kind === 'agent'
+      ? `This chat runs as ${who.loadout || 'its own agent setup'}${who.persona ? ` (persona ${who.persona})` : ''}. Its instructions replace the shared Prompt persona.`
+      : who.kind === 'persona'
+        ? `The shared Prompt persona ${who.name} answers${who.agent ? ' (this chat has no loadout of its own)' : ''}.`
+        : 'Agent mode with no loadout: the default agent setup answers.';
+    bits.push(`<button type="button" class="ctx-who ctx-who-${esc(who.kind)}" data-csl="panel-agent" title="${esc(title)}">${esc(label)}</button>`);
+  }
+  const project = context && context.project;
+  const wsName = nodeShown('workspace-indicator-btn') ? (($('workspace-indicator-name') || {}).textContent || '').trim() : '';
+  if (project && project.toLowerCase() !== wsName.toLowerCase()) bits.push(`<span class="ctx-project" title="Project">${esc(project)}</span>`);
+  if (doc && target === 'document') bits.push(`<span class="ctx-doc" title="This document is part of every message">Editing ${esc(doc.title)}</span>`);
+  part(line, 'main').innerHTML = bits.join(dot);
+
+  // Line 2: what the chat may do, and the target selector when a document is open
   const mode = d.approval_mode || 'auto';
   const modesEnforced = Array.isArray(d.approval_modes) && d.approval_modes.length > 0;
-  const items = [];
-  const who = identity();
-  if (who) {
-    const label = who.kind === 'persona' ? `Persona: ${who.name}` : `Agent: ${who.name}`;
-    const title = who.kind === 'agent'
-      ? `This chat runs as ${who.loadout || 'its own agent setup'}${who.persona ? ` (persona ${who.persona})` : ''}. Its instructions replace the shared Prompt persona. Click for details.`
-      : who.kind === 'persona'
-        ? `The shared Prompt persona ${who.name} answers${who.agent ? ' (this chat has no loadout of its own)' : ''}. Click for details.`
-        : 'Agent mode with no loadout: the default agent setup answers. Click to pick a loadout.';
-    items.push(`<button type="button" class="csl-item csl-who csl-who-${esc(who.kind)}" data-csl="panel-agent" title="${esc(title)}">${esc(label)}</button>`);
-  }
-  if (isAgentMode()) {
-    const policy = s.delegation_policy || 'explicit';
-    const info = DELEGATION_INFO[policy] || { short: policy, desc: '' };
-    items.push(`<button type="button" class="csl-item${policy === 'auto' ? ' csl-attn' : ''}" data-csl="panel-agent" title="${esc(`Delegation: ${info.desc} Click to change.`)}">Delegation: ${esc(info.short)}</button>`);
-  }
-  const model = currentModelLabel();
-  if (model) items.push(`<span class="csl-item csl-model" title="Model for this chat">${esc(model)}</span>`);
-  const ctx = state.context;
-  if (ctx && ctx.context_length) {
-    const pct = Math.round(Number(ctx.context_percent || 0));
-    const tone = pct >= 85 ? ' danger' : pct >= 70 ? ' warn' : '';
-    items.push(`<button type="button" class="csl-item csl-ctx${tone}" data-csl="context" title="${esc(`${ctx.used_tokens || 0} / ${ctx.context_length} tokens in context`)}"><span class="csl-meter"><i style="width:${Math.min(100, pct)}%"></i></span>${pct}%</button>`);
-  }
-  if (modesEnforced) items.push(`<button type="button" class="csl-item csl-approval csl-mode-${esc(mode)}" data-csl="mode-menu" title="${esc((MODE_INFO[mode]?.desc || '') + ' Click to change.')}">Approvals: ${esc(MODE_INFO[mode]?.label || mode)}</button>`);
-  if (s.workspace) items.push(`<span class="csl-item csl-workspace" title="${esc(`Workspace: ${s.workspace}`)}">${esc(basename(s.workspace))}</span>`);
-  const off = (s.disabled_tools || []).length;
-  const selected = s.tool_access === 'selected';
-  const toolsLabel = selected
-    ? `Loadout tools${off ? ` · ${off} off` : ''}`
-    : off ? `${off} tool${off === 1 ? '' : 's'} off` : 'All tools';
-  items.push(`<button type="button" class="csl-item${off || selected ? ' csl-attn' : ''}" data-csl="panel-tools" title="${selected ? 'This chat\'s loadout allows only the tools it names. Click to see them.' : 'Choose which tools this chat may use'}">${esc(toolsLabel)}</button>`);
-  const shell = d.shell_access || 'sandbox';
-  items.push(`<button type="button" class="csl-item${shell === 'host' ? ' csl-attn' : ''}" data-csl="panel-privacy" title="${esc(SHELL_INFO[shell]?.desc || '')} Click to change.">Shell: ${esc(SHELL_INFO[shell]?.short || shell)}</button>`);
-  const privateVault = s.private_vault_access === true;
-  items.push(`<button type="button" class="csl-item${privateVault ? ' csl-attn' : ''}" data-csl="panel-privacy" title="${privateVault ? 'Private vault excerpts may be sent to this chat\'s model endpoint. Click to review.' : 'Private vault access is off for this chat. Click to review.'}">${privateVault ? 'Private vault on' : 'Private vault off'}</button>`);
+  const summary = context && context.access && context.access.summary;
+  const links = [];
   if (d.parent_session && d.parent_session.id) {
-    const who = s.agent_profile ? `${s.agent_profile} · ` : '';
-    items.push(`<button type="button" class="csl-item csl-fork" data-csl="fork" data-id="${esc(d.parent_session.id)}" title="Sub-agent chat: open the chat that delegated this task">↳ ${esc(who)}from ${esc(d.parent_session.name || 'parent chat')}</button>`);
+    const from = s.agent_profile ? `${s.agent_profile} · ` : '';
+    links.push(`<button type="button" class="ctx-link" data-csl="fork" data-id="${esc(d.parent_session.id)}" title="Sub-agent chat: open the chat that delegated this task">↳ ${esc(from)}from ${esc(d.parent_session.name || 'parent chat')}</button>`);
   }
   if (d.forked_from && d.forked_from.id) {
-    items.push(`<button type="button" class="csl-item csl-fork" data-csl="fork" data-id="${esc(d.forked_from.id)}" title="Open the chat this was forked from">⫝ ${esc(d.forked_from.name || 'source chat')}</button>`);
+    links.push(`<button type="button" class="ctx-link" data-csl="fork" data-id="${esc(d.forked_from.id)}" title="Open the chat this was forked from">⫝ ${esc(d.forked_from.name || 'source chat')}</button>`);
   }
-  items.push('<span class="csl-spacer"></span>');
-  items.push('<button type="button" class="csl-item csl-gear" data-csl="panel" aria-label="Chat settings" title="Chat settings"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span>Settings</span></button>');
-  line.innerHTML = items.join('');
+  const accessHtml = summary
+    ? (modesEnforced
+      ? `<button type="button" class="ctx-access-btn csl-mode-${esc(mode)}" data-csl="mode-menu" title="${esc(((MODE_INFO[mode] || {}).desc || '') + ' Click to change.')}">${esc(summary)}</button>`
+      : `<span class="ctx-access-text">${esc(summary)}</span>`)
+    : '';
+  part(line, 'access').innerHTML = accessHtml + links.join('');
+  part(line, 'target').innerHTML = doc
+    ? `<span class="ctx-seg" role="radiogroup" aria-label="What this chat is about">${DOC_TARGETS.map(([key, label]) =>
+      `<button type="button" role="radio" aria-checked="${key === target}" class="ctx-seg-btn${key === target ? ' on' : ''}" data-csl="target" data-target="${key}" title="${esc(doc.title)}">${esc(label)}</button>`).join('')}</span>`
+    : '';
+  part(line, 'change').innerHTML = state.sessionId
+    ? '<button type="button" class="ctx-change-btn" data-csl="panel" title="Change who answers, approvals, tools and privacy for this chat">Change</button>'
+    : '';
+
+  // The answering agent's quick actions (agentActions.js owns the chips).
+  const qaAgent = who && who.kind === 'agent' ? who.loadout : '';
+  if (qaAgent !== state.quickActionsFor && window.agentActions?.renderQuickActions) {
+    state.quickActionsFor = qaAgent;
+    window.agentActions.renderQuickActions(line.querySelector('.ctx-quick-actions'), qaAgent)
+      .then(() => { if (state.quickActionsFor === qaAgent) render(); })
+      .catch(() => {});
+  }
+
+  const something = bits.length > 0 || links.length > 0 || !!doc
+    || MOVED_NODES.some(nodeShown) || !!line.querySelector('.ctx-quick-actions > *')
+    || !!(summary && accessIsCustom(d, s));
+  line.hidden = !something;
+  line.classList.toggle('ctx-no-access', !summary);
 }
 
 async function onLineClick(e) {
@@ -248,8 +327,16 @@ async function onLineClick(e) {
   else if (act === 'panel-privacy') togglePanel('privacy');
   else if (act === 'panel-agent') togglePanel('agent');
   else if (act === 'mode-menu') toggleModeMenu(b);
-  else if (act === 'context') document.getElementById('chat-context-pill')?.click();
+  else if (act === 'target') pickTarget(b.dataset.target);
   else if (act === 'fork') window.sessionModule?.selectSession?.(b.dataset.id);
+}
+
+/** The segmented control: remember the pick here at once, then save it on the chat. */
+function pickTarget(value) {
+  if (!DOC_TARGETS.some(([key]) => key === value)) return;
+  state.localTarget = value;
+  render();
+  if (state.sessionId) save({ doc_target: value });
 }
 
 // ── approval mode quick menu ──────────────────────────────────────────────
@@ -492,10 +579,6 @@ function save(patch, toast) {
 
 // ── wiring ────────────────────────────────────────────────────────────────
 function init() {
-  document.addEventListener('odysseus:context-usage', (e) => {
-    if (e.detail && e.detail.sessionId === state.sessionId) { state.context = e.detail; render(); }
-  });
-  document.addEventListener('odysseus:model-picked', () => setTimeout(render, 50));
   // A loadout applied or edited elsewhere (Agents menu, Control Room).
   document.addEventListener('odysseus:loadout-changed', () => {
     if (state.sessionId) api(`/api/session/${encodeURIComponent(state.sessionId)}/settings`).then((d) => { state.data = d; render(); renderPanel(); }).catch(() => {});
@@ -519,7 +602,8 @@ function init() {
     const sid = window.sessionModule?.getCurrentSessionId?.() || null;
     if (sid !== state.sessionId) { onSessionSwitch(sid); return; }
     const who = identity();
-    const key = `${isAgentMode()}:${who ? who.kind + ':' + who.name : ''}`;
+    const doc = openDoc();
+    const key = `${isAgentMode()}:${who ? who.kind + ':' + who.name : ''}:${doc ? doc.id + doc.title : ''}:${effectiveTarget()}:${MOVED_NODES.map(nodeShown).join('')}`;
     if (key !== lastWho) { lastWho = key; render(); renderPanel(); }
   };
   tick();
@@ -529,6 +613,13 @@ function init() {
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
 else init();
 
-const chatSettings = { onSessionSwitch, refresh: () => state.sessionId && onSessionSwitch(state.sessionId), render };
+/** The chat's project and open document, for quick-action placeholders. */
+function getContext() {
+  const doc = openDoc();
+  const ctx = (state.data && state.data.context) || {};
+  return { project: ctx.project || '', document: doc ? { id: doc.id, title: doc.title } : null };
+}
+
+const chatSettings = { onSessionSwitch, refresh: () => state.sessionId && onSessionSwitch(state.sessionId), render, docTarget, setDocTarget: pickTarget, getContext };
 window.chatSettingsModule = chatSettings;
 export default chatSettings;

@@ -68,6 +68,13 @@ def test_vault_list_fits_the_screen(live_app, live_page, width, theme):
     # load would otherwise restore over the local one.
     page.evaluate("([n, c]) => import('/static/js/theme.js').then(m => m.save(n, c))", [theme, colors])
     page.wait_for_function("t => document.documentElement.getAttribute('data-theme') === t", arg=theme)
+    # The preference goes out on a 200 ms timer. Reloading before it fires drops
+    # the write, the page restores the previous test's theme, and that theme then
+    # leaks into every later live test (a saved light theme turns the page style
+    # to Classic).
+    page.wait_for_function(
+        "async t => (await (await fetch('/api/prefs/theme', {credentials: 'same-origin'})).json())"
+        "?.value?.value?.name === t", arg=theme)
     page.reload()
     page.wait_for_function("t => document.documentElement.getAttribute('data-theme') === t", arg=theme)
     _open_vault(page)

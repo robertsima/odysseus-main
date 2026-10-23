@@ -12,6 +12,7 @@ import markdownModule from './markdown.js';
 import { makeWindowDraggable } from './windowDrag.js';
 import { langIcon } from './langIcons.js';
 import { registerMenuDismiss, dismissOrRemove } from './escMenuStack.js';
+import { createLibraryView } from './libraryView.js';
 
 // ── Injected references from documentModule ──
 let API_BASE = '';
@@ -1604,16 +1605,27 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
                Documents / Research / Archive) so the user sees ONE icon at
                the top representing the section they're in, with the tab
                strip below as sub-navigation. _switchLibTab() updates this. -->
+          <button type="button" class="lib-back-btn" id="doclib-back" hidden aria-label="Back to the Library">\u2039 Library</button>
           <h4 id="doclib-header-title"><span id="doclib-header-icon" style="vertical-align:-2px;margin-right:4px;display:inline-flex;"></span><span id="doclib-header-text">Library</span></h4>
+          <div class="lib-more" id="doclib-more">
+            <button type="button" class="lib-more-btn" id="doclib-more-btn" aria-haspopup="menu" aria-expanded="false">More <span aria-hidden="true">\u25be</span></button>
+            <div class="lib-more-menu" id="doclib-more-menu" role="menu" hidden>
+              <button type="button" role="menuitem" data-doclib-tab="chats">Chats</button>
+              <button type="button" role="menuitem" data-doclib-tab="research">Research</button>
+              <button type="button" role="menuitem" data-doclib-tab="archive">Archived</button>
+            </div>
+          </div>
           <button class="close-btn" id="doclib-close">\u2716</button>
         </div>
-        <div class="lib-tabs" id="doclib-lib-tabs" style="padding:0 10px;">
-          <button class="lib-tab" data-doclib-tab="chats"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>Chats</button>
-          <button class="lib-tab active" data-doclib-tab="documents"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>Documents</button>
-          <button class="lib-tab" data-doclib-tab="research"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-1px;margin-right:3px;"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>Research</button>
-          <button class="lib-tab" data-doclib-tab="archive"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px;"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>Archive</button>
+        <div class="lib-filters" id="doclib-filters" role="tablist" aria-label="Library filters">
+          <button type="button" class="lib-filter active" role="tab" data-lib-filter="all">All</button>
+          <button type="button" class="lib-filter" role="tab" data-lib-filter="notes">Notes</button>
+          <button type="button" class="lib-filter" role="tab" data-lib-filter="documents">Documents</button>
+          <button type="button" class="lib-filter" role="tab" data-lib-filter="files">Files</button>
+          <button type="button" class="lib-filter" role="tab" data-lib-filter="projects">Projects</button>
         </div>
         <div class="modal-body" style="display:flex;flex-direction:column;gap:10px;overflow:hidden;">
+          <div id="doclib-panel-all" data-doclib-panel="all" class="admin-card lib-all-panel" style="display:flex;flex:1;flex-direction:column;overflow:hidden;"></div>
           <div id="doclib-panel-chats" data-doclib-panel="chats" class="admin-card" style="display:none;flex:1;flex-direction:column;overflow:hidden;">
             <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px;">
               <h2 style="margin:0;padding:0;line-height:1;">Chats <span id="doclib-chats-stats" class="memory-count" style="font-size:0.6em;opacity:0.6;font-weight:normal"></span></h2>
@@ -1812,7 +1824,7 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     document.getElementById('doclib-close').addEventListener('click', closeLibrary);
 
     // Tab switching — Chats / Documents / Archive / Research
-    let _activeLibTab = (opts && opts.tab) || 'documents';
+    let _activeLibTab = (opts && opts.tab) || (opts && opts.import ? 'documents' : 'all');
     const _tabBtns = modal.querySelectorAll('[data-doclib-tab]');
     const _tabPanels = modal.querySelectorAll('[data-doclib-panel]');
 
@@ -1840,6 +1852,10 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
     // SVG markup + label for each tab — used to keep the modal header
     // in sync with whichever sub-tab the user is on.
     const _TAB_HEADERS = {
+      all: {
+        label: 'Library',
+        svg: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>',
+      },
       chats: {
         label: 'Chats',
         svg: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
@@ -1858,8 +1874,69 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
       },
     };
 
+    // ── Library "All" view: notes, documents, files and projects as cards ──
+    const _FILTER_KIND = { all: 'all', notes: 'note', files: 'file', projects: 'project' };
+    const _filterBtns = modal.querySelectorAll('[data-lib-filter]');
+    const _filtersRow = modal.querySelector('#doclib-filters');
+    const _backBtn = modal.querySelector('#doclib-back');
+    const _moreBtn = modal.querySelector('#doclib-more-btn');
+    const _moreMenu = modal.querySelector('#doclib-more-menu');
+    const _libView = createLibraryView({
+      api: API_BASE,
+      openDocument: (id) => { closeLibrary(); _loadDocument(id); },
+      openNote: (id) => {
+        closeLibrary();
+        import('./notes.js').then(m => (m.openNote || (m.default && m.default.openNote))(id)).catch(() => {});
+      },
+      openVaultFile: (path) => {
+        closeLibrary();
+        import('./notes.js').then(m => (m.openVaultFile || (m.default && m.default.openVaultFile))(path)).catch(() => {});
+      },
+      showMenu: (anchor, items) => _showLibDropdown(anchor, items),
+      toast: (msg) => { if (uiModule && uiModule.showToast) uiModule.showToast(msg); },
+      // An older server has no /api/library/*: fall back to today's Documents view.
+      onUnavailable: () => {
+        if (_filtersRow) _filtersRow.hidden = true;
+        if (_activeLibTab === 'all') _switchLibTab('documents');
+      },
+      onChange: () => _syncFilterChips(),
+    });
+    modal.querySelector('#doclib-panel-all').appendChild(_libView.el);
+
+    function _currentFilter() {
+      if (_activeLibTab === 'documents') return 'documents';
+      const k = _libView.kind;
+      return Object.keys(_FILTER_KIND).find(f => _FILTER_KIND[f] === k) || 'all';
+    }
+    function _syncFilterChips() {
+      const cur = _currentFilter();
+      _filterBtns.forEach(b => {
+        const on = b.dataset.libFilter === cur;
+        b.classList.toggle('active', on);
+        b.setAttribute('aria-selected', on ? 'true' : 'false');
+      });
+    }
+    _filterBtns.forEach(btn => btn.addEventListener('click', () => {
+      const f = btn.dataset.libFilter;
+      if (f === 'documents') { _switchLibTab('documents'); return; }
+      _libView.setKind(_FILTER_KIND[f]);
+      _switchLibTab('all');
+    }));
+    const _setMoreOpen = (open) => {
+      if (_moreMenu) _moreMenu.hidden = !open;
+      if (_moreBtn) _moreBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    };
+    if (_moreBtn) _moreBtn.addEventListener('click', (e) => { e.stopPropagation(); _setMoreOpen(_moreMenu.hidden); });
+    modal.addEventListener('click', (e) => { if (!e.target.closest('#doclib-more')) _setMoreOpen(false); });
+    if (_backBtn) _backBtn.addEventListener('click', () => _switchLibTab(_libView.unavailable ? 'documents' : 'all'));
+
     function _switchLibTab(tab) {
       _activeLibTab = tab;
+      _setMoreOpen(false);
+      const inFilters = tab === 'all' || tab === 'documents';
+      if (_filtersRow) _filtersRow.hidden = !inFilters || _libView.unavailable;
+      if (_backBtn) _backBtn.hidden = inFilters;
+      _syncFilterChips();
       _tabBtns.forEach(b => b.classList.toggle('active', b.dataset.doclibTab === tab));
       _tabPanels.forEach(p => {
         if (p.dataset.doclibPanel === tab) {
@@ -1876,7 +1953,8 @@ let _libraryArchivedView = false;   // Documents tab showing archived docs?
         if (ico) ico.innerHTML = hdr.svg;
         if (txt) txt.textContent = hdr.label;
       }
-      if (tab === 'chats') _renderLibChats();
+      if (tab === 'all') _libView.activate();
+      else if (tab === 'chats') _renderLibChats();
       else if (tab === 'archive') _renderLibArchive();
       else if (tab === 'research') _renderLibResearch();
     }

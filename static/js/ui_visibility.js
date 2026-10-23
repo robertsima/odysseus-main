@@ -16,8 +16,13 @@ export const UI_VIS_MAP = {
   'sidebar-search':      '#sidebar-search-btn',
   'sessions-section':   '#sessions-section',
   'email-section':       '#email-section, #rail-email',
-  'tools-section':       '#tools-section',
+  // Hides the Work, Agents and More groups together (header + every item).
+  'tools-section':       '.nav-group',
   // Per-tool entries pair the sidebar button with its rail launcher.
+  'tool-today':          '#tool-today-btn, #rail-today',
+  'tool-lotus':          '#tool-lotus-btn',
+  'tool-agents':         '#tool-agents-btn, #rail-agents',
+  'tool-workbench':      '#tool-workbench-btn, #rail-workbench',
   'tool-calendar':       '#tool-calendar-btn, #rail-calendar',
   'tool-compare':        '#tool-compare-btn, #rail-compare',
   'tool-cookbook':       '#tool-cookbook-btn, #rail-cookbook',
@@ -59,9 +64,9 @@ export const UI_VIS_DEFAULT_OFF = new Set(['text-emojis', 'chat-fullwidth']);
  * given saved state. Pure: no DOM, no localStorage — app.js applies the result.
  *
  * A key is visible when its stored value is not `false`, defaulting to on
- * unless it is in UI_VIS_DEFAULT_OFF. Per-tool entries also require the Tools
- * section to be on: hiding Tools hides every tool, mirroring the full sidebar
- * where the #tools-section container already hides them (the rail has no
+ * unless it is in UI_VIS_DEFAULT_OFF. Per-tool entries also require the
+ * navigation groups to be on: hiding them hides every tool, mirroring the full sidebar
+ * where the .nav-group containers already hide them (the rail has no
  * container, so this rule keeps it in sync).
  *
  * @param {Record<string, boolean>} state

@@ -5844,9 +5844,17 @@ async function openNote(noteId) {
   setTimeout(tryNext, 120);
 }
 
-const notesModule = { openPanel, closePanel, togglePanel, isPanelOpen, openNote, openNotes: openPanel, closeNotes: closePanel, isNotesOpen: isPanelOpen, refreshDueBadge };
+// Open a vault file by path in the Notes pane's vault editor (the Library's
+// "Edit" and "Open" for Markdown files).
+async function openVaultFile(path) {
+  if (!_open) openPanel();
+  await _setPanelMode('vault');
+  await _openVaultFile(path);
+}
+
+const notesModule = { openPanel, closePanel, togglePanel, isPanelOpen, openNote, openVaultFile, openNotes: openPanel, closeNotes: closePanel, isNotesOpen: isPanelOpen, refreshDueBadge };
 export default notesModule;
-export { openPanel as openNotes, closePanel as closeNotes, isPanelOpen as isNotesOpen, openNote };
+export { openPanel as openNotes, closePanel as closeNotes, isPanelOpen as isNotesOpen, openNote, openVaultFile };
 window.notesModule = notesModule;
 
 // Start reminder loop on module load (after a short delay so app loads first)

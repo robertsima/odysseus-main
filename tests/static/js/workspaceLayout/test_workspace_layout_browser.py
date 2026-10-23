@@ -83,14 +83,16 @@ def test_launch_model_default_catalog_and_custom(workspace_page):
     page.wait_for_function('!!window.agentsDashboard')
     page.evaluate("window.agentsDashboard.open()")
     page.locator('[data-ag="launch"]').click()
-    select = page.locator('#ag-model').locator('..').locator('select')
+    page.locator('.aa-adv summary').click()
+    model = page.locator('[data-aa-field="model"]')
+    select = model.locator('..').locator('select')
     select.select_option('qwen3@local')
-    assert page.locator('#ag-model').input_value() == 'qwen3@local'
+    assert model.input_value() == 'qwen3@local'
     select.select_option('__odysseus_custom_model__')
-    page.locator('#ag-model').fill('private/custom@endpoint')
-    assert page.locator('#ag-model').input_value() == 'private/custom@endpoint'
+    model.fill('private/custom@endpoint')
+    assert model.input_value() == 'private/custom@endpoint'
     select.select_option('')
-    assert page.locator('#ag-model').input_value() == ''
+    assert model.input_value() == ''
 
 
 def test_pointer_fullscreen_minimize_restore_and_observer_quiescence(workspace_page):

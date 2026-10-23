@@ -16,6 +16,7 @@
 
 import uiModule from './ui.js';
 import { mountLoadoutsEditor } from './agentLoadouts.js';
+import agentActions from './agentActions.js';
 import Modals from './modalManager.js';
 import { makeWindowDraggable } from './windowDrag.js';
 import { snapModalToZone } from './tileManager.js';
@@ -95,7 +96,7 @@ const state = {
   history: { items: [], total: 0, q: '', loading: false, error: '' },
   // The launch form's loadout and parent when a preset button or History row
   // chose them (null: the defaults in launchHtml).
-  launchProfile: null, launchParent: null,
+  launchProfile: null, launchSnap: null,
   // Saved loadouts left out because they no longer validate (the overview's
   // profile_problems), shown in the launch form instead of an empty picker.
   profileProblems: [],
@@ -444,7 +445,7 @@ function render() {
   const viewButtons = aside
     ? '<button type="button" class="wb-btn wb-btn-ghost" data-ag="fleet-view">← Fleet</button>'
     : '<button type="button" class="wb-btn wb-btn-ghost" data-ag="history-view" title="Every agent chat, however old">History</button><button type="button" class="wb-btn wb-btn-ghost" data-ag="archive-view">Archived</button><button type="button" class="wb-btn wb-btn-ghost" data-ag="loadouts-view" title="The reusable agent definitions chats and workers are based on">Loadouts</button>';
-  const headActions = `${viewButtons}<button type="button" class="wb-btn wb-btn-primary" data-ag="launch">Launch worker</button>${!aside && workbenchAvailable() ? '<button type="button" class="wb-btn wb-btn-ghost" data-ag="workbench" title="Repository changes, commits and PRs">Workbench</button>' : ''}`;
+  const headActions = `${viewButtons}<button type="button" class="wb-btn wb-btn-primary" data-ag="launch">Assign a task</button>${!aside && workbenchAvailable() ? '<button type="button" class="wb-btn wb-btn-ghost" data-ag="workbench" title="Repository changes, commits and PRs">Workbench</button>' : ''}`;
   const viewTitle = state.configOpen ? "This chat's settings" : state.loadoutsView ? 'Loadouts' : state.historyView ? 'Agent chats' : state.archiveView ? 'Archived agents' : '';
   // One header row. It used to carry a second window title ("Mission floor",
   // under a title bar already reading "Agent Control Room"), and an Expand
@@ -469,6 +470,7 @@ function render() {
       <section class="ag-detail wb-card" id="ag-detail"></section>
       ${state.launchOpen ? `<aside class="ag-launch wb-card" id="ag-launch">${launchHtml()}</aside>` : ''}
     </div>`}`;
+  if (state.launchOpen && !aside) mountLaunchSheet();
   if (state.historyView) bindHistorySearch();
   else if (state.loadoutsView) mountLoadouts();
   else if (!state.configOpen) renderDetail();
@@ -508,7 +510,7 @@ function historyHtml() {
       </div>
       <div class="ag-history-actions">
         ${isCurrentChat(c.id) ? '<span class="wb-hint">This chat</span>' : `<button type="button" class="wb-btn wb-btn-sm wb-btn-primary" data-ag="open-chat" data-sid="${esc(c.id)}">Continue</button>`}
-        ${c.profile ? `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="launch-preset" data-profile="${esc(c.profile)}" title="Launch a new worker with this loadout">New with ${esc(c.profile)}</button>` : ''}
+        ${c.profile ? agentActions.actionButtonsHtml(c.profile) : ''}
       </div>
     </li>`).join('');
   const body = h.error ? `<div class="wb-empty">${esc(h.error)}</div>`
@@ -652,7 +654,7 @@ function fleetHtml() {
     }<div class="ag-card-grid">${cards}</div></div>`;
   }).join('');
   if (html) return `${html}${pages > 1 ? `<nav class="ag-fleet-pages" aria-label="Fleet pages"><button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="fleet-page" data-page="${state.fleetPage - 1}"${state.fleetPage === 0 ? ' disabled' : ''}>← Newer</button><span>${state.fleetPage * FLEET_PAGE_SIZE + 1}–${Math.min(candidates.length, (state.fleetPage + 1) * FLEET_PAGE_SIZE)} of ${candidates.length}</span><button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="fleet-page" data-page="${state.fleetPage + 1}"${state.fleetPage >= pages - 1 ? ' disabled' : ''}>Older →</button></nav>` : ''}`;
-  if (!state.rows.length) return '<div class="wb-empty">Nothing is running. Send a chat a task, or launch a worker.</div>';
+  if (!state.rows.length) return '<div class="wb-empty">Nothing is running. Use Assign a task to start one.</div>';
   if (state.bucket !== 'all') {
     const label = (BUCKETS.find(([k]) => k === state.bucket) || [, ''])[1];
     return `<div class="wb-empty">Nothing in “${label}”. <button type="button" class="ag-inline-link" data-ag="bucket" data-bucket="all">Show all</button></div>`;
@@ -1169,28 +1171,36 @@ function lastProfile() {
   try { return localStorage.getItem(LAST_PROFILE_KEY) || ''; } catch (_) { return ''; }
 }
 function launchHtml() {
-  // Defaults the user would pick anyway: the loadout asked for (a preset
-  // button) or the one launched last, and the chat that is open as the one to
-  // report to. The parent used to default to whatever row was selected.
-  const wanted = state.launchProfile || lastProfile();
-  const profile = state.profiles.some((p) => p.name === wanted) ? wanted : (state.profiles[0]?.name || '');
-  const cur = window.sessionModule?.getCurrentSessionId?.();
-  const parent = state.launchParent ?? (state.chats.some((c) => c.id === cur) ? cur : '');
-  const opts = state.profiles.map((p) => `<option value="${esc(p.name)}"${p.name === profile ? ' selected' : ''}>${esc(p.name)}${p.description ? ` — ${esc(p.description)}` : ''}</option>`).join('');
-  const chats = state.chats.map((c) => `<option value="${esc(c.id)}"${c.id === parent ? ' selected' : ''}>${esc(c.name)}</option>`).join('');
-  const presets = state.profiles.slice(0, 8).map((p) => `<button type="button" class="wb-btn wb-btn-sm${p.name === profile ? ' wb-btn-primary' : ' wb-btn-ghost'}" data-ag="launch-preset" data-profile="${esc(p.name)}" title="${esc(p.description || p.name)}">${esc(p.name)}</button>`).join('');
+  // The Assign sheet (agentActions.js) is the one place a task is started. It
+  // mounts into the host below; the model, code folder and tools sit in its
+  // Advanced disclosure.
   const problems = state.profileProblems.length
     ? `<p class="wb-hint ag-launch-problem">Left out (no longer valid, fix in Settings › Agents): ${state.profileProblems.map((t) => esc(t)).join('; ')}</p>` : '';
-  return `<div class="ag-launch-head"><span class="wb-group-title">Launch a worker</span><button type="button" class="wb-icon-btn" data-ag="launch-close" aria-label="Close">✕</button></div>
-    ${presets ? `<div class="ag-launch-presets" role="group" aria-label="Loadouts">${presets}</div>` : ''}
-    <label class="ag-field"><span>Loadout</span><select id="ag-profile" class="wb-select"><option value="">No loadout (the reporting chat's model, all tools)</option>${opts}</select></label>
-    <label class="ag-field"><span>Task</span><textarea id="ag-task" class="wb-input ag-textarea" rows="5" placeholder="The whole task — the worker starts with no other context."></textarea></label>
-    <label class="ag-field"><span>Report to chat</span><select id="ag-parent" class="wb-select"><option value=""${parent ? '' : ' selected'}>None (standalone)</option>${chats}</select></label>
-    <label class="ag-field"><span>Model override</span><input id="ag-model" class="wb-input" placeholder="optional, e.g. qwen3 or model@endpoint"></label>
-    <label class="ag-field"><span>Workspace</span><input id="ag-workspace" class="wb-input" placeholder="optional checkout path; default: the parent chat's, or the one the task names"></label>
-    <div class="ag-launch-actions"><button type="button" class="wb-btn wb-btn-primary" data-ag="launch-go">Launch</button><span class="ag-launch-msg" id="ag-launch-msg" role="status"></span></div>
-    ${problems}
-    ${state.profiles.length ? '' : '<p class="wb-hint">No loadouts yet — define them under Settings › Agents.</p>'}`;
+  return `<div class="ag-launch-host" id="ag-launch-host"></div>${problems}
+    ${state.profiles.length ? '' : '<p class="wb-hint">No agents yet — define them under Settings › Agents.</p>'}`;
+}
+let launchSheet = null;
+function mountLaunchSheet() {
+  const host = $('ag-launch-host');
+  if (!host) return;
+  const snap = state.launchSnap || {};
+  const wanted = state.launchProfile || snap.agent || lastProfile();
+  const agent = state.profiles.some((p) => p.name === wanted) ? wanted : '';
+  const cur = window.sessionModule?.getCurrentSessionId?.() || '';
+  launchSheet = agentActions.mountAssignSheet(host, {
+    closable: true,
+    initial: { ...snap, agent, ...(snap.parent === undefined ? { parent: state.chats.some((c) => c.id === cur) ? cur : '' } : {}) },
+    onChange: (next) => { state.launchSnap = next; },
+    onClose: () => { state.launchOpen = false; state.launchProfile = null; state.launchSnap = null; render(); },
+    onStarted: async (r) => {
+      try { if (state.launchSnap?.agent) localStorage.setItem(LAST_PROFILE_KEY, state.launchSnap.agent); } catch (_) {}
+      state.launchOpen = false; state.launchProfile = null; state.launchSnap = null;
+      state.selected = r.session_id; state.events.delete(r.session_id);
+      state.bucket = 'all'; state.filter = ''; state.fleetPage = 0;
+      render();
+      await refresh();
+    },
+  });
 }
 
 function syncConfigVisibility(editor, draft) {
@@ -1434,6 +1444,7 @@ async function saveAgentConfig(row) {
 
 // ── actions ───────────────────────────────────────────────────────────────
 async function onClick(e) {
+  if (agentActions.handleActionClick(e, { openChat, onStarted: () => { scheduleRefresh(); } })) return;
   const row = e.target.closest('.ag-row[data-sid]');
   const b = e.target.closest('[data-ag]');
   if (!b && row) {
@@ -1507,25 +1518,21 @@ async function onClick(e) {
     }
     else if (act === 'history-more') { await loadHistoryList({ more: true }); }
     else if (act === 'launch' || act === 'launch-preset') {
-      // From any view: the form lives beside the fleet. A preset button keeps
-      // what was typed and sets the loadout.
-      const typed = $('ag-task')?.value || '';
-      const parentChoice = $('ag-parent')?.value;
+      // From any view: the sheet lives beside the fleet and keeps what was typed.
       if (act === 'launch-preset') {
         state.launchProfile = b.dataset.profile || null;
-        if (parentChoice !== undefined) state.launchParent = parentChoice;
+        if (state.launchSnap) state.launchSnap.agent = state.launchProfile || '';
       } else if (!state.launchOpen) {
-        state.launchProfile = null; state.launchParent = null;
+        state.launchProfile = null; state.launchSnap = null;
       }
       const leavingArchive = state.archiveView;
       state.configOpen = false; state.historyView = false; state.archiveView = false; state.loadoutsView = false;
       state.launchOpen = true;
       render();
-      const ta = $('ag-task');
-      if (ta) { ta.value = typed; ta.focus(); }
+      $('ag-launch')?.querySelector('[data-aa-field="task"]')?.focus();
       if (leavingArchive) await refresh();
     }
-    else if (act === 'launch-close') { state.launchOpen = false; state.launchProfile = null; state.launchParent = null; render(); }
+    else if (act === 'launch-close') { state.launchOpen = false; state.launchProfile = null; state.launchSnap = null; render(); }
     else if (act === 'bucket') {
       // Toggle: clicking the active bucket clears the filter, so the control
       // can always get you back to everything without a separate "All" chip.
@@ -1661,38 +1668,6 @@ async function onClick(e) {
     } else if (act === 'reply') {
       const ta = $('ag-reply'); const text = (ta?.value || '').trim(); if (!text) return;
       await sendToChat(b.dataset.sid, text, { open: true });
-    } else if (act === 'launch-go') {
-      const task = ($('ag-task')?.value || '').trim();
-      const profile = $('ag-profile')?.value || '';
-      const parent = $('ag-parent')?.value || '';
-      const model = ($('ag-model')?.value || '').trim();
-      const msg = $('ag-launch-msg');
-      if (!task) { if (msg) msg.textContent = 'Describe the task first.'; $('ag-task')?.focus(); return; }
-      const chosen = state.profiles.find((p) => p.name === profile);
-      if (!parent && !model && (!chosen || !chosen.model)) {
-        // The server would refuse this with an error worded for the tool API.
-        if (msg) msg.textContent = chosen
-          ? `${chosen.name} has no model of its own: pick a chat to report to (the worker uses its model) or enter a model override.`
-          : 'Choose a loadout, a chat to report to (the worker uses its model) or a model override.';
-        return;
-      }
-      b.disabled = true; if (msg) msg.textContent = 'Launching…';
-      try {
-        const r = await post('/api/agents/launch', { task, profile, parent_session: parent, model, workspace: $('ag-workspace')?.value || '' });
-        try { if (profile) localStorage.setItem(LAST_PROFILE_KEY, profile); } catch (_) {}
-        state.launchOpen = false; state.launchProfile = null; state.launchParent = null;
-        state.selected = r.session_id; state.events.delete(r.session_id);
-        state.bucket = 'all'; state.filter = ''; state.fleetPage = 0;
-        uiModule.showToast(`Worker started: ${r.session_name}`, 'success');
-        // A refresh redraws only the fleet and the detail pane, so the form
-        // used to stay on screen with its button disabled and "Launching…".
-        render();
-        await refresh();
-      } catch (err) {
-        if (msg) msg.textContent = err.message || String(err);
-        uiModule.showToast(`Worker not started: ${err.message || err}`, 'error');
-        b.disabled = false;
-      }
     }
   } catch (err) {
     uiModule.showToast(err.message || String(err), 'error');
@@ -1793,7 +1768,7 @@ function resetView(view = null) {
   state.archiveView = view === 'archive';
   state.historyView = view === 'history';
   state.launchOpen = view === 'launch';
-  state.launchProfile = null; state.launchParent = null;
+  state.launchProfile = null; state.launchSnap = null;
   state.bucket = 'all'; state.filter = ''; state.fleetPage = 0; state.detailTab = 'overview';
 }
 export function open({ focus = true, auto = false, select = null, view = null } = {}) {
