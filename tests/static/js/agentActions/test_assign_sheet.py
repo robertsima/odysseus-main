@@ -81,6 +81,31 @@ def test_menu_rows_offer_both_task_buttons_inside_the_menu(open_app, width, them
         assert box["x"] >= menu["left"] - 1 and box["x"] + box["width"] <= menu["right"] + 1
 
 
+@pytest.mark.parametrize("width,theme,style", [
+    (1440, ODYSSEUS_THEME, "agamemnon"), (1440, LIGHT_THEME, "classic"),
+    (390, ODYSSEUS_THEME, "agamemnon"), (390, LIGHT_THEME, "classic"),
+])
+def test_menu_rows_do_not_overlap_and_contain_their_text(open_app, width, theme, style):
+    """A two-line row (title plus description) used to spill into the row below it."""
+    page = open_app(width, theme=theme, style=style)
+    page.evaluate("document.body.classList.add('composer-agent-mode')")
+    page.evaluate("window.agentMenuModule.openMenu()")
+    page.wait_for_selector("#agent-menu .agent-menu-row")
+    settle(page, "#agent-menu")
+    rows = page.evaluate("""() => [...document.querySelectorAll(
+        '#agent-menu .agent-menu-loadout, #agent-menu .agent-menu-row, #agent-menu [data-agent-action]')]
+      .map(el => {
+        const r = el.getBoundingClientRect();
+        const lines = [...el.querySelectorAll('.agent-menu-text > *')].map(c => c.getBoundingClientRect().bottom);
+        return {name: el.textContent.trim().slice(0, 30), top: r.top, bottom: r.bottom, text: Math.max(0, ...lines)};
+      })""")
+    assert len(rows) >= 5, rows
+    for a, b in zip(rows, rows[1:]):
+        assert a["bottom"] <= b["top"] + 0.5, (a, b)
+    for r in rows:
+        assert r["text"] <= r["bottom"] + 0.5, r
+
+
 @pytest.mark.parametrize("width,theme,style", [(1440, ODYSSEUS_THEME, "agamemnon"), (1440, LIGHT_THEME, "classic"), (390, ODYSSEUS_THEME, "classic")])
 def test_panel_sheet_fits(open_app, width, theme, style):
     from tests.helpers.static_app import open_agents
