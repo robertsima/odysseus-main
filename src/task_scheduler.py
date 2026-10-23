@@ -1189,7 +1189,7 @@ class TaskScheduler:
         await asyncio.sleep(30)
         from src.builtin_actions import action_ping_notes, TaskNoop
         while self._running:
-            owners = self._known_task_owners()
+            owners = await asyncio.to_thread(self._known_task_owners)
             for ow in (owners or [""]):
                 try:
                     await action_ping_notes(owner=ow)
@@ -1231,7 +1231,7 @@ class TaskScheduler:
         await asyncio.sleep(90)
         from src.builtin_actions import action_ping_events, TaskNoop
         while self._running:
-            owners = self._known_task_owners()
+            owners = await asyncio.to_thread(self._known_task_owners)
             for ow in (owners or [""]):
                 try:
                     await action_ping_events(owner=ow)

@@ -16,6 +16,7 @@ cross-site requests are refused.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
@@ -117,21 +118,25 @@ def setup_publish_approval_routes(session_manager=None) -> APIRouter:
         user = _user(request)
         from src.agent_worktree import approval as approval_mod
 
-        rows = []
-        for rec in approval_mod.list_requests():
-            if not _can_see(request, user, rec):
-                continue
-            if status == "open" and rec.get("status") not in ("pending", "granted"):
-                continue
-            if session_id and session_id not in _lineage(rec.get("session_id")):
-                continue
-            rows.append({**rec, "can_decide": _can_decide(request, user, rec)})
-        return {"requests": rows}
+        def _collect() -> List[Dict[str, Any]]:
+            # Reads every request file (slow on a NAS): off the event loop.
+            rows = []
+            for rec in approval_mod.list_requests():
+                if not _can_see(request, user, rec):
+                    continue
+                if status == "open" and rec.get("status") not in ("pending", "granted"):
+                    continue
+                if session_id and session_id not in _lineage(rec.get("session_id")):
+                    continue
+                rows.append({**rec, "can_decide": _can_decide(request, user, rec)})
+            return rows
+
+        return {"requests": await asyncio.to_thread(_collect)}
 
     @router.get("/requests/{request_id}")
     async def show_request(request: Request, request_id: str) -> Dict[str, Any]:
         user = _user(request)
-        rec = _load(request_id)
+        rec = await asyncio.to_thread(_load, request_id)
         if not _can_see(request, user, rec):
             raise HTTPException(404, "No such publish request")
         from src.agent_worktree import service
@@ -153,7 +158,7 @@ def setup_publish_approval_routes(session_manager=None) -> APIRouter:
     async def approve(request: Request, request_id: str) -> Dict[str, Any]:
         user = _user(request)
         _same_origin(request)
-        rec = _load(request_id)
+        rec = await asyncio.to_thread(_load, request_id)
         if not _can_see(request, user, rec):
             raise HTTPException(404, "No such publish request")
         if not _can_decide(request, user, rec):
@@ -175,7 +180,7 @@ def setup_publish_approval_routes(session_manager=None) -> APIRouter:
             from src.agent_worktree import approval as approval_mod
 
             try:
-                spent = approval_mod.get_request(request_id).get("status") == approval_mod.STATUS_FAILED
+                spent = (await asyncio.to_thread(approval_mod.get_request, request_id)).get("status") == approval_mod.STATUS_FAILED
             except approval_mod.ApprovalError:
                 spent = False
             if spent:
@@ -210,7 +215,7 @@ def setup_publish_approval_routes(session_manager=None) -> APIRouter:
     async def reject(request: Request, request_id: str) -> Dict[str, Any]:
         user = _user(request)
         _same_origin(request)
-        rec = _load(request_id)
+        rec = await asyncio.to_thread(_load, request_id)
         if not _can_see(request, user, rec):
             raise HTTPException(404, "No such publish request")
         if not _can_decide(request, user, rec):
@@ -218,7 +223,7 @@ def setup_publish_approval_routes(session_manager=None) -> APIRouter:
         from src.agent_worktree import approval as approval_mod
 
         try:
-            view = approval_mod.revoke(request_id)
+            view = await asyncio.to_thread(approval_mod.revoke, request_id)
         except approval_mod.ApprovalError as exc:
             raise HTTPException(409, str(exc))
         logger.info("publish rejected in the UI id=%s by=%s", request_id, user)

@@ -1856,7 +1856,8 @@ async def action_daily_brief(owner: str, **kwargs) -> Tuple[str, bool]:
                 ev_q = owner_filter(ev_q, CalendarCal, owner, include_shared=_allow_null)
             events = ev_q.order_by(CalendarEvent.dtstart).all()
             # ----- Notes: file-backed vault notes, owner-scoped -----
-            notes = STORE.list(owner or None, archived=False, allow_private=True)
+            import asyncio as _aio
+            notes = await _aio.to_thread(STORE.list, owner or None, archived=False, allow_private=True)
         finally:
             db.close()
 
@@ -2163,6 +2164,7 @@ async def action_ping_notes(owner: str, **kwargs) -> Tuple[str, bool]:
         import json as _json
         from datetime import datetime as _dt, timezone as _tz, timedelta as _td
         from pathlib import Path as _P
+        import asyncio
         from src.notes_store import STORE
 
         # Per-owner state file so cache-pruning doesn't cross-delete other
@@ -2170,16 +2172,20 @@ async def action_ping_notes(owner: str, **kwargs) -> Tuple[str, bool]:
         # single-user install (empty owner) doesn't lose its history.
         _owner_slug = "".join(c if (c.isalnum() or c in "-_.@") else "_" for c in (owner or "default"))
         STATE = _P(DATA_DIR) / f"note_pings_{_owner_slug}.json"
-        STATE.parent.mkdir(parents=True, exist_ok=True)
         # One-time migration: if legacy global file exists and per-owner file
         # doesn't, seed from global (entries for OTHER owners still get pruned
         # on their first run — acceptable, prevents silent loss).
         _legacy = _P(DATA_DIR) / "note_pings.json"
-        if _legacy.exists() and not STATE.exists():
-            try:
-                STATE.write_text(_legacy.read_text(encoding="utf-8"), encoding="utf-8")
-            except Exception:
-                pass
+
+        def _prepare_state():
+            STATE.parent.mkdir(parents=True, exist_ok=True)
+            if _legacy.exists() and not STATE.exists():
+                try:
+                    STATE.write_text(_legacy.read_text(encoding="utf-8"), encoding="utf-8")
+                except Exception:
+                    pass
+
+        await asyncio.to_thread(_prepare_state)
         # Scanner ticks every 60s in _note_pings_loop. 90s window guarantees
         # every note's due time lands inside at least one tick's window.
         WINDOW_SEC = 90
@@ -2202,12 +2208,15 @@ async def action_ping_notes(owner: str, **kwargs) -> Tuple[str, bool]:
                 return None
 
         try:
-            cache = _json.loads(STATE.read_text(encoding="utf-8")) if STATE.exists() else {}
+            cache = await asyncio.to_thread(
+                lambda: _json.loads(STATE.read_text(encoding="utf-8")) if STATE.exists() else {})
         except Exception:
             cache = {}
 
         if True:
-            notes = [n for n in STORE.list(owner or None, archived=False, allow_private=True) if n.due_date]
+            # Reads and realpaths every note: seconds on a NAS, so not on the loop.
+            notes = [n for n in await asyncio.to_thread(
+                STORE.list, owner or None, archived=False, allow_private=True) if n.due_date]
             if not notes:
                 raise TaskNoop("no notes with due dates")
 
@@ -2270,7 +2279,7 @@ async def action_ping_notes(owner: str, **kwargs) -> Tuple[str, bool]:
                 cache.pop(stale, None)
 
             try:
-                STATE.write_text(_json.dumps(cache), encoding="utf-8")
+                await asyncio.to_thread(STATE.write_text, _json.dumps(cache), encoding="utf-8")
             except Exception as e:
                 logger.warning(f"ping_notes: cache write failed: {e}")
 
