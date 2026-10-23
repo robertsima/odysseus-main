@@ -10,6 +10,7 @@ import uuid
 from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, HTTPException, Query, Request, UploadFile, File, Depends
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from src.request_models import DirectoryRequest
 from core.constants import BASE_DIR, PERSONAL_DIR, PERSONAL_UPLOADS_DIR
@@ -180,6 +181,41 @@ def rename_personal_upload_owner(
     }
 
 
+# Non-Markdown files the vault browser lists. The person can open or download
+# them but never edit them; the Markdown editor refuses everything but .md.
+_VAULT_MARKDOWN_EXTS = (".md", ".markdown")
+_VAULT_IMAGE_TYPES = {
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".gif": "image/gif", ".webp": "image/webp",
+}
+_VAULT_BINARY_TYPES = {
+    ".pdf": "application/pdf",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    **_VAULT_IMAGE_TYPES,
+}
+# Other types retrieval already extracts (PersonalDocsConfig.DEFAULT_EXTENSIONS)
+# that are not plain text: listed as "other", download only.
+_VAULT_OTHER_EXTS = (".pptx", ".xlsx", ".xls", ".epub")
+
+
+def _vault_file_kind(name: str) -> str | None:
+    """markdown / pdf / docx / image / other for a listable file, else None."""
+    if name.startswith(("~$", ".")):
+        return None
+    ext = os.path.splitext(name)[1].lower()
+    if ext in _VAULT_MARKDOWN_EXTS:
+        return "markdown"
+    if ext == ".pdf":
+        return "pdf"
+    if ext == ".docx":
+        return "docx"
+    if ext in _VAULT_IMAGE_TYPES:
+        return "image"
+    if ext in _VAULT_OTHER_EXTS:
+        return "other"
+    return None
+
+
 def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
     """
     Setup personal documents related routes.
@@ -291,7 +327,9 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
             raise HTTPException(404, "Configured vault directory is not mounted or does not exist")
         return root
 
-    def _resolve_vault_file(relative_path: str, *, must_exist: bool = True) -> Tuple[str, str]:
+    def _resolve_vault_file(
+        relative_path: str, *, must_exist: bool = True, any_listed_kind: bool = False
+    ) -> Tuple[str, str]:
         """Resolve a human-selected Markdown file inside the active vault.
 
         ``must_exist=False`` resolves a note about to be created: every path
@@ -312,7 +350,12 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
                 if any(ch in part for ch in '<>:"|?*'):
                     raise HTTPException(400, f"{part!r} contains a character file names cannot use")
         rel = "/".join(parts)
-        if os.path.splitext(rel)[1].lower() not in (".md", ".markdown"):
+        if any_listed_kind:
+            # Raw download/preview: any file the tree lists, never the editor's
+            # Markdown-only rule relaxed for writes.
+            if _vault_file_kind(parts[-1]) is None or any(p.startswith(".") for p in parts):
+                raise HTTPException(400, "This vault file type cannot be opened here")
+        elif os.path.splitext(rel)[1].lower() not in _VAULT_MARKDOWN_EXTS:
             raise HTTPException(400, "Only Markdown vault files can be edited")
         root = _vault_root()
         target = os.path.realpath(os.path.join(root, *parts))
@@ -446,6 +489,15 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
             "policy_scope": "llm_only",
         }
 
+    def _vault_binary_policy(path: str) -> Dict[str, Any]:
+        from src.rag_sensitivity import path_is_readonly, resolve_sensitivity
+
+        return {
+            "sensitivity": resolve_sensitivity(path),
+            "readonly": path_is_readonly(path),
+            "policy_scope": "llm_only",
+        }
+
     def _vault_tree_node(directory: str, rel_dir: str = "") -> Dict[str, Any]:
         children: List[Dict[str, Any]] = []
         try:
@@ -467,7 +519,8 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
                 continue
             if not entry.is_file(follow_symlinks=False):
                 continue
-            if os.path.splitext(entry.name)[1].lower() not in (".md", ".markdown"):
+            kind = _vault_file_kind(entry.name)
+            if kind is None:
                 continue
             try:
                 stat = entry.stat(follow_symlinks=False)
@@ -479,7 +532,8 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
                 "path": rel.replace("\\", "/"),
                 "size": stat.st_size,
                 "modified": stat.st_mtime,
-                **_vault_file_policy(entry.path),
+                "kind": kind,
+                **(_vault_file_policy(entry.path) if kind == "markdown" else _vault_binary_policy(entry.path)),
             })
         return {
             "type": "directory",
@@ -538,7 +592,7 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
     def api_vault_tree(
         owner: str = Depends(_require_human_user),
     ):
-        """Return every Markdown file in the active vault for the human UI."""
+        """Return every listable file (Markdown, PDF, Word, images) in the vault for the human UI."""
         root = _vault_root()
         tree = _vault_tree_node(root)
         write = _vault_write_status()
@@ -576,6 +630,32 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
             "modified": os.path.getmtime(target),
             **_vault_file_policy(target),
         }
+
+    @router.get("/vault/raw")
+    def api_vault_raw(
+        path: str = Query(...),
+        download: bool = Query(False),
+        owner: str = Depends(_require_human_user),
+    ):
+        """Serve a listed vault file as-is for preview or download.
+
+        Same confinement as the Markdown read route (vault-relative, no `..`,
+        realpath inside the vault). Those labels constrain agents, not the
+        signed-in human, so no extra sensitivity gate applies here either.
+        Only PDFs and raster images may render inline; everything else is an
+        attachment, and `nosniff` stops a browser guessing a different type.
+        """
+        target, rel = _resolve_vault_file(path, any_listed_kind=True)
+        ext = os.path.splitext(target)[1].lower()
+        media_type = _VAULT_BINARY_TYPES.get(ext, "application/octet-stream")
+        inline = not download and ext in (".pdf", *_VAULT_IMAGE_TYPES)
+        return FileResponse(
+            target,
+            media_type=media_type,
+            filename=os.path.basename(rel),
+            content_disposition_type="inline" if inline else "attachment",
+            headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store"},
+        )
 
     @router.put("/vault/file")
     def update_vault_file(
