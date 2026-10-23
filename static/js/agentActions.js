@@ -178,6 +178,8 @@ function sheetHtml(st, agents) {
     <p class="aa-summary" data-aa-part="summary" aria-live="polite"></p>
     <div class="aa-blocker" data-aa-part="blocker" role="alert" hidden></div>
     <p class="aa-applied" data-aa-part="applied" hidden></p>
+    <label class="aa-field aa-parent"><span>Result returns to</span>
+      <select class="aa-input" data-aa-field="parent"><option value="">No chat (stand-alone)</option>${chats}</select></label>
     <p class="aa-return" data-aa-part="return"></p>
     <details class="aa-adv"${st.advancedOpen ? ' open' : ''}>
       <summary>Advanced</summary>
@@ -186,8 +188,6 @@ function sheetHtml(st, agents) {
           <input class="aa-input" data-aa-field="model" data-model-override-control value="${esc(st.model)}" placeholder="optional, e.g. qwen3 or model@endpoint"></label>
         <label class="aa-field"><span>Code folder</span>
           <input class="aa-input" data-aa-field="workspace" value="${esc(st.workspace)}" placeholder="optional; the chat's folder, or the one the task names"></label>
-        <label class="aa-field"><span>Send the result to</span>
-          <select class="aa-input" data-aa-field="parent"><option value="">No chat (stand-alone)</option>${chats}</select></label>
         <div class="aa-field" data-aa-part="tools"></div>
       </div>
     </details>
@@ -419,7 +419,8 @@ export function mountAssignSheet(container, opts = {}) {
       }
       if (!r.ok) { say(errorText(r, 'The task was not assigned.')); return; }
       say('');
-      toast(`Task assigned${st.agent ? ` to ${st.agent}` : ''}. Its result returns to this chat.`, 'success');
+      const back = parent ? parentName(parent) : '';
+      toast(`Task assigned${st.agent ? ` to ${st.agent}` : ''}. ${parent ? `Its result returns to ${back ? `“${back}”` : 'this chat'}.` : 'Its result stays in its own chat.'}`, 'success');
       if (typeof opts.onStarted === 'function') opts.onStarted(r.body || {});
     } catch (err) {
       say(err && err.message ? err.message : 'The task was not assigned.');
