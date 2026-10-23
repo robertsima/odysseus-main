@@ -52,6 +52,8 @@ def test_pdf_entry_previews_without_opening_the_editor(live_app, live_page):
     assert page.locator("#vault-file-editor").count() == 0
     tab.close()
     with page.expect_download() as dl:
+        # With a pointer the button shows when the row is hovered.
+        page.hover('[data-vault-asset="Projects/Acme/Agreements/msa.docx"]')
         page.click('[data-vault-download="Projects/Acme/Agreements/msa.docx"]')
     assert dl.value.suggested_filename == "msa.docx"
 
@@ -77,7 +79,34 @@ def test_vault_list_fits_the_screen(live_app, live_page, width, theme):
         " return [document.documentElement.scrollWidth - innerWidth, b.scrollWidth - b.clientWidth]; }"
     )
     assert overflow[0] <= 0 and overflow[1] <= 0, overflow
+    # The panel and everything in it start inside the viewport. The first-open
+    # hint used to sit pane-relative far to the right and scroll the clipped
+    # pane sideways, cutting off the title and the left of the tree.
+    box = pane.bounding_box()
+    assert box["x"] >= 0 and box["x"] + box["width"] <= width + 1, box
+    assert page.evaluate("document.getElementById('notes-pane').scrollLeft") == 0
+    assert page.locator("#notes-pane .vault-tree-pane").bounding_box()["x"] >= box["x"] - 1
+    hint = page.locator("#notes-first-open-hint")
+    if hint.count():
+        hb = hint.bounding_box()
+        assert hb["x"] >= 0 and hb["x"] + hb["width"] <= width + 1, hb
+    # Names win over the badge and the download button.
+    for name in ("msa.pdf", "msa.docx"):
+        label = page.locator(f'[data-vault-asset$="/{name}"] > span').first
+        clipped = label.evaluate("e => e.scrollWidth > e.clientWidth")
+        assert not clipped, f"{name} is truncated"
     shots = os.environ.get("ODY_VAULT_SHOTS")
     if shots:
         Path(shots).mkdir(parents=True, exist_ok=True)
-        page.screenshot(path=str(Path(shots) / f"vault-files-{width}-{theme}.png"))
+        page.screenshot(path=str(Path(shots) / f"vault-files-{width}-{theme}-v2.png"))
+
+
+def test_download_button_is_reachable_by_keyboard(live_app, live_page):
+    _seed(live_app)
+    page = live_page(1440)
+    _open_vault(page)
+    button = page.locator('[data-vault-download="Projects/Acme/Agreements/msa.pdf"]')
+    page.locator('[data-vault-asset="Projects/Acme/Agreements/msa.pdf"]').focus()
+    page.keyboard.press("Tab")
+    assert page.evaluate("document.activeElement.dataset.vaultDownload") == "Projects/Acme/Agreements/msa.pdf"
+    expect(button).to_have_css("opacity", "1")  # it fades in over 80 ms

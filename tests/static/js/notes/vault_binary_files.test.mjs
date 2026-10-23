@@ -59,7 +59,8 @@ test('clicking a PDF opens the raw file in a new tab and not the Markdown editor
   await openVault();
   const row = document.querySelector('[data-vault-asset="Agreements/msa.pdf"]');
   assert.ok(row, 'the PDF is listed');
-  assert.match(row.textContent, /PDF/);
+  assert.equal(row.dataset.vaultKind, 'pdf');
+  assert.equal(row.closest('.vault-asset-row').querySelector('.vault-kind-badge').textContent, 'PDF');
   row.click();
   assert.equal(opened.length, 1);
   assert.match(opened[0][0], /\/api\/personal\/vault\/raw\?path=Agreements%2Fmsa\.pdf$/);

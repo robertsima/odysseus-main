@@ -114,8 +114,14 @@ function _showNotesFirstOpenHint(pane) {
   const place = () => {
     const r = pane.getBoundingClientRect();
     const hw = hint.offsetWidth || 260;
-    hint.style.top = Math.max(12, r.top + 58) + 'px';
-    hint.style.left = Math.min(window.innerWidth - hw - 12, Math.max(12, r.left + 18)) + 'px';
+    // A transformed pane becomes the containing block of its position:fixed
+    // children, so viewport coordinates must be made pane-relative or the
+    // hint lands far to the right and scrolls the clipped pane sideways.
+    const inPane = getComputedStyle(pane).transform !== 'none';
+    const originX = inPane ? r.left : 0;
+    const originY = inPane ? r.top : 0;
+    hint.style.top = (Math.max(12, r.top + 58) - originY) + 'px';
+    hint.style.left = (Math.min(window.innerWidth - hw - 12, Math.max(12, r.left + 18)) - originX) + 'px';
   };
   const close = () => {
     window.removeEventListener('resize', place);
