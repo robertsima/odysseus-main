@@ -6128,7 +6128,7 @@ const COMMANDS = {
   agents: {
     alias: ['fleet', 'dashboard'],
     category: 'Agent',
-    help: 'Open the Agents dashboard (every running chat and worker)',
+    help: 'Open Phalanx: your agent conversations and the tasks they assigned',
     handler: async () => { window.agentsDashboard?.open?.(); return true; },
     usage: '/agents'
   },
