@@ -238,6 +238,9 @@ html[data-style="agamemnon"] #workbench-modal .workbench-modal-body>.wb-tabs{dis
 html[data-style="agamemnon"] #workbench-modal .workbench-modal-body>.wb-panel{position:relative;box-sizing:border-box;padding:20px;background:var(--ag-panel);border:2px solid var(--ag-border-strong);border-radius:0}
 html[data-style="agamemnon"] #workbench-modal .workbench-modal-body>.wb-panel[data-wb-panel="activity"]{padding:0;background:transparent;border:0}
 html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-body>.wb-panel{flex:1 0 auto;min-height:380px}
+/* Changes, Commits and PRs fill the window and scroll their lists inside, as in Classic; only Activity grows with its content. */
+html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-body>.wb-panel:not([data-wb-panel="activity"]):not(.hidden){flex:1 1 0;min-height:380px}
+html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-body>.wb-tabs{flex:0 0 auto}
 html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .wb-activity{min-height:180px;max-height:500px;overflow:auto}
 html[data-style="agamemnon"] .wb-panel[data-wb-panel="activity"]::after{content:none!important}
 /* Docking rearranges the same Activity panel without turning every readout
