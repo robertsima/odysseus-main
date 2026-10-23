@@ -427,7 +427,7 @@ html[data-style] .sidebar.right-side .sidebar-brand{gap:10px;padding:0}
 #workbench-modal .wb-editor .wb-hint{padding:0;overflow-wrap:anywhere}
 #workbench-modal .wb-editor-text{flex:1;min-height:80px;width:100%;box-sizing:border-box;resize:vertical;background:var(--bg);border:1px solid var(--border);color:var(--fg);padding:12px;font:12px/1.55 ui-monospace,monospace;tab-size:2}
 #workbench-modal .wb-editor-text:focus-visible{outline:2px solid var(--red);outline-offset:-2px}
-#workbench-modal .wb-editor-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}
+#workbench-modal .wb-editor-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap;position:sticky;bottom:0;z-index:2;padding:6px 0;background:var(--panel)}
 #workbench-modal #wb-editor-status{flex:1;min-width:120px;overflow-wrap:anywhere;color:var(--wb-muted)}
 @container wbpanel (max-width:610px){#workbench-modal .wb-branch-picker{width:100%}#workbench-modal .wb-repo-select{flex:1;max-width:100%}}
 /* Let all four views remain reachable even in a hand-resized dock. */

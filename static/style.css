@@ -42512,7 +42512,7 @@ body.theme-frosted .modal {
 .wb-notice p { margin: 0; }
 .wb-notice ul { margin: 0; padding-left: 18px; color: var(--wb-muted); }
 @container wbpanel (max-width: 720px) {
-  .wb-split { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(160px, 45%) minmax(0, 1fr); }
+  .wb-split { grid-template-columns: minmax(0, 1fr); grid-template-rows: fit-content(45%) minmax(0, 1fr); }
   .wb-repo-select, .wb-ctx-chip { max-width: 100%; }
   .wb-base { width: 150px; }
 }
