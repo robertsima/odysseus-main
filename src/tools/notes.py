@@ -4,6 +4,7 @@ Extracted from tool_implementations.py as part of slice 1 (#4082/#4071).
 Holds the manage_notes tool (notes + checklists CRUD).
 ``src.tool_implementations`` re-exports these for backward compatibility.
 """
+import asyncio
 import json
 import logging
 import re
@@ -91,7 +92,7 @@ async def do_manage_notes(
             if label_filter.lower() == "default":
                 label_filter = ""
             show_archived = args.get("archived", False)
-            notes = _store_list(archived=bool(show_archived), label=label_filter or None)
+            notes = await asyncio.to_thread(_store_list, archived=bool(show_archived), label=label_filter or None)
             if action in ("search", "find"):
                 query = str(
                     args.get("query")
@@ -117,7 +118,7 @@ async def do_manage_notes(
 
         elif action == "view":
             note_id = args.get("id", "")
-            note = _note_by_prefix(note_id)
+            note = await asyncio.to_thread(_note_by_prefix, note_id)
             if not note:
                 return {"error": "Note not found", "exit_code": 1}
             return {"results": _format_note_list([note]), "exit_code": 0}
@@ -191,7 +192,7 @@ async def do_manage_notes(
                 # also creates a separate note reminder for the same title/time,
                 # keep the existing note so the user gets only one dispatch.
                 target_title = _norm_note_title(title)
-                for existing in _store_list(archived=False)[:25]:
+                for existing in (await asyncio.to_thread(_store_list, archived=False))[:25]:
                     if existing.due_date != due_iso:
                         continue
                     if _norm_note_title(existing.title or "") == target_title:
@@ -243,7 +244,7 @@ async def do_manage_notes(
 
         elif action == "update":
             note_id = args.get("id", "")
-            note = _note_by_prefix(note_id)
+            note = await asyncio.to_thread(_note_by_prefix, note_id)
             if not note:
                 return {"error": "Note not found", "exit_code": 1}
             missing_id = reserve_upload_references(
@@ -298,7 +299,7 @@ async def do_manage_notes(
 
         elif action == "delete":
             note_id = args.get("id", "")
-            note = _note_by_prefix(note_id)
+            note = await asyncio.to_thread(_note_by_prefix, note_id)
             if not note:
                 return {"error": "Note not found", "exit_code": 1}
             title = note.title
@@ -308,7 +309,7 @@ async def do_manage_notes(
         elif action == "toggle_item":
             note_id = args.get("id", "")
             index = args.get("index", 0)
-            note = _note_by_prefix(note_id)
+            note = await asyncio.to_thread(_note_by_prefix, note_id)
             if not note:
                 return {"error": "Note not found", "exit_code": 1}
             if not note.items:

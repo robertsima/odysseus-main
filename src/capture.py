@@ -473,7 +473,7 @@ async def _do_note(owner: str, plan: Dict[str, Any], *, retry: bool, actor: str,
     if due_text:
         when = rules.resolve_phrase(due_text, _now_local())
         due_iso = _aware_iso(_reminder_local(when)) if when else due_text
-    existing = _find_note(owner, title, due_iso)
+    existing = await asyncio.to_thread(_find_note, owner, title, due_iso)
     if existing is not None:
         return _ok("duplicate", "note", existing.id, f"/#open=notes&note={existing.id}", plan, due=due_iso)
     args: Dict[str, Any] = {"action": "add", "title": title}
