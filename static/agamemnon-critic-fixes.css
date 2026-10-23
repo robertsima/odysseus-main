@@ -67,6 +67,8 @@ html[data-style="classic"] #agents-dashboard .ag-appearance-option:has(input:che
 html[data-style="classic"] #close-agents-dashboard{display:inline-flex;align-items:center;justify-content:center;flex:0 0 32px;width:32px;height:32px;margin:0;border:1px solid var(--border);background:var(--panel);color:var(--fg);opacity:1;font-size:0;line-height:1;cursor:pointer}
 html[data-style="classic"] #close-agents-dashboard:focus-visible{outline:3px solid var(--fg);outline-offset:2px}
 html[data-style="classic"] .ag-fleet-compact .ag-card-actions{opacity:1;gap:3px}
+/* Up, Down and Open need more than the 60px column the shared rule gives the actions. */
+html[data-style="classic"] #agents-dashboard .ag-fleet-compact .ag-bot-card{grid-template-columns:31px minmax(0,1fr) auto}
 html[data-style="classic"] .ag-fleet-compact .ag-card-actions .wb-icon-btn{box-sizing:border-box;min-width:28px;min-height:28px;padding:2px;border:1px solid var(--border);background:var(--panel);color:var(--fg);font-size:11px}
 html[data-style="classic"] .ag-fleet-compact .ag-card-actions .wb-icon-btn:focus-visible{outline:2px solid var(--fg);outline-offset:1px}
 /* Desktop controls should not require precision taps. Radio inputs are
@@ -95,3 +97,8 @@ html[data-style="agamemnon"] .ag-run-detail section+section{margin-top:28px;padd
 html[data-style="agamemnon"] .ag-run-detail p,html[data-style="agamemnon"] .ag-run-detail dl{margin:0;font-size:14px;line-height:1.55}
 html[data-style="agamemnon"] .ag-run-detail dl div{display:flex;justify-content:space-between;gap:12px;margin:8px 0}
 html[data-style="agamemnon"] .ag-run-detail dd{margin:0;color:var(--ag-text);text-align:right;overflow-wrap:anywhere}
+
+/* The shared sheet (max-width 768px) hides every close button; Phalanx and the Workbench keep one in Classic too. */
+@media(max-width:768px){
+ html[data-style="classic"] #agents-dashboard #close-agents-dashboard,html[data-style="classic"] #workbench-modal #close-workbench-modal{display:inline-flex!important;align-items:center;justify-content:center;width:44px;height:44px}
+}
