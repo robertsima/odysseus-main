@@ -114,8 +114,14 @@ function _showNotesFirstOpenHint(pane) {
   const place = () => {
     const r = pane.getBoundingClientRect();
     const hw = hint.offsetWidth || 260;
-    hint.style.top = Math.max(12, r.top + 58) + 'px';
-    hint.style.left = Math.min(window.innerWidth - hw - 12, Math.max(12, r.left + 18)) + 'px';
+    // A transformed pane becomes the containing block of its position:fixed
+    // children, so viewport coordinates must be made pane-relative or the
+    // hint lands far to the right and scrolls the clipped pane sideways.
+    const inPane = getComputedStyle(pane).transform !== 'none';
+    const originX = inPane ? r.left : 0;
+    const originY = inPane ? r.top : 0;
+    hint.style.top = (Math.max(12, r.top + 58) - originY) + 'px';
+    hint.style.left = (Math.min(window.innerWidth - hw - 12, Math.max(12, r.left + 18)) - originX) + 'px';
   };
   const close = () => {
     window.removeEventListener('resize', place);
@@ -708,6 +714,32 @@ function _vaultPolicyLabels(file) {
   return file.readonly ? [sensitivity, 'readonly'] : [sensitivity];
 }
 
+const _VAULT_KIND_BADGES = { pdf: 'PDF', docx: 'DOCX', image: 'IMG', other: 'FILE' };
+
+function _vaultRawUrl(path, download = false) {
+  return `${API_BASE}/api/personal/vault/raw?path=${encodeURIComponent(path)}${download ? '&download=1' : ''}`;
+}
+
+// Non-Markdown files never reach the Markdown editor: PDFs and images preview
+// in a new tab, everything else downloads. The file on disk is never touched.
+function _openVaultAsset(path, kind) {
+  if (kind === 'pdf' || kind === 'image') {
+    window.open(_vaultRawUrl(path), '_blank', 'noopener');
+    return;
+  }
+  _downloadVaultAsset(path);
+}
+
+function _downloadVaultAsset(path) {
+  const link = document.createElement('a');
+  link.href = _vaultRawUrl(path, true);
+  link.download = path.split('/').pop();
+  link.rel = 'noopener';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
 function _vaultFileHtml(node, depth = 0, searchResult = false) {
   const active = _vaultFile?.path === node.path ? ' active' : '';
   // Public is the quiet default. Only exceptional access rules need a marker
@@ -722,6 +754,13 @@ function _vaultFileHtml(node, depth = 0, searchResult = false) {
   const name = searchResult
     ? `<span class="vault-search-file-name"><b>${_esc(node.name)}</b><small>${_esc(node.path)}</small></span>`
     : `<span>${_esc(node.name)}</span>`;
+  const kind = node.kind || 'markdown';
+  if (kind !== 'markdown') {
+    const badge = _VAULT_KIND_BADGES[kind] || 'FILE';
+    const verb = kind === 'pdf' || kind === 'image' ? 'Open' : 'Download';
+    const path = _attrEsc(node.path);
+    return `<div class="vault-asset-row"><button type="button" class="vault-tree-file vault-asset-file${searchResult ? ' vault-search-result' : ''}" data-vault-asset="${path}" data-vault-kind="${_attrEsc(kind)}" style="--vault-indent:${depth * 20}px" title="${verb} ${path}">${icon}${name}<em class="vault-kind-badge">${badge}</em><span class="vault-policy-dots">${policyTags}</span></button><button type="button" class="vault-asset-download" data-vault-download="${path}" title="Download ${_attrEsc(node.name)}" aria-label="Download ${_attrEsc(node.name)}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11"/><path d="M7 11l5 5 5-5"/><path d="M5 20h14"/></svg></button></div>`;
+  }
   return `<button type="button" class="vault-tree-file${searchResult ? ' vault-search-result' : ''}${active}" data-vault-file="${_attrEsc(node.path)}" style="--vault-indent:${depth * 20}px" title="${_attrEsc(node.path)}">${icon}${name}<span class="vault-policy-dots">${policyTags}</span></button>`;
 }
 
@@ -886,6 +925,12 @@ function _renderVault() {
   });
   body.querySelectorAll('[data-vault-file]').forEach(button => {
     button.addEventListener('click', () => _openVaultFile(button.dataset.vaultFile));
+  });
+  body.querySelectorAll('[data-vault-asset]').forEach(button => {
+    button.addEventListener('click', () => _openVaultAsset(button.dataset.vaultAsset, button.dataset.vaultKind));
+  });
+  body.querySelectorAll('[data-vault-download]').forEach(button => {
+    button.addEventListener('click', () => _downloadVaultAsset(button.dataset.vaultDownload));
   });
 }
 

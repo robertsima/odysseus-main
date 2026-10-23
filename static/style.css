@@ -35285,6 +35285,62 @@ body.notes-drag-mode .note-card-pin svg {
 .vault-policy-dots .vault-policy-dot { margin-left: 0; }
 .vault-policy-dot.private { background: var(--vault-private); box-shadow: 0 0 0 1px color-mix(in srgb, var(--vault-private) 24%, transparent); }
 .vault-policy-dot.readonly { background: var(--vault-readonly); box-shadow: 0 0 0 1px color-mix(in srgb, var(--vault-readonly) 24%, transparent); }
+.vault-tree { container-type: inline-size; }
+.vault-tree .vault-asset-row { position: relative; display: flex; align-items: center; min-width: 0; padding: 0; animation: none; font-size: inherit; line-height: inherit; }
+.vault-asset-row > .vault-asset-file { flex: 1 1 auto; min-width: 0; width: auto; }
+/* Names win: the name takes the free width, the badge and actions never shrink it
+   below what the row can give. */
+.vault-asset-file > span:first-of-type { flex: 1 1 auto; min-width: 0; }
+.vault-asset-file > svg { opacity: .8; }
+.vault-asset-file[data-vault-kind="pdf"] > svg { color: #d0594a; }
+.vault-asset-file[data-vault-kind="docx"] > svg { color: #4a86d0; }
+.vault-asset-file[data-vault-kind="image"] > svg { color: #4aa37a; }
+.vault-kind-badge {
+  flex: none;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--fg) 9%, transparent);
+  color: color-mix(in srgb, var(--fg) 62%, transparent);
+  font: normal 600 8.5px/1.4 var(--mono, ui-monospace, monospace);
+  letter-spacing: .04em;
+}
+/* The extension is already in the name; narrow trees drop the badge text. */
+@container (max-width: 300px) { .vault-kind-badge { display: none; } }
+.vault-asset-download {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+.vault-asset-download svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; }
+.vault-asset-download:hover { color: var(--fg); background: color-mix(in srgb, var(--fg) 7%, transparent); }
+.vault-asset-download:focus-visible { outline: 2px solid var(--vault-active); outline-offset: -2px; }
+/* With a pointer, the download button appears over the row's right end on hover
+   or keyboard focus. Touch screens keep it in the row. */
+@media (hover: hover) {
+  .vault-asset-download {
+    position: absolute;
+    right: 2px;
+    top: 50%;
+    z-index: 2; /* above .vault-tree-file, which is z-index 1 */
+    transform: translateY(-50%);
+    opacity: 0;
+    pointer-events: none;
+    background: color-mix(in srgb, var(--fg) 12%, var(--bg));
+  }
+  .vault-asset-row:hover .vault-asset-download,
+  .vault-asset-row:focus-within .vault-asset-download { opacity: 1; pointer-events: auto; }
+  .vault-asset-row:hover .vault-kind-badge,
+  .vault-asset-row:focus-within .vault-kind-badge { visibility: hidden; }
+}
 .vault-search-result { min-height: 44px; padding-left: 9px; }
 .vault-search-file-name { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 1px; }
 .vault-search-file-name b,
