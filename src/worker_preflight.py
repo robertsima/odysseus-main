@@ -291,9 +291,20 @@ def shell_gap(task: str, unavailable: Iterable[str]) -> Optional[str]:
     return commands[0][:80] if commands else None
 
 
+# Tools that read each kind of source (checked against the implementations):
+# editor documents are rows in the app database, which only manage_documents
+# opens (agent_tools/document_tools.py ManageDocumentTool "read"); the
+# search_documents index covers vault files, not that table
+# (agent_tools/rag_tools.py). Vault notes are Markdown files: manage_notes
+# (tools/notes.py), the search_documents index, or read_file when the loadout
+# has the private-vault grant (private_access.py). vault_search/vault_get are
+# the Bitwarden password vault and read no notes. Logs: read_app_logs only
+# (agent_tools/worktree_tools.py).
+EDITOR_DOCUMENT_TOOLS = ("manage_documents",)
+VAULT_NOTE_TOOLS = ("search_documents", "manage_notes", "read_file")
+APP_LOG_TOOLS = ("read_app_logs",)
 # Tools a worker can read a note or document with.
-DOCUMENT_READ_TOOLS = ("search_documents", "read_file", "manage_documents", "manage_notes",
-                       "vault_search", "vault_get")
+DOCUMENT_READ_TOOLS = ("search_documents", "read_file", "manage_documents", "manage_notes")
 # A task that names a note, document or vault file the worker is meant to read.
 _DOCUMENT_RE = re.compile(
     r"\b(?:the|this|that|my|our|your)\s+(?:[\w'’&-]+\s+){0,5}?"
@@ -303,33 +314,90 @@ _DOCUMENT_RE = re.compile(
     r"|(?<![/\w.])[\w-]+\.md\b",
     re.IGNORECASE,
 )
+_UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+_EDITOR_RE = re.compile(
+    r"\bdocuments?\s+(?:id\s*)?[:#]?\s*`?" + _UUID
+    + r"|#document-[\w-]+"
+    + r"|\beditor\s+(?:documents?|docs?)\b|\bdocuments?\s+(?:library|panel|editor)\b"
+    + r"|\bin\s+the\s+(?:document\s+)?editor\b",
+    re.IGNORECASE,
+)
+_VAULT_RE = re.compile(
+    r"\bvault\b|\bobsidian\b|(?<![/\w.])[\w-]+\.md\b|\bmy\s+notes\b", re.IGNORECASE)
+_LOGS_RE = re.compile(
+    r"\bapp\.log\b|\b(?:app|application|server|odysseus|harness)\s+logs?\b", re.IGNORECASE)
+# The parent pasted the content: a fenced block of 80+ characters, or three
+# consecutive quoted ("> ") lines. Conservative on purpose; a bare backtick
+# span or a one-line quote does not count.
+_EXCERPT_RE = re.compile(r"```[^\n]*\n[^`]{80,}```|(?:^[ \t]*>.*\n){2}[ \t]*>.*", re.MULTILINE)
 
 
 def task_names_document(task: str) -> bool:
-    return bool(_DOCUMENT_RE.search(task or ""))
+    task = task or ""
+    return bool(_DOCUMENT_RE.search(task) or _EDITOR_RE.search(task) or _LOGS_RE.search(task))
 
 
-def document_access_warning(task: str, profile: Optional[Dict[str, Any]]) -> Optional[str]:
-    """A warning when the task names a note/document the worker cannot read.
+def task_includes_excerpt(task: str) -> bool:
+    return bool(_EXCERPT_RE.search(task or ""))
 
-    2026-09-28: "Creative Agent Memory Researcher" (tools=[web_search]) was
-    asked to "reconcile against the AI Mind note" and could only say it had
-    no way to read it. Not a hard block: the parent may have pasted the
-    content into the task.
+
+def document_gap(task: str, profile: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The first source the task names that no enabled tool reads, else None.
+
+    ``{"kind", "tools", "message"}``; ``tools`` are the ones that would read it.
     """
-    if not profile or not task_names_document(task):
+    if not profile or not task_names_document(task) or task_includes_excerpt(task):
         return None
     access = profile.get("tool_access") or "all"
     if access == "all":
         return None
     enabled = set(profile.get("enabled_tools") or []) - set(profile.get("disabled_tools") or [])
-    if access == "selected" and enabled & set(DOCUMENT_READ_TOOLS):
-        return None
-    return (
-        f"the task names a note or document, but loadout {profile.get('name', '?')!r} has no tool that "
-        "reads documents (" + ", ".join(DOCUMENT_READ_TOOLS[:3]) + "). Put the relevant content in the "
-        "task itself, or start it with extra_tools=[\"search_documents\"] for this run."
-    )
+    if access != "selected":
+        enabled = set()
+    name = profile.get("name", "?")
+    grant = bool(profile.get("private_vault_access"))
+
+    def alt(tool: str) -> str:
+        return (f"Put the relevant excerpt in the task itself, or start it with "
+                f"extra_tools=[\"{tool}\"] for this run.")
+
+    if _EDITOR_RE.search(task) and not enabled & set(EDITOR_DOCUMENT_TOOLS):
+        return {"kind": "editor_document", "tools": EDITOR_DOCUMENT_TOOLS, "message": (
+            f"the task names an editor document (a record in the app database, not a file), but loadout "
+            f"{name!r} has no tool that reads one (manage_documents; read_file and search_documents "
+            "cannot open it). " + alt("manage_documents"))}
+    if _VAULT_RE.search(task):
+        readers = {"search_documents", "manage_notes"} | ({"read_file"} if grant else set())
+        if not enabled & readers:
+            return {"kind": "vault_note", "tools": VAULT_NOTE_TOOLS, "message": (
+                f"the task names a note or file in the vault, but loadout {name!r} has no tool that reads "
+                "it (search_documents, manage_notes, or read_file with private-vault access"
+                + ("" if grant else "; this loadout has no vault grant") + "). " + alt("search_documents"))}
+    if _LOGS_RE.search(task) and not enabled & set(APP_LOG_TOOLS):
+        return {"kind": "app_logs", "tools": APP_LOG_TOOLS, "message": (
+            f"the task names the app logs, but loadout {name!r} has no tool that reads them "
+            "(read_app_logs; read_file cannot open them). " + alt("read_app_logs"))}
+    if not (_EDITOR_RE.search(task) or _VAULT_RE.search(task) or _LOGS_RE.search(task)):
+        if not enabled & set(DOCUMENT_READ_TOOLS):
+            return {"kind": "document", "tools": DOCUMENT_READ_TOOLS, "message": (
+                f"the task names a note or document, but loadout {name!r} has no tool that "
+                "reads documents (" + ", ".join(DOCUMENT_READ_TOOLS[:3]) + "). Put the relevant content in the "
+                "task itself, or start it with extra_tools=[\"search_documents\"] for this run.")}
+    return None
+
+
+def document_access_warning(task: str, profile: Optional[Dict[str, Any]]) -> Optional[str]:
+    """A warning when the task names a source the worker has no tool to read.
+
+    2026-09-28: "Creative Agent Memory Researcher" (tools=[web_search]) was
+    asked to "reconcile against the AI Mind note" and could only say it had
+    no way to read it. 2026-10: a reviewer with read_file was handed editor
+    document ids and the app logs, which read_file cannot open, and failed
+    mid-run; each source kind now needs the tool that reads that kind.
+    Not a hard block: the parent may have pasted the content into the task.
+    """
+    gap = document_gap(task, profile)
+    return gap["message"] if gap else None
 
 
 def known_checkouts() -> List[str]:

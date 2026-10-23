@@ -838,7 +838,7 @@ def _with_document_access(raw, objective, policy, *, stage):
     """
     if not isinstance(raw, dict):
         return raw, None
-    from src.worker_preflight import DOCUMENT_READ_TOOLS, document_access_warning
+    from src.worker_preflight import DOCUMENT_READ_TOOLS, document_gap
 
     tools = raw.get("tools")
     if tools is None:
@@ -847,16 +847,25 @@ def _with_document_access(raw, objective, policy, *, stage):
         return raw, None  # _prepare rejects the shape with its own message
     name = str(raw.get("name") or "?").strip()
     probe = {"name": name, "tool_access": "selected" if tools else "none", "enabled_tools": list(tools)}
-    if not document_access_warning(f"{objective}\n\n{raw.get('task') or ''}", probe):
+    gap = document_gap(f"{objective}\n\n{raw.get('task') or ''}", probe)
+    if not gap:
         return raw, None
-    if "search_documents" in policy["allowed_tools"] and "search_documents" in _READ_TOOLS:
+    # Grant only a tool that reads the named source: search_documents reads
+    # vault notes, not editor documents or app logs.
+    if (gap["kind"] in ("document", "vault_note") and "search_documents" in policy["allowed_tools"]
+            and "search_documents" in _READ_TOOLS):
         detail = ("search_documents added: the objective or task names a note or document and the "
                   "agent had no tool that reads one")
         logger.info("[agent-workflow] document access name=%s stage=%s: %s", name, stage, detail)
         return {**raw, "tools": [*tools, "search_documents"]}, {"kind": "granted", "detail": detail}
-    detail = (f"the objective or task names a note or document, but {name} has no tool that reads "
-              f"documents ({', '.join(DOCUMENT_READ_TOOLS[:3])}) and this chat may not grant one; "
-              "put the relevant content in the task itself")
+    if gap["kind"] in ("document", "vault_note"):
+        detail = (f"the objective or task names a note or document, but {name} has no tool that reads "
+                  f"documents ({', '.join(DOCUMENT_READ_TOOLS[:3])}) and this chat may not grant one; "
+                  "put the relevant content in the task itself")
+    else:
+        detail = (f"the objective or task names a source {name} cannot read ({gap['kind']}; it needs "
+                  f"{' or '.join(gap['tools'])}) and this chat may not grant it; "
+                  "put the relevant excerpt in the task itself")
     logger.info("[agent-workflow] document access name=%s stage=%s: %s", name, stage, detail)
     return raw, {"kind": "warning", "detail": detail}
 

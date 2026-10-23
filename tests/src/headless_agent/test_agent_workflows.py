@@ -1132,3 +1132,17 @@ async def test_note_the_parent_cannot_grant_is_a_start_warning(runtime):
     await workflows._TASKS[started["workflow_id"]]
     final = await workflows.inspect(workflow_id=started["workflow_id"], session_id="parent", owner="alice")
     assert "Preflight warnings:" in workflows.render_result(final)
+
+
+async def test_editor_document_task_is_not_granted_search_documents(runtime):
+    # search_documents reads vault files, not editor documents, so granting it
+    # would widen permissions without making the document readable.
+    args = request(task="Review document 9878fc53-cd4e-47ec-8b4a-a9f740692da7 for gaps", synthesis=None,
+                   specialists=[{"name": "Buyers", "task": "Map buyer problems", "tools": ["web_search"]}])
+    started = await OrchestrateAgentsTool().execute(json.dumps(args), {
+        "session_id": "parent", "owner": "alice", "delegation_authorized": True})
+    assert started.get("error") is None, started
+    [row] = started["preflight"]
+    assert row["tools"] == ["web_search"]
+    assert "manage_documents" in row["warnings"][0]
+    await workflows._TASKS[started["workflow_id"]]
