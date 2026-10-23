@@ -208,6 +208,24 @@ def setup_claude_code_routes() -> APIRouter:
             raise HTTPException(404, "Task not found")
         return record
 
+    @router.get("/tasks/{task_id}/commits")
+    async def task_commits(request: Request, task_id: str, offset: int = 0, limit: int = 50):
+        """The next page of commits since the run started (see ``commits_page``)."""
+        owner = _require_claude_code_scope(request, CLAUDE_CODE_READ_SCOPES)
+        record = get_task_runner().get(task_id, owner=owner if getattr(request.state, "api_token", False) else None)
+        if record is None:
+            raise HTTPException(404, "Task not found")
+        from src import repo_inspect
+
+        repository = record.get("repository") or ""
+        if not repository or not record.get("start_commit"):
+            return {"commits": [], "has_more": False, "total": 0, "next_offset": None, "scope": "since_base"}
+        try:
+            return await repo_inspect.commits_page(repository, base=record.get("start_commit"), offset=offset,
+                                                   limit=limit, roots=[repository])
+        except (repo_inspect.RepoError, ValueError) as exc:
+            raise HTTPException(400, str(exc)[:500])
+
     @router.get("/tasks/{task_id}/changes")
     async def task_changes(request: Request, task_id: str):
         """What the job changed: live per-file numstat and commits relative to
@@ -242,8 +260,12 @@ def setup_claude_code_routes() -> APIRouter:
             changes = await repo_inspect.changes(repository, base=record.get("start_commit"), roots=roots)
             out.update({"changes": changes["files"], "total_additions": changes["total_additions"],
                         "total_deletions": changes["total_deletions"], "changes_truncated": changes["truncated"]})
-            out["commits"] = await repo_inspect.commits(repository, base=record.get("start_commit"), roots=roots) \
-                if record.get("start_commit") else []
+            if record.get("start_commit"):
+                page = await repo_inspect.commits_page(repository, base=record.get("start_commit"), roots=roots)
+                out["commits"] = page["commits"]
+                out["commits_page"] = {k: page[k] for k in ("has_more", "total", "next_offset", "scope", "limit")}
+            else:
+                out["commits"] = []
         except (repo_inspect.RepoError, ValueError) as exc:
             out.update({"changes": record.get("changes") or [], "commits": record.get("commits") or [],
                         "changes_error": str(exc)})

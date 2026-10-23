@@ -65,6 +65,88 @@ def _checkout_activity(path: str) -> float:
         return 0
 
 
+# Discovery gives up on the remaining checkouts after this long, and examines
+# at most this many; the picker marks the rest as not yet measured.
+ROOTS_BUDGET_S = 8.0
+ROOTS_MAX_CHECKOUTS = 50
+
+_FLIGHTS: Dict[Any, "asyncio.Task[Any]"] = {}
+
+
+async def _flight(key: Any, make):
+    """Run ``make()`` (a coroutine function) once for identical simultaneous
+    asks. The shared task survives one caller going away. Nothing is cached
+    after it finishes: a refresh always reads git again."""
+    loop = asyncio.get_running_loop()
+    task = _FLIGHTS.get(key)
+    if task is None or task.done() or task.get_loop() is not loop:
+        task = loop.create_task(make())
+        _FLIGHTS[key] = task
+
+        def _done(t, key=key):
+            if _FLIGHTS.get(key) is t:
+                _FLIGHTS.pop(key, None)
+            if not t.cancelled():
+                t.exception()
+
+        task.add_done_callback(_done)
+    return await asyncio.shield(task)
+
+
+def _build_repo_roots() -> Dict[str, Any]:
+    """The repository picker's answer. Blocking: call it from a worker thread."""
+    import time
+
+    deadline = time.monotonic() + ROOTS_BUDGET_S
+    repos = []
+    try:
+        from src.agent_tools.claude_code_tools import discover_repositories
+
+        repos = discover_repositories(limit=ROOTS_MAX_CHECKOUTS)
+    except Exception as exc:  # the picker degrades to the raw roots
+        logger.debug("workbench: repository discovery failed: %s", exc)
+    workspace = None
+    try:
+        from src.tool_execution import get_active_workspace
+
+        workspace = get_active_workspace()
+    except Exception:
+        pass
+    roots = repo_inspect.allowed_roots()
+    seen = {r["path"] for r in repos}
+    try:
+        from src.agent_worktree.config import load_config
+
+        cfg = load_config()
+        for candidate in (cfg.source_repo, workspace):
+            if candidate and candidate not in seen:
+                try:
+                    repo_inspect.resolve_repo(candidate, roots=roots)
+                except repo_inspect.RepoError:
+                    continue
+                repos.append({"path": candidate, "root": None, "branch": None})
+                seen.add(candidate)
+    except Exception:
+        pass
+    repos = repos[:ROOTS_MAX_CHECKOUTS + 2]
+    unmeasured = 0
+    for repo in repos:
+        # Discovery/configured candidates are confined again before reading
+        # metadata, including the fallback source_repo and workspace.
+        try:
+            repo_inspect.resolve_repo(repo["path"], roots=roots)
+        except repo_inspect.RepoError:
+            repo["activity_at"] = 0
+            continue
+        if time.monotonic() > deadline:
+            repo["activity_at"] = 0
+            unmeasured += 1
+            continue
+        repo["activity_at"] = _checkout_activity(repo["path"])
+    return {"roots": roots, "repositories": repos, "workspace": workspace,
+            "activity_unmeasured": unmeasured}
+
+
 _RUNS_ANSWERED: Dict[str, tuple] = {}
 
 
@@ -319,50 +401,19 @@ def setup_workbench_routes() -> APIRouter:
         """Inspectable roots and the checkouts found under them, so the UI can
         offer a repository picker without a free-text path."""
         _admin(request)
-        repos = []
-        try:
-            from src.agent_tools.claude_code_tools import discover_repositories
+        # Discovery walks the roots and each checkout costs two git processes
+        # (a 1.95 s event-loop stall, 2026-10). The whole walk runs in one
+        # worker thread, once for simultaneous askers, and gives up on the
+        # remaining checkouts when the time budget is spent.
+        from src.poll_coalesce import coalesced
 
-            repos = discover_repositories(limit=50)
-        except Exception as exc:  # the picker degrades to the raw roots
-            logger.debug("workbench: repository discovery failed: %s", exc)
-        workspace = None
-        try:
-            from src.tool_execution import get_active_workspace
-
-            workspace = get_active_workspace()
-        except Exception:
-            pass
-        seen = {r["path"] for r in repos}
-        try:
-            from src.agent_worktree.config import load_config
-
-            cfg = load_config()
-            for candidate in (cfg.source_repo, workspace):
-                if candidate and candidate not in seen:
-                    try:
-                        repo_inspect.resolve_repo(candidate)
-                    except repo_inspect.RepoError:
-                        continue
-                    repos.append({"path": candidate, "root": None, "branch": None})
-                    seen.add(candidate)
-        except Exception:
-            pass
-        for repo in repos:
-            # Discovery/configured candidates are confined again before reading
-            # metadata, including the fallback source_repo and workspace.
-            try:
-                repo_inspect.resolve_repo(repo["path"])
-                repo["activity_at"] = _checkout_activity(repo["path"])
-            except repo_inspect.RepoError:
-                repo["activity_at"] = 0
-        return {"roots": repo_inspect.allowed_roots(), "repositories": repos, "workspace": workspace}
+        return await coalesced(("workbench.repo.roots",), _build_repo_roots, ttl=2.0)
 
     @router.get("/repo/files")
     async def repo_files(request: Request, path: str = Query(...), query: str = ""):
         _admin(request)
         try:
-            return await repo_inspect.tracked_files(path, query)
+            return await _flight(("files", path, query), lambda: repo_inspect.tracked_files(path, query))
         except repo_inspect.RepoError as exc:
             raise _repo_error(exc)
 
@@ -370,7 +421,7 @@ def setup_workbench_routes() -> APIRouter:
     async def repo_status(request: Request, path: str = Query(...)):
         _admin(request)
         try:
-            return await repo_inspect.status(path)
+            return await _flight(("status", path), lambda: repo_inspect.status(path))
         except repo_inspect.RepoError as exc:
             raise _repo_error(exc)
 
@@ -378,7 +429,7 @@ def setup_workbench_routes() -> APIRouter:
     async def repo_changes(request: Request, path: str = Query(...), base: Optional[str] = None):
         _admin(request)
         try:
-            return await repo_inspect.changes(path, base=base)
+            return await _flight(("changes", path, base), lambda: repo_inspect.changes(path, base=base))
         except repo_inspect.RepoError as exc:
             raise _repo_error(exc)
 
@@ -387,7 +438,8 @@ def setup_workbench_routes() -> APIRouter:
                         base: Optional[str] = None, commit: Optional[str] = None):
         _admin(request)
         try:
-            return await repo_inspect.file_diff(path, file, base=base, commit=commit)
+            return await _flight(("diff", path, file, base, commit),
+                                 lambda: repo_inspect.file_diff(path, file, base=base, commit=commit))
         except repo_inspect.RepoError as exc:
             raise _repo_error(exc)
 
@@ -396,7 +448,7 @@ def setup_workbench_routes() -> APIRouter:
                         ref: str = Query(default="HEAD")):
         _admin(request)
         try:
-            return await repo_inspect.file_at(path, file, ref=ref)
+            return await _flight(("file", path, file, ref), lambda: repo_inspect.file_at(path, file, ref=ref))
         except repo_inspect.RepoError as exc:
             raise _repo_error(exc)
 
@@ -404,17 +456,22 @@ def setup_workbench_routes() -> APIRouter:
     async def repo_save_file(request: Request, payload: Dict[str, Any] = Body(...)):
         _admin(request)
         try:
-            return repo_inspect.save_worktree_file(payload.get("path"), payload.get("file"),
-                                                   payload.get("content"), payload.get("version"))
+            return await asyncio.to_thread(repo_inspect.save_worktree_file, payload.get("path"), payload.get("file"),
+                                           payload.get("content"), payload.get("version"))
         except repo_inspect.RepoError as exc:
             raise _repo_error(exc)
 
     @router.get("/repo/commits")
     async def repo_commits(request: Request, path: str = Query(...), limit: int = 50,
-                           base: Optional[str] = None):
+                           base: Optional[str] = None, offset: int = 0, total: bool = True):
+        """A page of the log. ``has_more`` and ``next_offset`` page it; ``total``
+        is null when the count was skipped or timed out; ``scope`` is
+        ``repository`` or ``since_base``."""
         _admin(request)
         try:
-            return {"commits": await repo_inspect.commits(path, limit=limit, base=base)}
+            return await _flight(("commits", path, limit, base, offset, bool(total)),
+                                 lambda: repo_inspect.commits_page(path, limit=limit, offset=offset, base=base,
+                                                                   with_total=bool(total)))
         except repo_inspect.RepoError as exc:
             raise _repo_error(exc)
 
@@ -422,7 +479,7 @@ def setup_workbench_routes() -> APIRouter:
     async def repo_commit(request: Request, path: str = Query(...), sha: str = Query(...)):
         _admin(request)
         try:
-            return await repo_inspect.commit_detail(path, sha)
+            return await _flight(("commit", path, sha), lambda: repo_inspect.commit_detail(path, sha))
         except repo_inspect.RepoError as exc:
             raise _repo_error(exc)
 

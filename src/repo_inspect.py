@@ -24,6 +24,7 @@ Safety rules, in order:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import posixpath
 import re
@@ -39,6 +40,10 @@ MAX_FILE_CHARS = 400_000
 MAX_FILES = 500
 MAX_COMMITS = 200
 _UNTRACKED_LINE_CAP = 20_000
+# Every git subprocess here is killed after this long. The commit total gets
+# a shorter leash because it is optional and walks the whole history.
+GIT_TIMEOUT_S = 30.0
+COUNT_TIMEOUT_S = 5.0
 
 _REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_./~^@{}-]{0,200}$")
 
@@ -130,7 +135,12 @@ def validate_ref(value: Optional[str], default: str = "HEAD") -> str:
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
-async def _git(repo: str, *args: str, timeout_s: float = 60.0, ok_codes=(0,)) -> str:
+async def _resolve(path: str, roots: Optional[List[str]] = None) -> str:
+    """:func:`resolve_repo` in a worker thread: it stats the disk and reads config."""
+    return await asyncio.to_thread(resolve_repo, path, roots=roots)
+
+
+async def _git(repo: str, *args: str, timeout_s: float = GIT_TIMEOUT_S, ok_codes=(0,)) -> str:
     try:
         res = await run_git(list(args), cwd=repo, timeout_s=timeout_s, check=False)
     except GitError as exc:  # git missing, or the call timed out
@@ -148,7 +158,7 @@ def _cap(text: str, limit: int) -> tuple:
 
 async def tracked_files(path: str, query: str = "", *, roots: Optional[List[str]] = None) -> Dict[str, Any]:
     """Search tracked paths in a checkout without exposing arbitrary disk files."""
-    repo = resolve_repo(path, roots=roots)
+    repo = await _resolve(path, roots)
     if not isinstance(query, str) or len(query) > 120:
         raise RepoError("File search must be at most 120 characters")
     names = (await _git(repo, "ls-files", "-z", "--cached")).split("\x00")
@@ -212,7 +222,7 @@ async def head_sha(repo: str) -> Optional[str]:
 
 
 async def status(path: str, *, roots: Optional[List[str]] = None) -> Dict[str, Any]:
-    repo = resolve_repo(path, roots=roots)
+    repo = await _resolve(path, roots)
     branch = (await _git(repo, "symbolic-ref", "--quiet", "--short", "HEAD", ok_codes=(0, 1, 128))).strip()
     sha = await head_sha(repo)
     porcelain = await _git(repo, "status", "--porcelain", "--untracked-files=all")
@@ -246,7 +256,7 @@ async def changes(path: str, *, base: Optional[str] = None,
     """Per-file additions/deletions in the working tree relative to ``base``
     (default ``HEAD``): committed-since-base, staged and unstaged edits, plus
     untracked files."""
-    repo = resolve_repo(path, roots=roots)
+    repo = await _resolve(path, roots)
     ref = validate_ref(base, "HEAD")
     files: Dict[str, Dict[str, Any]] = {}
     if await head_sha(repo):
@@ -258,7 +268,7 @@ async def changes(path: str, *, base: Optional[str] = None,
     for rel in await _untracked(repo):
         if rel in files:
             continue
-        files[rel] = {"path": rel, "status": "untracked", "additions": _count_lines(repo, rel),
+        files[rel] = {"path": rel, "status": "untracked", "additions": await asyncio.to_thread(_count_lines, repo, rel),
                       "deletions": 0, "binary": False}
     rows = sorted(files.values(), key=lambda r: r["path"])
     truncated = len(rows) > MAX_FILES
@@ -276,7 +286,7 @@ async def changes(path: str, *, base: Optional[str] = None,
 async def file_diff(path: str, file: str, *, base: Optional[str] = None,
                     commit: Optional[str] = None, roots: Optional[List[str]] = None) -> Dict[str, Any]:
     """Unified diff of one file: a commit's change, or the working tree against ``base``."""
-    repo = resolve_repo(path, roots=roots)
+    repo = await _resolve(path, roots)
     rel = relative_file(repo, file)
     if commit:
         sha = validate_ref(commit)
@@ -301,7 +311,7 @@ async def file_diff(path: str, file: str, *, base: Optional[str] = None,
 async def file_at(path: str, file: str, *, ref: Optional[str] = "HEAD",
                   roots: Optional[List[str]] = None) -> Dict[str, Any]:
     """Contents of one file at ``ref`` (or ``worktree`` for the on-disk copy)."""
-    repo = resolve_repo(path, roots=roots)
+    repo = await _resolve(path, roots)
     rel = relative_file(repo, file)
     if (ref or "").strip().lower() in ("worktree", "wt", "disk"):
         full = os.path.join(repo, *rel.split("/"))
@@ -377,20 +387,10 @@ def save_worktree_file(path: str, file: str, content: str, version: str,
 _LOG_FORMAT = "%H%x1f%h%x1f%an%x1f%aI%x1f%s"
 
 
-async def commits(path: str, *, limit: int = 50, base: Optional[str] = None,
-                  roots: Optional[List[str]] = None) -> List[Dict[str, Any]]:
-    """Newest-first commit list; with ``base``, only commits after it."""
-    repo = resolve_repo(path, roots=roots)
-    if not await head_sha(repo):
-        return []
-    n = max(1, min(int(limit or 50), MAX_COMMITS))
-    args = ["log", f"--format={_LOG_FORMAT}", f"-n{n}"]
-    if base:
-        args.append(f"{validate_ref(base)}..HEAD")
-    out = await _git(repo, *args, "--")
+def _parse_log(out: str) -> List[Dict[str, Any]]:
     rows = []
     for line in out.splitlines():
-        parts = line.split("\x1f")
+        parts = line.split("")
         if len(parts) != 5:
             continue
         sha, short, author, date, subject = parts
@@ -398,8 +398,56 @@ async def commits(path: str, *, limit: int = 50, base: Optional[str] = None,
     return rows
 
 
+async def commits_page(path: str, *, limit: int = 50, offset: int = 0, base: Optional[str] = None,
+                       with_total: bool = True, roots: Optional[List[str]] = None) -> Dict[str, Any]:
+    """One page of the newest-first log, and how much of it there is.
+
+    ``has_more`` is exact: git is asked for one row past the page. ``total``
+    comes from ``rev-list --count`` over the same range and is ``None`` when
+    that count is skipped or times out, so a capped list is never passed off
+    as the whole history. ``scope`` says which range was read.
+    """
+    repo = await _resolve(path, roots)
+    ref = validate_ref(base) if base else None
+    scope = "since_base" if ref else "repository"
+    empty = {"repository": repo, "commits": [], "has_more": False, "total": 0, "offset": 0,
+             "next_offset": None, "limit": 0, "scope": scope, "base": ref}
+    if not await head_sha(repo):
+        return empty
+    n = max(1, min(int(limit or 50), MAX_COMMITS))
+    skip = max(0, int(offset or 0))
+    rng = [f"{ref}..HEAD"] if ref else []
+    args = ["log", f"--format={_LOG_FORMAT}", f"-n{n + 1}", f"--skip={skip}"]
+    log_job = _git(repo, *args, *rng, "--")
+    if with_total:
+        count_job = _git(repo, "rev-list", "--count", "HEAD" if not ref else rng[0], "--", timeout_s=COUNT_TIMEOUT_S)
+        out, counted = await asyncio.gather(log_job, count_job, return_exceptions=True)
+    else:
+        out, counted = await log_job, None
+    if isinstance(out, BaseException):
+        raise out
+    rows = _parse_log(out)
+    has_more = len(rows) > n
+    rows = rows[:n]
+    total: Optional[int] = None
+    if isinstance(counted, str):
+        try:
+            total = int(counted.strip())
+        except ValueError:
+            total = None
+    return {"repository": repo, "commits": rows, "has_more": has_more, "total": total, "offset": skip,
+            "next_offset": skip + len(rows) if has_more else None, "limit": n, "scope": scope, "base": ref}
+
+
+async def commits(path: str, *, limit: int = 50, base: Optional[str] = None,
+                  roots: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    """Newest-first commit list; with ``base``, only commits after it."""
+    page = await commits_page(path, limit=limit, base=base, with_total=False, roots=roots)
+    return page["commits"]
+
+
 async def commit_detail(path: str, sha: str, *, roots: Optional[List[str]] = None) -> Dict[str, Any]:
-    repo = resolve_repo(path, roots=roots)
+    repo = await _resolve(path, roots)
     ref = validate_ref(sha)
     header = await _git(repo, "show", "--no-patch", f"--format={_LOG_FORMAT}%x1f%b", ref)
     parts = header.strip("\n").split("\x1f")
