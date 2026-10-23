@@ -35,11 +35,13 @@ function container(id, ids) {
   return root;
 }
 const rail = container('icon-rail', ['fixed-top', 'rail-calendar', 'fixed-middle', 'rail-agents', 'rail-notes', 'fixed-bottom']);
-const tools = container('tools-section', ['tool-calendar-btn', 'tool-agents-btn', 'tool-notes-btn']);
+const work = container('work-section', ['tool-calendar-btn', 'tool-notes-btn']);
+const agents = container('agents-section', ['tool-agents-btn']);
 const calendar = nodes.get('rail-calendar');
 applyNavOrder(['notes', 'agents', 'calendar'], doc);
 if (rail.children.map(n => n.id).join() !== 'fixed-top,rail-notes,fixed-middle,rail-agents,rail-calendar,fixed-bottom') throw Error('rail order/slots');
-if (tools.children.map(n => n.id).join() !== 'tool-notes-btn,tool-agents-btn,tool-calendar-btn') throw Error('sidebar order');
+if (work.children.map(n => n.id).join() !== 'tool-notes-btn,tool-calendar-btn') throw Error('sidebar order');
+if (agents.children.map(n => n.id).join() !== 'tool-agents-btn') throw Error('an item left its group');
 if (nodes.get('rail-calendar') !== calendar || !calendar.hidden) throw Error('node identity/visibility');
 """.replace("MODULE", json.dumps(NAV.resolve().as_uri()))
     result = subprocess.run([node, "--input-type=module"], input=script, text=True, capture_output=True)

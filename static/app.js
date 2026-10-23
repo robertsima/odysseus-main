@@ -42,7 +42,7 @@ import './js/navOrder.js?v=20260916accountprefs1';
 import voiceRecorderModule from './js/voiceRecorder.js';
 import censorModule from './js/censor.js';
 import galleryModule from './js/gallery.js';
-import { UI_VIS_DEFAULT_OFF, resolveVisibility } from './js/ui_visibility.js';
+import { UI_VIS_DEFAULT_OFF, UI_VIS_MAP, resolveVisibility } from './js/ui_visibility.js';
 import tasksModule from './js/tasks.js?v=20260918upsync1';
 import calendarModule from './js/calendar.js';
 import notesModule from './js/notes.js?v=20260915vaulttree3';
@@ -1336,13 +1336,6 @@ function initializeEventListeners() {
     chatsLibraryBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       if (sessionModule) sessionModule.openLibrary('chats');
-    });
-  }
-
-  const toolArchiveBtn = el('tool-archive-btn');
-  if (toolArchiveBtn) {
-    toolArchiveBtn.addEventListener('click', () => {
-      if (sessionModule) sessionModule.openLibrary('archive');
     });
   }
 
@@ -2835,9 +2828,16 @@ function initializeEventListeners() {
     // resolveVisibility computes selector→visible (pure; ui_visibility.js),
     // including the tools-section parent rule that hides every tool rail
     // launcher when Tools is off. Apply the result to the DOM here.
+    // Workbench is also hidden when the feature is off in Settings. Showing it
+    // because the person's own toggle is on would bring a disabled feature
+    // back, so for that entry only undo a hide this function made.
+    const hideOwnedOnly = new Set([UI_VIS_MAP['tool-workbench']]);
     for (const [selector, visible] of Object.entries(resolveVisibility(state))) {
       document.querySelectorAll(selector).forEach(el => {
-        el.style.display = visible ? '' : 'none';
+        if (!visible) { el.style.display = 'none'; el.dataset.uiHidden = '1'; return; }
+        if (hideOwnedOnly.has(selector) && !el.dataset.uiHidden) return;
+        el.style.display = '';
+        delete el.dataset.uiHidden;
       });
     }
     // Drag reorder: use body class so dynamically created handles are covered

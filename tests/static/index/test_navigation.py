@@ -23,18 +23,12 @@ HELMET = "/static/branding/agamemnon-trojan-helmet.svg"
 COMMANDS = ["rail-email", "rail-agents", "rail-workbench", "rail-new-session", "rail-search-btn"]
 
 
-def show_command_toggle(page) -> None:
-    """On narrow screens the sidebar starts closed; open it."""
-    shown = ("(() => { const r = document.getElementById('sidebar-command-toggle').getBoundingClientRect();"
-             " return r.width > 0 && r.left >= 0; })()")
-    if not page.evaluate(shown):
-        page.evaluate("window._odyOpenSidebar('left')")
-        page.wait_for_function(shown)
-    settle(page, "#sidebar-command-toggle")
-
-
 def run_command(page, target: str) -> None:
-    page.click("#sidebar-command-toggle")
+    """The sidebar has no Command button any more. The menu belongs to the
+    rail's Command button, which opens the sidebar and the menu together; the
+    rail is hidden while the sidebar is up, so the click is sent to it directly."""
+    page.evaluate("document.getElementById('rail-command').click()")
+    page.wait_for_function("!document.getElementById('sidebar-command-menu').hidden")
     page.click(f'#sidebar-command-menu [data-command-target="{target}"]')
 
 
@@ -50,8 +44,7 @@ def test_command_menu_opens_the_phalanx_and_the_workbench_under_their_names(open
     assert page.evaluate("getComputedStyle(document.querySelector('#theme-tabs [data-tab=\"theme-tab-customize\"]')).display") != "none"
     assert page.evaluate("document.getElementById('sidebar-command-menu').hidden") is True
 
-    show_command_toggle(page)
-    assert_usable(page, "#sidebar-command-toggle")
+    assert probe(page, "#sidebar-command-toggle", wait=False) is None
     run_command(page, "rail-agents")
     page.wait_for_function("!document.getElementById('agents-dashboard').hidden")
     assert probe(page, "#agents-dashboard .ag-card")["visible"]
@@ -60,8 +53,6 @@ def test_command_menu_opens_the_phalanx_and_the_workbench_under_their_names(open
     page.click("#close-agents-dashboard")
     page.wait_for_function("document.getElementById('agents-dashboard').hidden")
 
-    show_command_toggle(page)
-    assert_usable(page, "#sidebar-command-toggle")
     run_command(page, "rail-workbench")
     page.wait_for_function("!document.getElementById('workbench-modal').classList.contains('hidden')")
     assert visible_panels(page) == ["changes"]
@@ -119,11 +110,11 @@ def test_open_phone_sidebar_keeps_the_wordmark_clear_of_the_hamburger(open_app, 
 
 def test_command_menu_closes_on_escape_and_runs_search_email_and_new_chat(open_app, static_app):
     page = open_app(1440, chat=False)
-    toggle = page.locator("#sidebar-command-toggle")
-    page.click("#sidebar-command-toggle")
-    expect(toggle).to_have_attribute("aria-expanded", "true")
+    rail = page.locator("#rail-command")
+    page.evaluate("document.getElementById('rail-command').click()")
+    expect(rail).to_have_attribute("aria-expanded", "true")
     page.keyboard.press("Escape")
-    expect(toggle).to_have_attribute("aria-expanded", "false")
+    expect(rail).to_have_attribute("aria-expanded", "false")
 
     page.evaluate("window.searchClicked = false; document.getElementById('rail-search-btn')"
                   ".addEventListener('click', () => { window.searchClicked = true; }, {once: true})")

@@ -103,8 +103,8 @@ def test_send_button_submits_the_typed_message(open_app):
 def test_messages_and_code_blocks_stay_readable(open_app, width):
     page = open_app(width)
     if width == 1440:
-        command = assert_usable(page, "#sidebar-command-toggle")
-        assert command["height"] >= 44 and command["fontSize"] >= 14, command
+        row = assert_usable(page, "#tool-today-btn")
+        assert row["height"] >= 36 and row["fontSize"] >= 14, row
     # Message cards fill the transcript instead of leaving wide gutters that
     # squeeze code blocks on a phone.
     history, message = probe(page, "#chat-history"), probe(page, "#chat-history .msg-ai")
