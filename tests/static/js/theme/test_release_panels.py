@@ -10,6 +10,11 @@ def test_major_panels_use_default_font_and_keyboard_controls(live_app, live_page
     page = live_page(width)
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
+    # Brain lives in the More group, which starts folded.
+    if page.locator('#sidebar').evaluate("el => el.classList.contains('hidden')"):
+        page.locator('#hamburger-btn').click()
+    page.locator('#more-section .section-title').click()
+    expect(page.locator('#tool-memory-btn')).to_be_visible()
     for selector, modal in [('#tool-memory-btn', '#memory-modal'),
                             ('#tool-workbench-btn', '#workbench-modal'),
                             ('#tool-agents-btn', '#agents-dashboard')]:

@@ -39,7 +39,7 @@ def test_page_style_and_colourway_switch_independently(open_app, static_app, wid
     if width < 768:
         page.click("#hamburger-btn")
         settle(page, "#sidebar")
-    page.click("#sidebar-command-toggle")
+    page.evaluate("document.getElementById('rail-command').click()")
     menu = page.evaluate("[...document.querySelectorAll('#sidebar-command-menu button')]"
                          ".map(b => ({target: b.dataset.commandTarget, named: b.textContent.trim().length > 0}))")
     assert [item["target"] for item in menu] == COMMANDS and all(item["named"] for item in menu), menu
@@ -88,7 +88,7 @@ def test_sidebar_crest_takes_the_brand_colour_and_customization_keeps_navigation
     hamburger = probe(page, "#hamburger-btn")
     assert box["left"] - hamburger["right"] >= 8, (hamburger, box)
     # Each style keeps its own sidebar entry point.
-    assert probe(page, "#sidebar-command-toggle")["visible"] == (style == "agamemnon")
+    assert probe(page, "#sidebar-command-toggle", wait=False) is None
     assert probe(page, "#sidebar-new-chat-btn")["visible"] == (style == "classic")
     # The "Agamemnon crest" colour in Customize > Advanced reaches the mark.
     page.evaluate("document.documentElement.style.setProperty('--brand-color', 'rgb(1, 2, 3)')")

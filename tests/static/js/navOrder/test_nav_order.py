@@ -14,7 +14,7 @@ CORE_RAIL = ["rail-delete-session", "rail-chats", "rail-documents", "rail-settin
 
 
 def tool_order(page) -> list[str]:
-    return page.evaluate("[...document.querySelectorAll('#tools-section [id^=\"tool-\"][id$=\"-btn\"]')].map(b => b.id)")
+    return page.evaluate("[...document.querySelectorAll('#sidebar .nav-group [id^=\"tool-\"][id$=\"-btn\"]')].map(b => b.id)")
 
 
 def modals_open(page) -> list[str]:

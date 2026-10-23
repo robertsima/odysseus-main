@@ -296,6 +296,7 @@
   <link rel="stylesheet" href="/static/agamemnon-mockup.css?v=20261002crest1">
   <link rel="stylesheet" href="/static/agamemnon-critic-fixes.css?v=20261002crest2">
   <link rel="stylesheet" href="/static/workspace-layout.css?v=20261020split2">
+  <link rel="stylesheet" href="/static/nav-groups.css?v=20261023nav1">
   <link rel="stylesheet" href="/static/skill-import-review.css">
   <link rel="modulepreload" href="/static/app.js?v=20260928settingsux1">
   <link rel="modulepreload" href="/static/js/chat.js?v=20261002steer1">
@@ -946,7 +947,6 @@
     </div>
     <div class="sidebar-inner">
       <div class="command-nav">
-        <button type="button" id="sidebar-command-toggle" aria-expanded="false" aria-controls="sidebar-command-menu">Command <span aria-hidden="true">⌄</span></button>
         <div id="sidebar-command-menu" hidden>
           <button type="button" data-command-target="rail-email">Email</button>
           <button type="button" data-command-target="rail-agents">Phalanx</button>
@@ -1048,9 +1048,10 @@
         </div>
       </div>
 
-      <div class="section" id="tools-section">
+      <div class="section nav-group" id="work-section" data-nav-group="work">
         <div class="section-header-flex">
-          <span class="section-title"><svg class="section-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>Tools</span>
+          <span class="section-title nav-group-title">Work</span>
+          <span class="nav-group-dot" aria-hidden="true"></span>
         </div>
         <div class="list-item" id="tool-today-btn" title="What needs you now, with a box to capture something new">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -1060,15 +1061,38 @@
           </svg>
           <span class="grow">Today</span>
         </div>
-        <div class="list-item" id="tool-memory-btn">
+        <div class="list-item" id="tool-library-btn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;opacity:0.5;">
+            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><path d="M9 7h6M9 11h4"/>
+          </svg>
+          <span class="grow">Library</span>
+          <button type="button" class="list-item-plus-btn" id="library-new-doc-btn" title="New document">
+            <svg class="list-item-plus-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="width:11px;height:11px;"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            <span class="list-item-plus-label">document</span>
+          </button>
+        </div>
+        <div class="list-item" id="tool-notes-btn">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
             stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
             style="flex-shrink:0;opacity:0.5;">
-            <path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/>
-            <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>
-            <path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/>
+            <path d="M5 3h10l4 4v14H5z"/>
+            <path d="M15 3v5h5"/>
+            <path d="M8 17.5 15.5 10l2.5 2.5L10.5 20H8z"/>
           </svg>
-          <span class="grow">Brain</span>
+          <span class="grow">Notes</span>
+        </div>
+        <div class="list-item" id="tool-tasks-btn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <rect x="3" y="4" width="18" height="18" rx="2"/>
+            <line x1="16" y1="2" x2="16" y2="6"/>
+            <line x1="8" y1="2" x2="8" y2="6"/>
+            <line x1="3" y1="10" x2="21" y2="10"/>
+            <path d="M9 16l2 2 4-4"/>
+          </svg>
+          <span class="grow">Tasks</span>
+          <span id="assistant-notif-dot" class="sidebar-notif-dot" style="display:none"></span>
         </div>
         <div class="list-item" id="tool-calendar-btn">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -1080,6 +1104,48 @@
             <line x1="3" y1="10" x2="21" y2="10"/>
           </svg>
           <span class="grow">Calendar</span>
+        </div>
+      </div>
+
+      <div class="section nav-group" id="agents-section" data-nav-group="agents">
+        <div class="section-header-flex">
+          <span class="section-title nav-group-title">Agents</span>
+          <span class="nav-group-dot" aria-hidden="true"></span>
+        </div>
+        <div class="list-item" id="tool-agents-btn" title="Every running chat and worker: steer, stop, approve, launch">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M17.5 14v7M14 17.5h7"/>
+          </svg>
+          <span class="grow"><span class="ag-nav-label">Phalanx</span><span class="ody-nav-label">Agents</span></span>
+          <span id="tool-agents-dot" class="sidebar-notif-dot" style="display:none"></span>
+        </div>
+        <div class="list-item" id="tool-workbench-btn" title="Agent activity, changes and pull requests">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <rect x="2" y="3" width="20" height="14" rx="2"/>
+            <path d="M8 21h8M12 17v4M6 8l3 3-3 3M11 14h5"/>
+          </svg>
+          <span class="grow">Workbench</span>
+        </div>
+      </div>
+
+      <div class="section nav-group" id="more-section" data-nav-group="more">
+        <div class="section-header-flex">
+          <span class="section-title nav-group-title">More</span>
+          <span class="nav-group-dot" aria-hidden="true"></span>
+        </div>
+        <div class="list-item" id="tool-memory-btn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/>
+            <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>
+            <path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/>
+          </svg>
+          <span class="grow">Brain</span>
         </div>
         <div class="list-item" id="tool-lotus-btn">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;opacity:0.55;">
@@ -1118,70 +1184,6 @@
           </svg>
           <span class="grow">Gallery</span>
         </div>
-        <div class="list-item" id="tool-library-btn">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;opacity:0.5;">
-            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><path d="M9 7h6M9 11h4"/>
-          </svg>
-          <span class="grow">Library</span>
-          <button type="button" class="list-item-plus-btn" id="library-new-doc-btn" title="New document">
-            <svg class="list-item-plus-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="width:11px;height:11px;"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-            <span class="list-item-plus-label">document</span>
-          </button>
-        </div>
-        <div class="list-item" id="tool-notes-btn">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
-            style="flex-shrink:0;opacity:0.5;">
-            <path d="M5 3h10l4 4v14H5z"/>
-            <path d="M15 3v5h5"/>
-            <path d="M8 17.5 15.5 10l2.5 2.5L10.5 20H8z"/>
-          </svg>
-          <span class="grow">Notes</span>
-        </div>
-        <div class="list-item" id="tool-tasks-btn">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
-            style="flex-shrink:0;opacity:0.5;">
-            <rect x="3" y="4" width="18" height="18" rx="2"/>
-            <line x1="16" y1="2" x2="16" y2="6"/>
-            <line x1="8" y1="2" x2="8" y2="6"/>
-            <line x1="3" y1="10" x2="21" y2="10"/>
-            <path d="M9 16l2 2 4-4"/>
-          </svg>
-          <span class="grow">Tasks</span>
-          <span id="assistant-notif-dot" class="sidebar-notif-dot" style="display:none"></span>
-        </div>
-
-        <div class="list-item" id="tool-theme-btn">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
-            style="flex-shrink:0;opacity:0.5;">
-            <circle cx="12" cy="12" r="10"/>
-            <path d="M12 2a7 7 0 0 0 0 20 4 4 0 0 1 0-8 4 4 0 0 0 0-8"/>
-            <circle cx="8" cy="9" r="1.5" fill="currentColor"/>
-            <circle cx="15" cy="14" r="1.5" fill="currentColor"/>
-            <circle cx="9" cy="15" r="1.5" fill="currentColor"/>
-          </svg>
-          <span class="grow">Theme</span>
-        </div>
-        <div class="list-item" id="tool-agents-btn" title="Every running chat and worker: steer, stop, approve, launch">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
-            style="flex-shrink:0;opacity:0.5;">
-            <rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M17.5 14v7M14 17.5h7"/>
-          </svg>
-          <span class="grow"><span class="ag-nav-label">Phalanx</span><span class="ody-nav-label">Agents</span></span>
-          <span id="tool-agents-dot" class="sidebar-notif-dot" style="display:none"></span>
-        </div>
-        <div class="list-item" id="tool-workbench-btn" title="Agent activity, changes and pull requests">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
-            style="flex-shrink:0;opacity:0.5;">
-            <rect x="2" y="3" width="20" height="14" rx="2"/>
-            <path d="M8 21h8M12 17v4M6 8l3 3-3 3M11 14h5"/>
-          </svg>
-          <span class="grow">Workbench</span>
-        </div>
       </div>
     </div>
     <div class="sidebar-user-bar" id="sidebar-user-bar">
@@ -1190,6 +1192,9 @@
         <span class="user-bar-name" id="user-bar-name">User</span>
       </div>
       <div class="user-bar-actions">
+        <button type="button" class="user-bar-btn" id="tool-theme-btn" title="Theme" aria-label="Theme">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a7 7 0 0 0 0 20 4 4 0 0 1 0-8 4 4 0 0 0 0-8"/><circle cx="8" cy="9" r="1.5" fill="currentColor"/><circle cx="15" cy="14" r="1.5" fill="currentColor"/><circle cx="9" cy="15" r="1.5" fill="currentColor"/></svg>
+        </button>
         <button type="button" class="user-bar-btn" id="user-bar-settings" title="Settings">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
         </button>
@@ -1210,16 +1215,13 @@
           if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.currentTarget.click(); }
         });
       }
-      const toggle = document.getElementById('sidebar-command-toggle');
       const menu = document.getElementById('sidebar-command-menu');
       const rail = document.getElementById('rail-command');
       const setOpen = open => {
         menu.hidden = !open;
-        toggle.setAttribute('aria-expanded', String(open));
         rail.setAttribute('aria-expanded', String(open));
         if (open) menu.querySelector('button')?.focus();
       };
-      toggle.addEventListener('click', () => setOpen(menu.hidden));
       rail.addEventListener('click', () => {
         if (document.getElementById('sidebar').classList.contains('hidden')) document.getElementById('hamburger-btn')?.click();
         setOpen(true);
@@ -1231,7 +1233,7 @@
         document.getElementById(action.dataset.commandTarget)?.click();
       });
       document.addEventListener('keydown', e => {
-        if (e.key === 'Escape' && !menu.hidden) { setOpen(false); toggle.focus(); }
+        if (e.key === 'Escape' && !menu.hidden) { setOpen(false); rail.focus(); }
       });
       document.addEventListener('pointerdown', e => {
         if (!menu.hidden && !e.target.closest('.command-nav, #rail-command')) setOpen(false);
@@ -2520,8 +2522,28 @@
               </label>
               <label class="vis-row">
                 <span class="vis-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg></span>
-                <span class="vis-label">Tools <span class="vis-hint">Whole section (header + all tools)</span></span>
+                <span class="vis-label">Navigation groups <span class="vis-hint">Work, Agents and More, with every item</span></span>
                 <input type="checkbox" checked data-ui-key="tools-section"><span class="vis-switch"></span>
+              </label>
+              <label class="vis-row">
+                <span class="vis-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" > <circle cx="12" cy="12" r="4"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M5.6 18.4 7 17M17 7l1.4-1.4"/> </svg></span>
+                <span class="vis-label">Today</span>
+                <input type="checkbox" checked data-ui-key="tool-today"><span class="vis-switch"></span>
+              </label>
+              <label class="vis-row">
+                <span class="vis-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" > <rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M17.5 14v7M14 17.5h7"/> </svg></span>
+                <span class="vis-label">Agents</span>
+                <input type="checkbox" checked data-ui-key="tool-agents"><span class="vis-switch"></span>
+              </label>
+              <label class="vis-row">
+                <span class="vis-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" > <rect x="2" y="3" width="20" height="14" rx="2"/> <path d="M8 21h8M12 17v4M6 8l3 3-3 3M11 14h5"/> </svg></span>
+                <span class="vis-label">Workbench</span>
+                <input type="checkbox" checked data-ui-key="tool-workbench"><span class="vis-switch"></span>
+              </label>
+              <label class="vis-row">
+                <span class="vis-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" > <path d="M12 21c0-5 2.5-8 7.5-9.5C19 16.5 16.5 20 12 21Z"/> <path d="M12 21c0-5-2.5-8-7.5-9.5C5 16.5 7.5 20 12 21Z"/> <path d="M12 17c-3.5-3.5-3.5-7 0-11 3.5 4 3.5 7.5 0 11Z"/> </svg></span>
+                <span class="vis-label">Lotus</span>
+                <input type="checkbox" checked data-ui-key="tool-lotus"><span class="vis-switch"></span>
               </label>
               <label class="vis-row">
                 <span class="vis-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/></svg></span>

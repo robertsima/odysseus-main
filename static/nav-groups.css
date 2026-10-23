@@ -1,0 +1,68 @@
+/* Sidebar navigation groups: Work, Agents and More (and the Theme button in
+   the footer). Loaded after style.css and the Agamemnon sheets so one set of
+   rules covers both page styles. */
+
+.nav-group { margin-top: 10px; }
+.nav-group:first-of-type { margin-top: 1px; }
+
+/* A group with every item hidden in Customize UI (or by a privilege) hides
+   its header too. The inline display:none those hides leave is what we test. */
+.nav-group:not(:has(> .list-item:not([style*="display:none"]):not([style*="display: none"]))) { display: none !important; }
+
+/* Quiet group label: small, muted, upper case. */
+.nav-group > .section-header-flex {
+  height: 24px; padding: 4px 8px; margin: 0;
+}
+.nav-group .nav-group-title,
+html[data-style="agamemnon"] .sidebar .nav-group .nav-group-title {
+  font-size: 10px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--fg); opacity: 0.55;
+}
+.nav-group > .section-header-flex:hover .nav-group-title { opacity: 0.9; }
+html[data-style="agamemnon"] .sidebar .nav-group .nav-group-title { color: var(--ag-muted, var(--fg)); }
+
+/* One row height and one icon size for every item. */
+.nav-group > .list-item {
+  min-height: 34px; box-sizing: border-box; align-items: center; gap: 10px;
+}
+.nav-group > .list-item > svg { width: 15px; height: 15px; flex: none; opacity: 0.6 !important; }
+.nav-group > .list-item:hover > svg { opacity: 0.9 !important; }
+.nav-group > .list-item .grow { font-size: 13px; }
+@media (max-width: 768px) {
+  .nav-group > .list-item { min-height: 44px; }
+}
+html[data-style="agamemnon"] .sidebar .nav-group > .list-item { min-height: 38px; font-size: 14px; }
+html[data-style="agamemnon"] .sidebar .nav-group > .list-item .grow { font-size: 14px; }
+@media (max-width: 768px) {
+  html[data-style="agamemnon"] .sidebar .nav-group > .list-item { min-height: 44px; }
+}
+
+/* Agamemnon separated the old Tools block with a rule; keep one rule above the
+   first group and let spacing separate the rest. */
+html[data-style="agamemnon"] .sidebar .nav-group { margin-top: 6px; padding-top: 0; border-top: 0; }
+html[data-style="agamemnon"] .sidebar #work-section { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--ag-border); }
+html[data-style="agamemnon"] .sidebar .nav-group > .section-header-flex { height: 26px; }
+
+/* The Command dropdown toggle is gone from the sidebar. The menu stays for
+   the icon rail's Command button and takes no room while closed. */
+.command-nav { margin: 0; }
+html[data-style="agamemnon"] .command-nav { margin: 0; }
+
+/* Activity dot on a group header. It only appears while the group is folded
+   and one of its items has a badge, a running job or a minimized window. */
+.nav-group-dot {
+  display: none; flex: none; width: 6px; height: 6px; margin-left: -2px; margin-right: 2px; border-radius: 50%;
+  background: var(--accent, var(--red));
+  animation: rail-min-pulse 2s ease-in-out infinite;
+}
+.nav-group.collapsed:has(
+  > .list-item.rail-minimized,
+  > .list-item.cookbook-notif-active,
+  > .list-item .sidebar-notif-dot:not([style*="display:none"]):not([style*="display: none"]),
+  > .list-item .cookbook-notif-dot:not([style*="display:none"]):not([style*="display: none"]),
+  > .list-item #cookbook-bg-status:not([style*="display:none"]):not([style*="display: none"])
+) > .section-header-flex .nav-group-dot { display: block; }
+
+/* Theme button in the footer, beside Settings. */
+.user-bar-actions { align-items: center; }
+.user-bar-btn.rail-minimized::after { top: 4px; right: 4px; transform: none; }

@@ -1,4 +1,4 @@
-// Shared navigation order for the icon rail and the sidebar Tools list.
+// Shared navigation order for the icon rail and the sidebar groups (Work, Agents, More).
 //
 // The module deliberately owns no tool click handlers. It only moves the
 // existing DOM nodes, so every tool keeps the listeners installed by app.js
@@ -15,32 +15,52 @@ import { reconcile, writePref } from './serverPrefs.js';
 export const NAV_ORDER_KEY = 'odysseus-nav-order-v1';
 export const NAV_ORDER_PREF = 'nav-order';
 
+// Sidebar groups. Each group is its own container (#work-section and so on);
+// an item only ever reorders inside the group it lives in. The rail has no
+// groups: it follows the same sequence as one flat list.
+export const NAV_GROUPS = Object.freeze({
+  work: 'work-section',
+  agents: 'agents-section',
+  more: 'more-section',
+});
+const GROUP_IDS = Object.values(NAV_GROUPS);
+
 // Dynamic indicators and Settings stay fixed. One-sided tools
 // (Email on the rail, Lotus in the sidebar) still participate where present.
+// Theme lives in the sidebar footer, so only its rail button reorders.
 export const NAV_ITEMS = Object.freeze([
   Object.freeze({ key: 'search', rail: 'rail-search-btn', sidebar: null }),
   Object.freeze({ key: 'new-chat', rail: 'rail-new-session', sidebar: null }),
   Object.freeze({ key: 'command', rail: 'rail-command', sidebar: null }),
-  Object.freeze({ key: 'today', rail: 'rail-today', sidebar: 'tool-today-btn' }),
-  Object.freeze({ key: 'calendar', rail: 'rail-calendar', sidebar: 'tool-calendar-btn' }),
-  Object.freeze({ key: 'compare', rail: 'rail-compare', sidebar: 'tool-compare-btn' }),
-  Object.freeze({ key: 'cookbook', rail: 'rail-cookbook', sidebar: 'tool-cookbook-btn' }),
-  Object.freeze({ key: 'research', rail: 'rail-research', sidebar: 'tool-research-btn' }),
+  Object.freeze({ key: 'today', rail: 'rail-today', sidebar: 'tool-today-btn', group: 'work' }),
+  Object.freeze({ key: 'library', rail: 'rail-archive', sidebar: 'tool-library-btn', group: 'work' }),
+  Object.freeze({ key: 'notes', rail: 'rail-notes', sidebar: 'tool-notes-btn', group: 'work' }),
+  Object.freeze({ key: 'tasks', rail: 'rail-tasks', sidebar: 'tool-tasks-btn', group: 'work' }),
+  Object.freeze({ key: 'calendar', rail: 'rail-calendar', sidebar: 'tool-calendar-btn', group: 'work' }),
   Object.freeze({ key: 'email', rail: 'rail-email', sidebar: null }),
-  Object.freeze({ key: 'gallery', rail: 'rail-gallery', sidebar: 'tool-gallery-btn' }),
-  Object.freeze({ key: 'library', rail: 'rail-archive', sidebar: 'tool-library-btn' }),
-  Object.freeze({ key: 'memory', rail: 'rail-memory', sidebar: 'tool-memory-btn' }),
-  Object.freeze({ key: 'lotus', rail: null, sidebar: 'tool-lotus-btn' }),
-  Object.freeze({ key: 'agents', rail: 'rail-agents', sidebar: 'tool-agents-btn' }),
-  Object.freeze({ key: 'workbench', rail: 'rail-workbench', sidebar: 'tool-workbench-btn' }),
-  Object.freeze({ key: 'notes', rail: 'rail-notes', sidebar: 'tool-notes-btn' }),
-  Object.freeze({ key: 'tasks', rail: 'rail-tasks', sidebar: 'tool-tasks-btn' }),
-  Object.freeze({ key: 'theme', rail: 'rail-theme', sidebar: 'tool-theme-btn' }),
+  Object.freeze({ key: 'agents', rail: 'rail-agents', sidebar: 'tool-agents-btn', group: 'agents' }),
+  Object.freeze({ key: 'workbench', rail: 'rail-workbench', sidebar: 'tool-workbench-btn', group: 'agents' }),
+  Object.freeze({ key: 'memory', rail: 'rail-memory', sidebar: 'tool-memory-btn', group: 'more' }),
+  Object.freeze({ key: 'lotus', rail: null, sidebar: 'tool-lotus-btn', group: 'more' }),
+  Object.freeze({ key: 'compare', rail: 'rail-compare', sidebar: 'tool-compare-btn', group: 'more' }),
+  Object.freeze({ key: 'cookbook', rail: 'rail-cookbook', sidebar: 'tool-cookbook-btn', group: 'more' }),
+  Object.freeze({ key: 'research', rail: 'rail-research', sidebar: 'tool-research-btn', group: 'more' }),
+  Object.freeze({ key: 'gallery', rail: 'rail-gallery', sidebar: 'tool-gallery-btn', group: 'more' }),
+  Object.freeze({ key: 'theme', rail: 'rail-theme', sidebar: null }),
 ]);
+
+// Before the groups existed the navigation was one flat list. A browser that
+// saved that default unchanged (a reset writes it) has no real preference, so
+// it follows the new default instead of carrying the old sequence over.
+const LEGACY_DEFAULT_ORDER = Object.freeze([
+  'search', 'new-chat', 'command', 'today', 'calendar', 'compare', 'cookbook', 'research',
+  'email', 'gallery', 'library', 'memory', 'lotus', 'agents', 'workbench', 'notes', 'tasks', 'theme',
+]);
+const LEGACY_DEFAULT_NO_TODAY = LEGACY_DEFAULT_ORDER.filter((key) => key !== 'today');
 
 const KEYS = new Set(NAV_ITEMS.map((item) => item.key));
 const BY_RAIL = new Map(NAV_ITEMS.map((item) => [item.rail, item]));
-const BY_SIDEBAR = new Map(NAV_ITEMS.map((item) => [item.sidebar, item]));
+const BY_SIDEBAR = new Map(NAV_ITEMS.filter((item) => item.sidebar).map((item) => [item.sidebar, item]));
 let _initialized = false;
 let _dragKey = null;
 let _suppressClickUntil = 0;
@@ -72,6 +92,11 @@ function normalize(order) {
 
 export function defaultNavOrder() { return NAV_ITEMS.map((item) => item.key); }
 
+function isLegacyDefault(order) {
+  const list = Array.isArray(order) ? order.map(String) : [];
+  return [LEGACY_DEFAULT_ORDER, LEGACY_DEFAULT_NO_TODAY].some((legacy) => legacy.length === list.length && legacy.every((key, i) => key === list[i]));
+}
+
 // Stored locally as { value: [...keys], updated_at }. A bare array is what
 // older builds wrote; it still reads, and counts as older than any stamped
 // order so an arrangement made on another browser takes precedence over it.
@@ -88,7 +113,7 @@ function readLocalEntry() {
 
 export function readNavOrder() {
   const entry = readLocalEntry();
-  return entry ? normalize(entry.value) : defaultNavOrder();
+  return entry && !isLegacyDefault(entry.value) ? normalize(entry.value) : defaultNavOrder();
 }
 
 /** Persist an order. `sync: false` records a value that came *from* the
@@ -145,23 +170,32 @@ function reorderContainer(container, ids, lookup) {
 export function applyNavOrder(order = readNavOrder(), doc = document) {
   const normalized = normalize(order);
   const rail = doc.getElementById('icon-rail');
-  const tools = doc.getElementById('tools-section');
   reorderContainer(rail, normalized, (key) => NAV_ITEMS.find((item) => item.key === key)?.rail);
-  reorderContainer(tools, normalized, (key) => NAV_ITEMS.find((item) => item.key === key)?.sidebar);
+  // Each group sorts only its own items: nodeFor() looks at that group's
+  // children, so an item can never leave its group, whatever the saved order.
+  for (const id of GROUP_IDS) {
+    reorderContainer(doc.getElementById(id), normalized, (key) => NAV_ITEMS.find((item) => item.key === key)?.sidebar);
+  }
   return normalized;
 }
 
 function keyFromNode(node) { return BY_RAIL.get(node?.id)?.key || BY_SIDEBAR.get(node?.id)?.key || null; }
 
+function inContainer(root, key) {
+  const item = NAV_ITEMS.find((entry) => entry.key === key);
+  const id = GROUP_IDS.includes(root?.id) ? item?.sidebar : item?.rail;
+  return !!id && !!nodeFor(root, id);
+}
+
 function clearDragUi(doc) {
   doc.querySelectorAll('.nav-order-dragging, .nav-order-target').forEach((node) => node.classList.remove('nav-order-dragging', 'nav-order-target'));
   doc.getElementById('icon-rail')?.classList.remove('nav-order-active');
-  doc.getElementById('tools-section')?.classList.remove('nav-order-active');
+  GROUP_IDS.forEach((id) => doc.getElementById(id)?.classList.remove('nav-order-active'));
 }
 
 function move(key, delta, doc = document, root = doc.getElementById('icon-rail')) {
   const order = readNavOrder();
-  const surface = root?.id === 'tools-section' ? 'sidebar' : 'rail';
+  const surface = GROUP_IDS.includes(root?.id) ? 'sidebar' : 'rail';
   const represented = order.filter((value) => nodeFor(root, NAV_ITEMS.find((item) => item.key === value)?.[surface]));
   const position = represented.indexOf(key);
   const nextKey = represented[position + delta];
@@ -209,7 +243,7 @@ export function initNavOrder(doc = document) {
   const order = readNavOrder();
   applyNavOrder(order, doc);
   syncNavOrderWithAccount(doc).catch(() => {});
-  const roots = [doc.getElementById('icon-rail'), doc.getElementById('tools-section')].filter(Boolean);
+  const roots = [doc.getElementById('icon-rail'), ...GROUP_IDS.map((id) => doc.getElementById(id))].filter(Boolean);
   for (const root of roots) {
     root.addEventListener('dragstart', (event) => {
       const node = event.target.closest?.('.icon-rail-btn, .list-item');
@@ -221,7 +255,7 @@ export function initNavOrder(doc = document) {
     });
     root.addEventListener('dragover', (event) => {
       const target = event.target.closest?.('.icon-rail-btn, .list-item');
-      if (_dragKey && keyFromNode(target)) {
+      if (_dragKey && keyFromNode(target) && inContainer(root, _dragKey) && inContainer(root, keyFromNode(target))) {
         event.preventDefault();
         root.querySelectorAll('.nav-order-target').forEach((node) => node.classList.remove('nav-order-target'));
         target.classList.add('nav-order-target');
@@ -232,6 +266,9 @@ export function initNavOrder(doc = document) {
       const targetKey = keyFromNode(event.target.closest?.('.icon-rail-btn, .list-item'));
       if (!_dragKey || !targetKey || targetKey === _dragKey) return;
       event.preventDefault();
+      // A drop only reorders inside one container: dragging Tasks onto a
+      // More item leaves both where they are.
+      if (!inContainer(root, _dragKey) || !inContainer(root, targetKey)) { _dragKey = null; clearDragUi(doc); return; }
       const current = readNavOrder();
       const next = current.filter((key) => key !== _dragKey);
       next.splice(Math.max(0, next.indexOf(targetKey) + (current.indexOf(_dragKey) < current.indexOf(targetKey) ? 1 : 0)), 0, _dragKey);
@@ -279,4 +316,4 @@ if (typeof document !== 'undefined') {
   else initNavOrder();
 }
 
-export default { initNavOrder, readNavOrder, writeNavOrder, applyNavOrder, resetNavOrder, defaultNavOrder, syncNavOrderWithAccount, NAV_ORDER_KEY, NAV_ORDER_PREF, NAV_ITEMS };
+export default { NAV_GROUPS, initNavOrder, readNavOrder, writeNavOrder, applyNavOrder, resetNavOrder, defaultNavOrder, syncNavOrderWithAccount, NAV_ORDER_KEY, NAV_ORDER_PREF, NAV_ITEMS };

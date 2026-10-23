@@ -74,11 +74,11 @@ document.addEventListener('DOMContentLoaded', markComposerUserEdited, { once: tr
         });
       };
       // Document editor — overflow menu button + the docs panel rail/tool button.
-      hideOn('#overflow-doc-btn, #tool-doc-btn', privs.can_use_documents);
-      // Research — sidebar tool + the in-input deep-research toggle.
-      hideOn('#tool-research-btn, #research-toggle-btn', privs.can_use_research);
+      hideOn('#overflow-doc-btn', privs.can_use_documents);
+      // Research — sidebar tool, its rail button and the in-input deep-research toggle.
+      hideOn('#tool-research-btn, #rail-research, #research-toggle-btn', privs.can_use_research);
       // Memory & skills (rail/tool button only — UI/API entry).
-      hideOn('#tool-memory-btn', privs.can_manage_memory);
+      hideOn('#tool-memory-btn, #rail-memory', privs.can_manage_memory);
       // Agent mode toggle — force chat mode by hiding the Agent toggle button.
       if (privs.can_use_agent === false) {
         const _agent = document.getElementById('mode-agent-btn');
@@ -97,7 +97,7 @@ document.addEventListener('DOMContentLoaded', markComposerUserEdited, { once: tr
 {
   const KEY = Storage.KEYS.SIDEBAR_COLLAPSED;
   const saved = Storage.getJSON(KEY, {});
-  const _defaultCollapsed = { 'sessions-section': true };
+  const _defaultCollapsed = { 'sessions-section': true, 'more-section': true };
   document.querySelectorAll('.sidebar .section').forEach((section) => {
     const id = section.id;
     if (!id) return;
