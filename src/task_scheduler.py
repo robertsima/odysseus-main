@@ -135,6 +135,30 @@ def task_domain_disabled_tools(task_text: str) -> set:
     return set(TASK_EMAIL_WRITE_TOOLS) - task_named_tools(task_text, TASK_EMAIL_WRITE_TOOLS)
 
 
+def task_needs_tools(task_text: str, crew=None, tool_names=None) -> bool:
+    """True when a task is set up to do work only a tool can do.
+
+    Two signals the scheduler already holds: the linked crew member states a
+    tool allowlist of its own, or the task text spells out a callable tool by
+    name (``mcp__todoist__todoist``, ``manage_tasks``). Every llm task is
+    offered tools, so offering them says nothing about need. ``max_steps`` is
+    no signal either, since plain-text tasks carry it.
+    """
+    if crew is not None:
+        from src.crew_profile import crew_enabled_tools
+
+        if crew_enabled_tools(crew) or getattr(crew, "agent_profile", None):
+            return True
+    if tool_names is None:
+        try:
+            from src.tool_policy import live_tool_names
+
+            tool_names = live_tool_names()
+        except Exception:
+            tool_names = set()
+    return bool(task_named_tools(task_text, tool_names))
+
+
 def compose_task_relevant_tools(rag_tools, assistant_always, disabled_tools,
                                 task_text: str | None = None):
     """Compose the relevant-tools set offered to a scheduled task's agent.
@@ -3045,6 +3069,11 @@ class TaskScheduler:
         # counting it separately would double every failure.
         fallback_headers = self._resolve_endpoint_headers(endpoint_url, task.owner)
 
+        try:
+            _needs_tools = task_needs_tools(_task_text, crew)
+        except Exception:
+            _needs_tools = False
+
         async def _call_model():
             try:
                 return await self._run_agent_loop(
@@ -3054,8 +3083,34 @@ class TaskScheduler:
                     datetime_context_msg=_dt_msg,
                 )
             except Exception as e:
-                logger.warning(f"Agent loop failed for task '{task.name}', falling back to simple call: {e}")
                 from src.task_endpoint import task_llm_call_async
+                if _needs_tools:
+                    # The agent loop already walked the task fallback chain, so
+                    # no endpoint left supports tools. A prose answer from a
+                    # no-tools call is not evidence the tool work happened;
+                    # recording it as a completed run is how a task that
+                    # needed its tools reported success without them.
+                    logger.warning(f"Agent loop failed for task '{task.name}', which needs tools; not completing on a no-tools fallback: {e}")
+                    prose = ""
+                    try:
+                        prose = (await task_llm_call_async(
+                            [{"role": "system", "content": NO_TOOLS_TASK_SYSTEM_PROMPT},
+                             *([_dt_msg] if _dt_msg else []),
+                             {"role": "user", "content": task.prompt}],
+                            fallback_url=endpoint_url, fallback_model=model,
+                            fallback_headers=fallback_headers,
+                            owner=task.owner, timeout=120,
+                        ) or "").strip()
+                    except Exception:
+                        pass
+                    msg = (
+                        f"Agent loop failed ({type(e).__name__}: {e}) and the "
+                        "fallback call had no tools, so the task's tool work was not done."
+                    )
+                    if prose:
+                        msg += f" Unverified text-only answer: {prose[:800]}"
+                    raise RuntimeError(msg) from e
+                logger.warning(f"Agent loop failed for task '{task.name}', falling back to simple call: {e}")
                 # No tools on this path, so the system text must not promise any.
                 _fallback_system = (
                     NO_TOOLS_TASK_SYSTEM_PROMPT
