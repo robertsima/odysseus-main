@@ -654,7 +654,7 @@ function fleetHtml() {
     }<div class="ag-card-grid">${cards}</div></div>`;
   }).join('');
   if (html) return `${html}${pages > 1 ? `<nav class="ag-fleet-pages" aria-label="Fleet pages"><button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="fleet-page" data-page="${state.fleetPage - 1}"${state.fleetPage === 0 ? ' disabled' : ''}>← Newer</button><span>${state.fleetPage * FLEET_PAGE_SIZE + 1}–${Math.min(candidates.length, (state.fleetPage + 1) * FLEET_PAGE_SIZE)} of ${candidates.length}</span><button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="fleet-page" data-page="${state.fleetPage + 1}"${state.fleetPage >= pages - 1 ? ' disabled' : ''}>Older →</button></nav>` : ''}`;
-  if (!state.rows.length) return '<div class="wb-empty">Nothing is running. Send a chat a task, or launch a worker.</div>';
+  if (!state.rows.length) return '<div class="wb-empty">Nothing is running. Use Assign a task to start one.</div>';
   if (state.bucket !== 'all') {
     const label = (BUCKETS.find(([k]) => k === state.bucket) || [, ''])[1];
     return `<div class="wb-empty">Nothing in “${label}”. <button type="button" class="ag-inline-link" data-ag="bucket" data-bucket="all">Show all</button></div>`;
