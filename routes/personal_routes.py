@@ -20,6 +20,8 @@ from core.middleware import INTERNAL_TOOL_USER, require_admin
 from src.upload_handler import secure_filename
 from src.upload_limits import PERSONAL_UPLOAD_MAX_BYTES
 from src.rag_sensitivity import SENSITIVITY_PUBLIC, normalize_sensitivity
+from src import library_index
+from src.artifact_roles import classify
 
 UPLOADS_DIR = PERSONAL_UPLOADS_DIR
 
@@ -434,6 +436,7 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
                 os.fsync(handle.fileno())
             os.replace(temp_name, target)
             temp_name = None
+            library_index.clear()
         except OSError as exc:
             if _is_read_only_error(exc):
                 raise HTTPException(409, _READ_ONLY_SAVE_DETAIL) from exc
@@ -508,6 +511,7 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
         except OSError as exc:
             raise HTTPException(500, f"Could not read vault directory: {exc}")
 
+        sibling_names = [e.name for e in entries if not e.name.startswith(".") and e.is_file(follow_symlinks=False)]
         for entry in entries:
             if entry.name.startswith(".") or entry.name in {"__pycache__", "node_modules"}:
                 continue
@@ -533,6 +537,7 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
                 "size": stat.st_size,
                 "modified": stat.st_mtime,
                 "kind": kind,
+                "role": classify(rel, siblings=sibling_names),
                 **(_vault_file_policy(entry.path) if kind == "markdown" else _vault_binary_policy(entry.path)),
             })
         return {
@@ -786,6 +791,7 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
         try:
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             os.replace(source, dest)
+            library_index.clear()
         except OSError as exc:
             if _is_read_only_error(exc):
                 raise HTTPException(409, _READ_ONLY_SAVE_DETAIL) from exc

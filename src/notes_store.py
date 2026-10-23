@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
+from src import library_index
 from src.notes_markdown import (
     NoteRecord,
     markdown_to_note,
@@ -144,6 +145,7 @@ class MarkdownNotesStore:
             os.replace(temp_name, target)
             if current and current.resolve() != target.resolve() and current.exists():
                 current.unlink()
+            library_index.clear()
         finally:
             if os.path.exists(temp_name):
                 os.unlink(temp_name)
@@ -165,6 +167,7 @@ class MarkdownNotesStore:
         if enforce_readonly:
             assert_vault_writable(path, operation="delete note from")
         path.unlink()
+        library_index.clear()
         return True
 
 
