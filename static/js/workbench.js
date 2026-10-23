@@ -84,6 +84,18 @@ const state = {
   files: [],
   filesLoading: false,
   commits: [],
+  commitsLoading: false,
+  // Paging facts for the commit list: whether git has more, the total when it
+  // could be counted in time (else null), and where the next page starts.
+  commitsPage: { hasMore: false, total: null, nextOffset: null, loadingMore: false, moreError: '' },
+  // Bumped whenever Changes/Commits switch to another repository or run. A
+  // load that finished for an older generation must change nothing.
+  repoGen: 0,
+  repoLoads: {},       // kind → AbortController of the newest load of that kind
+  repoRefresh: null,   // the running coalesced refresh, if any
+  repoRefreshing: false,
+  repoDirty: false,    // something may have changed while nobody was looking
+  repoStatus: { changes: { at: 0, error: '' }, commits: { at: 0, error: '' } },
   selectedFile: null,
   selectedCommit: null,
   diffText: '',
@@ -1180,7 +1192,7 @@ function updateBadges() {
   };
   setBadge('activity', running ? String(running) : '', 'run');
   setBadge('changes', state.files.length ? String(state.files.length) : '');
-  setBadge('commits', state.commits.length ? String(state.commits.length) : '');
+  setBadge('commits', state.commits.length ? `${state.commits.length}${state.commitsPage.hasMore ? '+' : ''}` : '');
 }
 
 // ── rendering: changes / commits ──────────────────────────────────────────
@@ -1207,6 +1219,65 @@ function sourceControlHtml() {
   const hint = newer ? `<button type="button" class="wb-btn wb-btn-sm wb-repo-suggestion" data-wb-act="suggest-repo" data-path="${esc(suggested.path)}" title="Recent activity in ${esc(suggested.path)}. Switch checkout without changing files.">Recent activity: ${esc(suggested.branch || 'detached')} · ${esc(suggested.path.split(/[\\/]/).pop())} →</button>` : '';
   return `<label class="wb-branch-picker">Branch / worktree <select class="wb-select wb-repo-select" data-wb-change="repo" title="Select an active branch checkout" aria-label="Branch or worktree">${c.path ? '' : '<option value="">Choose a branch checkout…</option>'}${options}</select></label>${hint}`;
 }
+function commitsCountText() {
+  const p = state.commitsPage;
+  const n = state.commits.length;
+  if (p.hasMore) return p.total != null ? `${n} of ${p.total}` : `Latest ${n}`;
+  return plural(n, 'commit');
+}
+function commitsScopeText() {
+  const c = state.repoCtx;
+  if (c.taskId) return 'since the run started';
+  return c.base ? `since ${c.base}` : 'in the repository log';
+}
+function commitsScopeTitle() {
+  const c = state.repoCtx;
+  const p = state.commitsPage;
+  const range = c.taskId ? `commits after the run's start commit ${c.base || ''}`.trim()
+    : c.base ? `commits reachable from HEAD but not from ${c.base}` : 'every commit reachable from HEAD';
+  return `${range}. ${p.total != null ? `${p.total} in total.` : (p.hasMore ? 'The total was not counted.' : 'This is all of them.')}`;
+}
+const shortSha = (v) => String(v || '').slice(0, 7);
+/** One compact line above Changes / Commits that says what is being shown:
+ *  repository, branch or worktree, run, comparison base, when it was last
+ *  read, and a Refresh. Paths and SHAs sit behind Details. */
+function scopeHeaderHtml(tab) {
+  const c = state.repoCtx;
+  if (!c.path && !c.taskId) return '';
+  const st = state.repoStatus[tab] || { at: 0, error: '' };
+  const repo = state.repos.find((x) => x.path === c.path);
+  const task = c.task;
+  const name = (c.path || '').split(/[\\/]/).filter(Boolean).pop() || 'repository';
+  const branch = task ? (task.branch || '') : (repo?.branch || '');
+  const isTree = !task && repo?.kind === 'worktree';
+  const baseLabel = task ? `run start ${shortSha(task.start_commit)}` : (c.base || 'HEAD');
+  const item = (key, value, title) => `<span class="wb-scope-item"${title ? ` title="${esc(title)}"` : ''}><span class="wb-scope-k">${esc(key)}</span> ${esc(value)}</span>`;
+  const items = [
+    item('Repository', name, c.path),
+    item(isTree ? 'Worktree' : 'Branch', branch || (task ? 'unknown' : 'detached'), branch),
+    task ? item('Run', `${c.label || c.taskId.slice(0, 8)}${task.status ? ` (${task.status})` : ''}`, c.taskId) : '',
+    item('Compared with', baseLabel, c.base || (task ? task.start_commit : '')),
+  ].join('');
+  const stale = st.error && st.at;
+  const updated = st.at ? `Last updated ${fmtTime(st.at / 1000)}` : (state.repoRefreshing ? 'Loading…' : 'Not loaded yet');
+  const detail = (k, v) => v ? `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>` : '';
+  const error = st.error
+    ? `<div class="wb-inline-error" role="alert"><span>${st.at ? `Could not refresh: ${esc(st.error)}. Showing what was loaded at ${esc(fmtTime(st.at / 1000))}.` : `Could not load: ${esc(st.error)}`}</span><button type="button" class="wb-btn wb-btn-sm" data-wb-act="refresh-repo">Retry</button></div>`
+    : '';
+  return `<div class="wb-scope" data-wb-scope="${tab}">
+    <div class="wb-scope-line">${items}<span class="wb-spacer"></span>
+      ${stale ? '<span class="wb-pill warn" title="The last refresh failed; this is the previous data"><i aria-hidden="true"></i>Stale</span>' : ''}
+      <span class="wb-scope-time">${esc(updated)}</span>
+      <button type="button" class="wb-btn wb-btn-sm" data-wb-act="refresh-repo" title="Read the repository again"${state.repoRefreshing ? ' disabled aria-busy="true"' : ''}>${state.repoRefreshing ? 'Refreshing…' : 'Refresh'}</button>
+    </div>
+    ${error}
+    <details class="wb-disclosure wb-scope-details" data-wb-key="scope-details-${tab}"><summary>Details</summary><dl class="wb-scope-dl">
+      ${detail('Path', c.path)}${detail('Branch', branch)}${detail('Compared with', task ? task.start_commit : (c.base || 'HEAD (the working tree against the last commit)'))}
+      ${task ? detail('Run id', c.taskId) + detail('Run status', task.status) + detail('Run commit', task.commit) : ''}
+      ${tab === 'commits' ? detail('Commit list', `${commitsCountText()} ${commitsScopeText()}`) : ''}
+    </dl></details>
+  </div>`;
+}
 function renderChanges() {
   const box = $('wb-changes');
   if (!box) return;
@@ -1215,25 +1286,27 @@ function renderChanges() {
   const c = state.repoCtx;
   const total = state.files.reduce((a, f) => { a.add += f.additions || 0; a.del += f.deletions || 0; return a; }, { add: 0, del: 0 });
   const hasSource = !!(c.path || c.taskId);
+  const st = state.repoStatus.changes;
   let list;
   if (state.filesLoading) list = emptyHtml('Loading changes…');
+  else if (st.error && !st.at) list = emptyHtml(`Could not load changes: ${esc(st.error)}`, { tone: 'bad' });
   else if (state.files.length) list = state.files.map((f) => fileRowHtml(f, f.path === state.selectedFile)).join('');
-  else list = emptyHtml(hasSource ? 'Working tree is clean.' : 'Choose a repository, or open a Claude Code run from Activity.');
+  else list = emptyHtml(hasSource ? (c.taskId ? 'The run has no changes.' : 'Working tree is clean.') : 'Choose a repository, or open a Claude Code run from Activity.');
   if (state.browse && c.path && !c.taskId) list = `<div class="wb-hint">Tracked files${state.browse.truncated ? ' · first 100 matches; refine search' : ''}</div>`
     + (state.browse.files.length ? state.browse.files.map((path) => fileRowHtml({ path, status: 'tracked' }, path === state.selectedFile)).join('') : emptyHtml('No matching tracked files. Try a different path.'));
   preserveView(box, () => {
     box.innerHTML = `
+      ${scopeHeaderHtml('changes')}
       <div class="wb-toolbar">
         ${sourceControlHtml()}
         ${c.taskId ? '' : `<input class="wb-input wb-base" id="wb-base" placeholder="Compare against (default: HEAD)" value="${esc(c.base || '')}" title="Base ref: a branch, tag or commit. Enter to apply." aria-label="Base ref">`}
-        <button type="button" class="wb-btn" data-wb-act="refresh-changes" title="Reload the change list">Refresh</button>
         ${c.path && !c.taskId ? `<input id="wb-file-search" class="wb-input" type="search" aria-label="Find tracked file by path" placeholder="Find a file…" value="${esc(search || '')}"><button type="button" class="wb-btn" data-wb-act="browse-files">${state.browse ? 'Show changes' : 'Browse files'}</button>` : ''}
         <span class="wb-spacer"></span>
         ${state.files.length ? `<span class="wb-summary">${plural(state.files.length, 'file')} ${statHtml(total.add, total.del)}</span>` : ''}
         ${modeSegHtml()}
       </div>
       <div class="wb-split">
-        <div class="wb-card wb-list" data-wb-scroll="files">${list}</div>
+        <div class="wb-card wb-list${st.error && st.at ? ' wb-stale' : ''}" data-wb-scroll="files">${list}</div>
         <div class="wb-card wb-pane" id="wb-diffpane" data-wb-scroll="diff">${diffPaneHtml()}</div>
       </div>`;
   });
@@ -1258,23 +1331,31 @@ function renderCommits() {
   if (!box) return;
   const c = state.repoCtx;
   const sel = state.selectedCommit;
-  const list = state.commits.length
+  const st = state.repoStatus.commits;
+  const page = state.commitsPage;
+  const rows = state.commits.length
     ? state.commits.map((k) => `<div class="wb-row wb-commit${sel && sel.sha === k.sha ? ' active' : ''}" data-sha="${esc(k.sha)}" role="button" tabindex="0">
         <div class="wb-commit-line"><code class="wb-sha">${esc((k.sha || '').slice(0, 7))}</code><span class="wb-commit-subj" title="${esc(k.subject || k.message || '')}">${esc(k.subject || k.message || '')}</span></div>
         <div class="wb-row-meta">${esc(k.author || '')}${k.author && (k.date || k.ts) ? ' · ' : ''}${whenHtml(k.date || k.ts)}</div>
       </div>`).join('')
-    : emptyHtml(c.path || c.taskId ? 'No commits.' : 'Choose a repository, or open a Claude Code run from Activity.');
+    : (state.commitsLoading ? emptyHtml('Loading commits…')
+      : st.error && !st.at ? emptyHtml(`Could not load commits: ${esc(st.error)}`, { tone: 'bad' })
+      : emptyHtml(c.path || c.taskId ? (c.taskId ? 'No commits since the run started.' : 'No commits.') : 'Choose a repository, or open a Claude Code run from Activity.'));
+  const more = state.commits.length && page.hasMore
+    ? `<div class="wb-more">${page.moreError ? `<span class="wb-text-bad" role="alert">Could not load more: ${esc(page.moreError)}</span>` : ''}<button type="button" class="wb-btn wb-btn-sm" data-wb-act="more-commits"${page.loadingMore ? ' disabled' : ''}>${page.loadingMore ? 'Loading…' : (page.total != null ? `Load more (${Math.max(0, page.total - state.commits.length)} older)` : 'Load more')}</button></div>`
+    : '';
+  const list = rows + more;
   preserveView(box, () => {
     box.innerHTML = `
+      ${scopeHeaderHtml('commits')}
       <div class="wb-toolbar">
         ${sourceControlHtml()}
-        <button type="button" class="wb-btn" data-wb-act="refresh-commits" title="Reload commits">Refresh</button>
         <span class="wb-spacer"></span>
-        <span class="wb-summary">${plural(state.commits.length, 'commit')}${c.taskId ? ' since the run started' : ''}</span>
+        <span class="wb-summary" title="${esc(commitsScopeTitle())}"><strong>${esc(commitsCountText())}</strong> ${esc(commitsScopeText())}</span>
         ${modeSegHtml()}
       </div>
       <div class="wb-split">
-        <div class="wb-card wb-list" data-wb-scroll="commits">${list}</div>
+        <div class="wb-card wb-list${st.error && st.at ? ' wb-stale' : ''}" data-wb-scroll="commits">${list}</div>
         <div class="wb-card wb-pane" id="wb-commitpane" data-wb-scroll="commit">${commitPaneHtml()}</div>
       </div>`;
   });
@@ -1420,87 +1501,293 @@ async function loadRoots() {
   if (state.prefs.tab === 'changes') renderChanges();
   if (state.prefs.tab === 'commits') renderCommits();
 }
+// ── repository context: loading, generations, refresh ─────────────────────
+const COMMITS_PAGE = 50;
+const COMMITS_MAX = 200;   // src/repo_inspect.MAX_COMMITS
+const REPO_STALE_DEBOUNCE_MS = 250;
+const isAbort = (e) => !!e && e.name === 'AbortError';
+const emptyCommitsPage = () => ({ hasMore: false, total: null, nextOffset: null, loadingMore: false, moreError: '' });
+const hasRepoContext = () => !!(state.repoCtx.path || state.repoCtx.taskId);
+
+/** Start a new repository/run context: everything still in flight for the
+ *  old one is aborted, and whatever it returns later is ignored. */
+function newContext() {
+  state.repoGen += 1;
+  for (const ctl of Object.values(state.repoLoads)) { try { ctl.abort(); } catch (_) {} }
+  state.repoLoads = {};
+  state.repoRefresh = null;
+  state.repoRefreshing = false;
+  state.repoDirty = false;
+  state.filesLoading = false;
+  state.commitsLoading = false;
+  state.commitsPage = emptyCommitsPage();
+  state.repoStatus = { changes: { at: 0, error: '' }, commits: { at: 0, error: '' } };
+}
+/** One load of `kind`. A newer load of the same kind supersedes it. `live()`
+ *  is the check every continuation makes before touching state. */
+function startLoad(kind) {
+  state.repoLoads[kind]?.abort();
+  const ctl = new AbortController();
+  state.repoLoads[kind] = ctl;
+  const gen = state.repoGen;
+  return {
+    signal: ctl.signal,
+    live: () => gen === state.repoGen && state.repoLoads[kind] === ctl,
+    done: () => { if (state.repoLoads[kind] === ctl) delete state.repoLoads[kind]; },
+  };
+}
+function resetViews() {
+  state.browse = null;
+  state.files = []; state.commits = []; state.selectedFile = null; state.selectedCommit = null; state.diffText = '';
+}
+
 function setRepo(path, { remember = true } = {}) {
   if (!confirmDiscardEditor()) return;
+  newContext();
   state.repoCtx = { path, base: '', taskId: null, label: '' };
-  state.browse = null;
   if (remember) {
     state.prefs.repo = path;
     state.prefs.recentRepos = [path, ...(state.prefs.recentRepos || []).filter((x) => x !== path)].slice(0, 12);
     savePrefs();
   }
-  state.files = []; state.commits = []; state.selectedFile = null; state.selectedCommit = null; state.diffText = '';
-  refreshChanges(); refreshCommits();
+  resetViews();
+  state.filesLoading = true; state.commitsLoading = true;
+  renderChanges(); renderCommits();
+  return refreshRepo('context');
 }
 async function loadTask(taskId, { tab = 'changes' } = {}) {
+  if (!confirmDiscardEditor()) return;
+  newContext();
   state.repoCtx = { path: '', base: '', taskId, label: '' };
-  state.files = []; state.commits = []; state.selectedFile = null; state.selectedCommit = null; state.diffText = '';
-  state.filesLoading = true;
+  resetViews();
+  state.filesLoading = true; state.commitsLoading = true;
   setTab(tab);
+  renderChanges(); renderCommits();
+  await refreshRepo('context');
+}
+/** Read the repository (or run) again. Simultaneous calls share one pass,
+ *  and a call that arrives mid-pass schedules exactly one more. */
+function refreshRepo(reason = 'manual') {
+  if (!hasRepoContext()) { renderChanges(); renderCommits(); return Promise.resolve(); }
+  if (state.repoRefresh) { state.repoRefresh.again = true; return state.repoRefresh.promise; }
+  const job = { gen: state.repoGen, again: false, reason, promise: null };
+  state.repoRefresh = job;
+  job.promise = (async () => {
+    try {
+      do {
+        job.again = false;
+        await runRepoRefresh(job);
+      } while (job.again && job.gen === state.repoGen);
+    } finally {
+      if (state.repoRefresh === job) { state.repoRefresh = null; setRefreshing(false); }
+    }
+  })();
+  return job.promise;
+}
+function setRefreshing(on) {
+  if (state.repoRefreshing === on) return;
+  state.repoRefreshing = on;
+  document.querySelectorAll('#workbench-modal [data-wb-act="refresh-repo"]').forEach((b) => {
+    if (b.textContent === 'Retry') return;
+    b.disabled = on; b.textContent = on ? 'Refreshing…' : 'Refresh';
+    if (on) b.setAttribute('aria-busy', 'true'); else b.removeAttribute('aria-busy');
+  });
+}
+async function runRepoRefresh(job) {
+  const gen = job.gen;
+  state.repoDirty = false;
+  // Loaded-more commits are re-read in one go so the list does not shrink.
+  state.repoLoads.more?.abort(); delete state.repoLoads.more;
+  state.commitsPage.loadingMore = false;
+  setRefreshing(true);
+  if (state.repoCtx.taskId) await loadTaskPart();
+  else await Promise.all([loadChangesPart(), loadCommitsPart()]);
+  if (gen !== state.repoGen) return;
+  state.repoRefreshing = false;
+  renderChanges(); renderCommits();
+  // Keep the file in view and read its diff again quietly; otherwise land on
+  // the first changed file.
+  if (state.prefs.tab === 'changes') {
+    if (state.selectedFile && !state.browse) { if (!state.editor) loadDiff(state.selectedFile, { quiet: true }); }
+    else autoSelectFirstFile();
+  }
+}
+/** After new data: forget a selected file that is gone, unless it is open in
+ *  an editor with unsaved edits. */
+function reconcileSelection() {
+  if (state.browse || !state.selectedFile) return;
+  if (state.files.some((f) => f.path === state.selectedFile)) return;
+  if (state.editor?.dirty) return;
+  state.selectedFile = null; state.diffText = ''; state.editor = null;
+}
+function changesUrl(c) {
+  return `/api/workbench/repo/changes?path=${encodeURIComponent(c.path)}${c.base ? '&base=' + encodeURIComponent(c.base) : ''}`;
+}
+async function loadChangesPart() {
+  const c = state.repoCtx;
+  if (!c.path) { state.filesLoading = false; return; }
+  const load = startLoad('changes');
   try {
-    const r = await api(`/api/claude-code/tasks/${encodeURIComponent(taskId)}/changes`);
-    state.repoCtx.path = r.repository || '';
-    state.repoCtx.base = r.start_commit || '';
-    state.repoCtx.label = r.label || '';
-    state.repoCtx.task = r;
+    const r = await api(changesUrl(c), { signal: load.signal });
+    if (!load.live()) return;
+    state.files = r.files || [];
+    state.filesLoading = false;
+    state.repoStatus.changes = { at: Date.now(), error: '' };
+    reconcileSelection();
+    if (r.truncated) showToast('Change list truncated', 'warning');
+  } catch (e) {
+    if (!load.live() || isAbort(e)) return;
+    state.filesLoading = false;
+    state.repoStatus.changes.error = e.message || 'request failed';
+  } finally { load.done(); }
+}
+async function loadCommitsPart() {
+  const c = state.repoCtx;
+  if (!c.path) { state.commitsLoading = false; return; }
+  const load = startLoad('commits');
+  const limit = state.commits.length > COMMITS_PAGE ? Math.min(COMMITS_MAX, state.commits.length) : COMMITS_PAGE;
+  try {
+    const r = await api(`/api/workbench/repo/commits?path=${encodeURIComponent(c.path)}&limit=${limit}${c.base ? '&base=' + encodeURIComponent(c.base) : ''}`, { signal: load.signal });
+    if (!load.live()) return;
+    state.commits = r.commits || [];
+    state.commitsPage = { hasMore: !!r.has_more, total: r.total ?? null, nextOffset: r.next_offset ?? null, loadingMore: false, moreError: '' };
+    state.commitsLoading = false;
+    state.repoStatus.commits = { at: Date.now(), error: '' };
+  } catch (e) {
+    if (!load.live() || isAbort(e)) return;
+    state.commitsLoading = false;
+    state.repoStatus.commits.error = e.message || 'request failed';
+  } finally { load.done(); }
+}
+async function loadTaskPart() {
+  const c = state.repoCtx;
+  const load = startLoad('task');
+  try {
+    const r = await api(`/api/claude-code/tasks/${encodeURIComponent(c.taskId)}/changes`, { signal: load.signal });
+    if (!load.live()) return;
+    c.path = r.repository || '';
+    c.base = r.start_commit || '';
+    c.label = r.label || '';
+    c.task = r;
     state.files = r.changes || [];
     state.commits = r.commits || [];
-    if (r.changes_error) showToast(`Change list: ${r.changes_error}`, 'warning');
-  } catch (e) { showToast(`Could not load run changes: ${e.message}`, 'error'); }
-  state.filesLoading = false;
-  renderChanges(); renderCommits();
-  autoSelectFirstFile();
+    const pg = r.commits_page || {};
+    state.commitsPage = { hasMore: !!pg.has_more, total: pg.total ?? null, nextOffset: pg.next_offset ?? null, loadingMore: false, moreError: '' };
+    state.filesLoading = false; state.commitsLoading = false;
+    const now = Date.now();
+    const note = r.changes_error ? `git could not be read (${r.changes_error}); showing the saved record` : '';
+    state.repoStatus.changes = { at: now, error: note };
+    state.repoStatus.commits = { at: now, error: note };
+    reconcileSelection();
+  } catch (e) {
+    if (!load.live() || isAbort(e)) return;
+    state.filesLoading = false; state.commitsLoading = false;
+    const msg = e.message || 'request failed';
+    state.repoStatus.changes.error = msg;
+    state.repoStatus.commits.error = msg;
+  } finally { load.done(); }
 }
-async function refreshChanges() {
+function applyBaseInput() {
+  const input = $('wb-base');
+  if (input && !state.repoCtx.taskId) state.repoCtx.base = input.value.trim();
+}
+// Kept for callers that mean "reload what is shown".
+const refreshChanges = () => refreshRepo('manual');
+const refreshCommits = () => refreshRepo('manual');
+
+async function loadMoreCommits() {
   const c = state.repoCtx;
-  if (c.taskId) return loadTask(c.taskId, { tab: state.prefs.tab });
-  if (!c.path) { renderChanges(); return; }
-  const baseInput = $('wb-base');
-  if (baseInput) c.base = baseInput.value.trim();
-  state.filesLoading = !state.files.length;
-  if (state.filesLoading) renderChanges();
+  const p = state.commitsPage;
+  if (!p.hasMore || p.loadingMore || !hasRepoContext()) return;
+  const load = startLoad('more');
+  p.loadingMore = true; p.moreError = '';
+  renderCommits();
+  const url = c.taskId
+    ? `/api/claude-code/tasks/${encodeURIComponent(c.taskId)}/commits?offset=${p.nextOffset}&limit=${COMMITS_PAGE}`
+    : `/api/workbench/repo/commits?path=${encodeURIComponent(c.path)}&limit=${COMMITS_PAGE}&offset=${p.nextOffset}&total=false${c.base ? '&base=' + encodeURIComponent(c.base) : ''}`;
   try {
-    const r = await api(`/api/workbench/repo/changes?path=${encodeURIComponent(c.path)}${c.base ? '&base=' + encodeURIComponent(c.base) : ''}`);
-    state.files = r.files || [];
-    if (r.truncated) showToast('Change list truncated', 'warning');
-  } catch (e) { state.files = []; showToast(e.message, 'error'); }
-  state.filesLoading = false;
-  if (state.selectedFile && !state.files.some((f) => f.path === state.selectedFile)) { state.selectedFile = null; state.diffText = ''; }
-  renderChanges();
-  autoSelectFirstFile();
+    const r = await api(url, { signal: load.signal });
+    if (!load.live()) return;
+    const have = new Set(state.commits.map((k) => k.sha));
+    state.commits = state.commits.concat((r.commits || []).filter((k) => !have.has(k.sha)));
+    const next = state.commitsPage;
+    next.hasMore = !!r.has_more; next.nextOffset = r.next_offset ?? null; next.loadingMore = false;
+    if (r.total != null) next.total = r.total;
+    renderCommits();
+  } catch (e) {
+    if (!load.live() || isAbort(e)) return;
+    state.commitsPage.loadingMore = false; state.commitsPage.moreError = e.message || 'request failed';
+    renderCommits();
+  } finally { load.done(); }
 }
+
+// Refresh triggers: reopening (open()), explicit Refresh, the tab coming back
+// into view, and the Activity half announcing that a checkout may have
+// changed. While the window is closed or hidden the change is only noted.
+let _repoStaleTimer = null;
+function noteRepoStale(reason = 'event') {
+  if (!hasRepoContext()) return;
+  const tab = state.prefs.tab;
+  if (!isOpen() || document.hidden || (tab !== 'changes' && tab !== 'commits')) { state.repoDirty = true; return; }
+  clearTimeout(_repoStaleTimer);
+  _repoStaleTimer = setTimeout(() => { _repoStaleTimer = null; refreshRepo(reason); }, REPO_STALE_DEBOUNCE_MS);
+}
+function watchRepoRefresh() {
+  document.addEventListener('wb:repo-stale', () => noteRepoStale('stale'));
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden || !hasRepoContext()) return;
+    const tab = state.prefs.tab;
+    if (isOpen() && (tab === 'changes' || tab === 'commits')) refreshRepo('visible');
+    else state.repoDirty = true;
+  });
+}
+
 /** Land on something useful: the first changed file's diff. */
 function autoSelectFirstFile() {
   if (!state.selectedFile && state.files.length && state.prefs.tab === 'changes') selectFile(state.files[0].path);
 }
-async function refreshCommits() {
-  const c = state.repoCtx;
-  if (!c.path && !c.taskId) { renderCommits(); return; }
-  if (c.taskId) { renderCommits(); return; }
-  try {
-    const r = await api(`/api/workbench/repo/commits?path=${encodeURIComponent(c.path)}&limit=50${c.base ? '&base=' + encodeURIComponent(c.base) : ''}`);
-    state.commits = r.commits || [];
-  } catch (e) { state.commits = []; showToast(e.message, 'error'); }
-  renderCommits();
+function diffUrl(c, path) {
+  return c.taskId
+    ? `/api/claude-code/tasks/${encodeURIComponent(c.taskId)}/diff?path=${encodeURIComponent(path)}`
+    : `/api/workbench/repo/diff?path=${encodeURIComponent(c.path)}&file=${encodeURIComponent(path)}${c.base ? '&base=' + encodeURIComponent(c.base) : ''}`;
 }
 async function selectFile(path) {
   if (!confirmDiscardEditor()) return;
   state.selectedFile = path; state.diffText = null;
   if (state.browse) { state.diffText = ''; renderChanges(); editSelectedFile(); return; }
   renderChanges();
+  await loadDiff(path);
+}
+/** The selected file's diff. `quiet` re-reads it without blanking the pane
+ *  or moving the scroll position (a refresh, not a new selection). */
+async function loadDiff(path, { quiet = false } = {}) {
   const c = state.repoCtx;
+  const load = startLoad('diff');
+  const stillWanted = () => load.live() && state.selectedFile === path;
+  let text;
   try {
-    const r = c.taskId
-      ? await api(`/api/claude-code/tasks/${encodeURIComponent(c.taskId)}/diff?path=${encodeURIComponent(path)}`)
-      : await api(`/api/workbench/repo/diff?path=${encodeURIComponent(c.path)}&file=${encodeURIComponent(path)}${c.base ? '&base=' + encodeURIComponent(c.base) : ''}`);
-    if (state.selectedFile !== path) return;
-    state.diffText = r.diff || r.text || '';
-    if (r.truncated) showToast('Diff truncated', 'warning');
-  } catch (e) { if (state.selectedFile === path) state.diffText = ''; showToast(e.message, 'error'); }
-  if (state.selectedFile === path) {
-    const pane = $('wb-diffpane');
-    if (pane) { pane.innerHTML = diffPaneHtml(); pane.scrollTop = 0; }
-  }
+    const r = await api(diffUrl(c, path), { signal: load.signal });
+    if (!stillWanted()) return;
+    text = r.diff || r.text || '';
+    if (r.truncated && !quiet) showToast('Diff truncated', 'warning');
+  } catch (e) {
+    if (!stillWanted() || isAbort(e)) return;
+    if (quiet) return;
+    text = '';
+    showToast(e.message, 'error');
+  } finally { load.done(); }
+  if (quiet && text === state.diffText) return;
+  state.diffText = text;
+  const pane = $('wb-diffpane');
+  if (!pane || state.editor?.path === path) return;
+  const body = pane.querySelector('.wb-diff-body');
+  const kept = { pane: pane.scrollTop, top: body?.scrollTop || 0, left: body?.scrollLeft || 0 };
+  pane.innerHTML = diffPaneHtml();
+  if (quiet) {
+    pane.scrollTop = kept.pane;
+    const next = pane.querySelector('.wb-diff-body');
+    if (next) { next.scrollTop = kept.top; next.scrollLeft = kept.left; }
+  } else pane.scrollTop = 0;
 }
 function confirmDiscardEditor() {
   // The editor draft stays in the textarea after a failed save.
@@ -1516,26 +1803,34 @@ async function browseFiles() {
 async function searchFiles() {
   const query = $('wb-file-search')?.value || '';
   const path = state.repoCtx.path;
+  const load = startLoad('browse');
   try {
-    const found = await api(`/api/workbench/repo/files?path=${encodeURIComponent(path)}&query=${encodeURIComponent(query)}`);
-    if (path !== state.repoCtx.path) return;
+    const found = await api(`/api/workbench/repo/files?path=${encodeURIComponent(path)}&query=${encodeURIComponent(query)}`, { signal: load.signal });
+    if (!load.live() || path !== state.repoCtx.path) return;
     state.browse = found;
     state.selectedFile = null; state.diffText = '';
     renderChanges();
-  } catch (error) { showToast(`Could not browse files: ${error.message}`, 'error'); }
+  } catch (error) {
+    if (!load.live() || isAbort(error)) return;
+    showToast(`Could not browse files: ${error.message}`, 'error');
+  } finally { load.done(); }
 }
 async function editSelectedFile() {
   if (!state.selectedFile || state.repoCtx.taskId || !state.repoCtx.path) return;
+  const path = state.selectedFile;
+  const load = startLoad('edit');
   try {
-    const path = state.selectedFile;
-    const result = await api(`/api/workbench/repo/file?path=${encodeURIComponent(state.repoCtx.path)}&file=${encodeURIComponent(path)}&ref=worktree`);
+    const result = await api(`/api/workbench/repo/file?path=${encodeURIComponent(state.repoCtx.path)}&file=${encodeURIComponent(path)}&ref=worktree`, { signal: load.signal });
+    if (!load.live() || path !== state.selectedFile) return;
     if (result.missing || result.truncated || !result.version) throw new Error('Only existing UTF-8 text files under 400 KB can be edited');
-    if (path !== state.selectedFile) return;
     state.editor = { path, version: result.version, content: result.content, dirty: false };
     $('wb-diffpane').innerHTML = diffPaneHtml();
     $('wb-editor-text').value = result.content;
     $('wb-editor-text').focus();
-  } catch (error) { showToast(`Could not open editor: ${error.message}`, 'error'); }
+  } catch (error) {
+    if (!load.live() || isAbort(error)) return;
+    showToast(`Could not open editor: ${error.message}`, 'error');
+  } finally { load.done(); }
 }
 async function saveSelectedFile() {
   const editor = state.editor;
@@ -1543,6 +1838,7 @@ async function saveSelectedFile() {
   const input = $('wb-editor-text');
   if (!input) return;
   const content = input.value;
+  const gen = state.repoGen;
   const button = document.querySelector('#wb-diffpane [data-wb-act="save-file"]');
   if (button) button.disabled = true;
   try {
@@ -1550,30 +1846,44 @@ async function saveSelectedFile() {
     editor.version = result.version;
     editor.content = content;
     editor.dirty = false;
-    state.editor = null;
+    // The write landed on disk whichever repository is shown now.
     showToast('File saved in working tree; no commit created', 'success');
-    await refreshChanges();
+    if (gen !== state.repoGen) return;
+    state.editor = null;
+    await refreshRepo('manual');
   } catch (error) {
-    $('wb-editor-status').textContent = `Save failed: ${error.message} — your draft is still here`;
+    if (gen === state.repoGen && $('wb-editor-status')) $('wb-editor-status').textContent = `Save failed: ${error.message} — your draft is still here`;
   } finally { if (button?.isConnected) button.disabled = false; }
 }
 async function selectCommit(sha) {
   const k = state.commits.find((x) => x.sha === sha) || { sha };
+  const path = state.repoCtx.path;
   state.selectedCommit = Object.assign({ loading: true }, k);
   renderCommits();
+  const load = startLoad('commit');
   try {
-    const r = await api(`/api/workbench/repo/commit?path=${encodeURIComponent(state.repoCtx.path)}&sha=${encodeURIComponent(sha)}`);
+    const r = await api(`/api/workbench/repo/commit?path=${encodeURIComponent(path)}&sha=${encodeURIComponent(sha)}`, { signal: load.signal });
+    if (!load.live()) return;
     state.selectedCommit = Object.assign({}, k, r, { loading: false, selectedFile: null, diffText: null });
-  } catch (e) { state.selectedCommit = Object.assign({}, k, { loading: false, body: e.message }); }
+  } catch (e) {
+    if (!load.live() || isAbort(e)) return;
+    state.selectedCommit = Object.assign({}, k, { loading: false, body: e.message });
+  } finally { load.done(); }
   renderCommits();
 }
 async function selectCommitFile(path) {
   const k = state.selectedCommit; if (!k) return;
+  const repoPath = state.repoCtx.path;
   k.selectedFile = path; k.diffText = null; renderCommits();
+  const load = startLoad('commitdiff');
   try {
-    const r = await api(`/api/workbench/repo/diff?path=${encodeURIComponent(state.repoCtx.path)}&file=${encodeURIComponent(path)}&commit=${encodeURIComponent(k.sha)}`);
+    const r = await api(`/api/workbench/repo/diff?path=${encodeURIComponent(repoPath)}&file=${encodeURIComponent(path)}&commit=${encodeURIComponent(k.sha)}`, { signal: load.signal });
+    if (!load.live() || state.selectedCommit !== k || k.selectedFile !== path) return;
     k.diffText = r.diff || r.text || '';
-  } catch (e) { k.diffText = ''; showToast(e.message, 'error'); }
+  } catch (e) {
+    if (!load.live() || isAbort(e) || state.selectedCommit !== k || k.selectedFile !== path) return;
+    k.diffText = ''; showToast(e.message, 'error');
+  } finally { load.done(); }
   renderCommits();
 }
 async function loadPRConfig() {
@@ -1803,6 +2113,7 @@ function setTab(tab) {
   if (tab === 'activity') renderActivity();
   if (tab === 'changes') { renderChanges(); autoSelectFirstFile(); }
   if (tab === 'commits') renderCommits();
+  if ((tab === 'changes' || tab === 'commits') && state.repoDirty) refreshRepo('stale');
   if (tab === 'prs') { if (!state.pr.config) loadPRConfig(); else renderPRs(); }
 }
 function handleTabKeys(event) {
@@ -1839,6 +2150,7 @@ export function open() {
   connect();
   loadRoots();
   setTab(state.prefs.tab || 'changes');
+  if (hasRepoContext()) refreshRepo('open');
 }
 export function close() {
   if (!confirmDiscardEditor()) return;
@@ -1910,7 +2222,7 @@ function wireWindow() {
   modal.addEventListener('keydown', (e) => {
     if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('td.wb-no[role="button"]')) { e.preventDefault(); e.target.click(); return; }
     if (e.key === 'Enter' && e.target.id === 'wb-file-search') { e.preventDefault(); searchFiles(); return; }
-    if (e.key === 'Enter' && e.target.id === 'wb-base') { e.preventDefault(); state.selectedFile = null; refreshChanges(); refreshCommits(); return; }
+    if (e.key === 'Enter' && e.target.id === 'wb-base') { e.preventDefault(); state.selectedFile = null; applyBaseInput(); refreshRepo('manual'); return; }
     if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('.wb-row[role="button"], .wb-run[role="button"]')) { e.preventDefault(); e.target.click(); }
   });
 
@@ -1943,13 +2255,21 @@ function onAction(b) {
     case 'save-file': saveSelectedFile(); break;
     case 'cancel-edit': if (confirmDiscardEditor()) $('wb-diffpane').innerHTML = diffPaneHtml(); break;
     case 'mode': state.prefs.mode = b.dataset.mode; savePrefs(); renderChanges(); renderCommits(); renderPRs(); break;
-    case 'refresh-changes': refreshChanges(); break;
-    case 'refresh-commits': refreshCommits(); break;
+    case 'refresh-repo': case 'refresh-changes': case 'refresh-commits': applyBaseInput(); refreshRepo('manual'); break;
+    case 'more-commits': loadMoreCommits(); break;
     case 'suggest-repo': if (state.repos.some((x) => x.path === b.dataset.path)) setRepo(b.dataset.path); break;
     case 'refresh-prs': refreshPRs(); break;
     case 'recheck-prs': loadPRConfig(); break;
     case 'pr-state': state.pr.stateFilter = b.dataset.state; state.pr.list = []; refreshPRs(); break;
-    case 'leave-run': { const path = state.repoCtx.path || state.prefs.repo; state.repoCtx = { path: '', base: '', taskId: null, label: '' }; if (path) setRepo(path); else { renderChanges(); renderCommits(); } break; }
+    case 'leave-run': {
+      const path = state.repoCtx.path || state.prefs.repo;
+      if (!confirmDiscardEditor()) break;
+      newContext();
+      state.repoCtx = { path: '', base: '', taskId: null, label: '' };
+      state.files = []; state.commits = []; state.selectedFile = null; state.selectedCommit = null; state.diffText = '';
+      if (path) setRepo(path); else { renderChanges(); renderCommits(); }
+      break;
+    }
     case 'run-changes': loadTask(b.dataset.task, { tab: 'changes' }); break;
     case 'run-transcript': showTranscript(b.dataset.task); break;
     case 'run-open-chat': openRunChat(b.dataset.run); break;
@@ -2063,6 +2383,7 @@ export async function init() {
   watchSession();
   watchVisibility();
   startFeedClock();
+  watchRepoRefresh();
   if (!state.enabled) return;
   // A sub-process run starting in this chat opens the Agents room, not this
   // window; the room does that from its own stream (agentsDashboard.js
@@ -2093,4 +2414,6 @@ export const _state = state;
 export const _connect = connect;
 export const _ingest = ingest;
 export const _refreshAgentRuns = refreshAgentRuns;
+// Entry points for tests: the data-loading half of Changes / Commits.
+export const _repo = { setRepo, loadTask, refreshRepo, selectFile, selectCommit, selectCommitFile, loadMoreCommits, noteRepoStale, loadRoots };
 export default { init, open, close, toggle, refreshSettings, openRun };

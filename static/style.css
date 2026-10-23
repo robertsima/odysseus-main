@@ -42312,6 +42312,19 @@ body.theme-frosted .modal {
 /* ── Controls ── */
 .wb-toolbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex-shrink: 0; min-height: var(--wb-h); }
 .wb-spacer { flex: 1 1 auto; }
+
+/* Scope header above Changes / Commits: what is shown, when it was read. */
+.wb-scope { display: flex; flex-direction: column; gap: 4px; flex-shrink: 0; min-width: 0; font-size: 11.5px; color: var(--wb-muted); }
+.wb-scope-line { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; min-width: 0; }
+.wb-scope-item { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); }
+.wb-scope-k { color: var(--wb-faint); margin-right: 2px; }
+.wb-scope-time { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.wb-inline-error { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 5px 8px; border: 1px solid color-mix(in srgb, var(--wb-bad) 55%, var(--border)); border-radius: var(--wb-r-sm); background: color-mix(in srgb, var(--wb-bad) 10%, transparent); color: var(--fg); overflow-wrap: anywhere; }
+.wb-scope-dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 10px; margin: 4px 0 0; font-family: var(--wb-mono); font-size: 11px; }
+.wb-scope-dl dt { color: var(--wb-faint); }
+.wb-scope-dl dd { margin: 0; overflow-wrap: anywhere; color: var(--fg); }
+.wb-stale { opacity: 0.7; }
+.wb-more { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 8px; font-size: 11.5px; }
 .wb-summary { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--wb-muted); white-space: nowrap; }
 .wb-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: var(--wb-h); padding: 0 10px; margin: 0; font: inherit; font-size: 12px; line-height: 1; white-space: nowrap; color: var(--fg); background: color-mix(in srgb, var(--fg) 5%, transparent); border: 1px solid var(--border); border-radius: var(--wb-r-sm); cursor: pointer; transition: background 0.12s, border-color 0.12s, color 0.12s; }
 .wb-btn:hover { background: color-mix(in srgb, var(--fg) 10%, transparent); border-color: color-mix(in srgb, var(--fg) 30%, var(--border)); }
