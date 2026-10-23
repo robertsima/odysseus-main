@@ -64,6 +64,7 @@ const state = {
   tools: null,       // cached /api/tools list
   carriedDoc: null,  // document already open on entering this chat (not opened here)
   localTarget: null, // doc target picked in this chat
+  quickActionsFor: '', // agent whose quick-action chips the strip shows
   loadSeq: 0,
 };
 
@@ -300,6 +301,15 @@ function render() {
   part(line, 'change').innerHTML = state.sessionId
     ? '<button type="button" class="ctx-change-btn" data-csl="panel" title="Change who answers, approvals, tools and privacy for this chat">Change</button>'
     : '';
+
+  // The answering agent's quick actions (agentActions.js owns the chips).
+  const qaAgent = who && who.kind === 'agent' ? who.loadout : '';
+  if (qaAgent !== state.quickActionsFor && window.agentActions?.renderQuickActions) {
+    state.quickActionsFor = qaAgent;
+    window.agentActions.renderQuickActions(line.querySelector('.ctx-quick-actions'), qaAgent)
+      .then(() => { if (state.quickActionsFor === qaAgent) render(); })
+      .catch(() => {});
+  }
 
   const something = bits.length > 0 || links.length > 0 || !!doc
     || MOVED_NODES.some(nodeShown) || !!line.querySelector('.ctx-quick-actions > *')
@@ -603,6 +613,13 @@ function init() {
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
 else init();
 
-const chatSettings = { onSessionSwitch, refresh: () => state.sessionId && onSessionSwitch(state.sessionId), render, docTarget, setDocTarget: pickTarget };
+/** The chat's project and open document, for quick-action placeholders. */
+function getContext() {
+  const doc = openDoc();
+  const ctx = (state.data && state.data.context) || {};
+  return { project: ctx.project || '', document: doc ? { id: doc.id, title: doc.title } : null };
+}
+
+const chatSettings = { onSessionSwitch, refresh: () => state.sessionId && onSessionSwitch(state.sessionId), render, docTarget, setDocTarget: pickTarget, getContext };
 window.chatSettingsModule = chatSettings;
 export default chatSettings;
