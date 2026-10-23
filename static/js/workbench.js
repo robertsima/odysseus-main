@@ -1299,7 +1299,7 @@ function renderChanges() {
       ${scopeHeaderHtml('changes')}
       <div class="wb-toolbar">
         ${sourceControlHtml()}
-        ${c.taskId ? '' : `<input class="wb-input wb-base" id="wb-base" placeholder="Compare against (default: HEAD)" value="${esc(c.base || '')}" title="Base ref: a branch, tag or commit. Enter to apply." aria-label="Base ref">`}
+        ${c.taskId ? '' : `<input class="wb-input wb-base" id="wb-base" placeholder="Base (HEAD)" value="${esc(c.base || '')}" title="Base ref: a branch, tag or commit. Enter to apply." aria-label="Base ref">`}
         ${c.path && !c.taskId ? `<input id="wb-file-search" class="wb-input" type="search" aria-label="Find tracked file by path" placeholder="Find a file…" value="${esc(search || '')}"><button type="button" class="wb-btn" data-wb-act="browse-files">${state.browse ? 'Show changes' : 'Browse files'}</button>` : ''}
         <span class="wb-spacer"></span>
         ${state.files.length ? `<span class="wb-summary">${plural(state.files.length, 'file')} ${statHtml(total.add, total.del)}</span>` : ''}
