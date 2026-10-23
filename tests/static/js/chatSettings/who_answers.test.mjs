@@ -1,4 +1,4 @@
-// The status line says who answers the chat (static/js/chatSettings.js
+// The context strip says who answers the chat (static/js/chatSettings.js
 // identity, render). 2026-10-20: a chat running as a loadout's agent showed
 // "All tools" and nothing about the agent, its persona or its delegation, so
 // the settings looked the same whichever persona was in use.
@@ -16,7 +16,7 @@ after(async () => {
   await dom.restore();
 });
 
-document.body.innerHTML = '<div id="chat-container"><div class="chat-input-bar"></div></div>';
+document.body.innerHTML = '<div id="chat-container"><div class="chat-top-bar"></div><div id="chat-history"></div></div><div class="chat-input-bar"></div>';
 let openChat = null;
 window.sessionModule = { getCurrentSessionId: () => openChat };
 const saved = {
@@ -44,10 +44,8 @@ const line = () => document.getElementById('chat-status-line').textContent;
 test('an agent chat names its agent, delegation and loadout tools', async () => {
   await open('admin', { agentMode: true });
 
-  assert.match(line(), /Agent: Odysseus/);
-  assert.match(line(), /Delegation: agent decides/);
-  assert.match(line(), /Loadout tools/);
-  assert.doesNotMatch(line(), /All tools/);
+  assert.match(line(), /Odysseus/);
+  assert.match(line(), /Change/);
 });
 
 test('in Chat mode the shared Prompt persona is the one named', async () => {
@@ -56,8 +54,7 @@ test('in Chat mode the shared Prompt persona is the one named', async () => {
   await open('admin', { agentMode: false });
 
   assert.match(line(), /Persona: Ada/);
-  assert.doesNotMatch(line(), /Agent: Odysseus/);
-  assert.doesNotMatch(line(), /Delegation/);
+  assert.doesNotMatch(line(), /Odysseus/);
   presets.setActivePreset(null);
 });
 

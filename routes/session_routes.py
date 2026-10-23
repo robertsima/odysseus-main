@@ -1000,8 +1000,23 @@ def setup_session_routes(
         settings = get_session_settings(session_id)
         forked = None
         parent = None
+        session_row = None
+        context_doc = None
         db = SessionLocal()
         try:
+            session_row = db.query(DbSession.owner, DbSession.folder).filter(DbSession.id == session_id).first()
+            if session_row is not None:
+                from sqlalchemy import or_
+                from core.database import Document as DbDocument
+                doc_row = (
+                    db.query(DbDocument.id, DbDocument.title)
+                    .filter(DbDocument.session_id == session_id, DbDocument.is_active == True,  # noqa: E712
+                            or_(DbDocument.owner == session_row.owner, DbDocument.owner.is_(None)))
+                    .order_by(DbDocument.updated_at.desc()).first()
+                )
+                if doc_row:
+                    context_doc = {"id": doc_row.id, "title": doc_row.title}
+
             def _link(target_id):
                 src_row = db.query(DbSession.id, DbSession.name, DbSession.archived).filter(DbSession.id == target_id).first()
                 return ({"id": src_row.id, "name": src_row.name, "archived": bool(src_row.archived)}
@@ -1016,11 +1031,28 @@ def setup_session_routes(
         finally:
             db.close()
         from src import shell_access
+        approval_mode = session_settings.effective_approval_mode(settings)
+        shell = shell_access.resolve(settings)
+        voice = session_settings.loadout_voice(settings)
+        if voice:
+            who = {"kind": "agent", "name": voice["persona_name"] or voice["profile"] or "Custom agent"}
+        elif settings.get("preset_id"):
+            who = {"kind": "persona", "name": str(settings["preset_id"]).replace("_", " ").capitalize()}
+        else:
+            who = {"kind": "default", "name": None}
         return {
             "settings": settings,
-            "approval_mode": session_settings.effective_approval_mode(settings),
+            # What the chat strip above the conversation shows.
+            "context": {
+                "who": who,
+                "project": session_settings.project_label(settings.get("workspace"), session_row.folder if session_row else None),
+                "document": context_doc,
+                "doc_target": settings.get("doc_target") or ("document" if context_doc else "general"),
+                "access": session_settings.access_summary(settings, approval_mode, shell),
+            },
+            "approval_mode": approval_mode,
             # How bash/python run in this chat, separate from vault access.
-            "shell_access": shell_access.resolve(settings),
+            "shell_access": shell,
             # Empty only if approval_modes.ENFORCED is switched off; the chat
             # settings UI hides its mode controls when there is nothing to choose from.
             "approval_modes": list(approval_modes.MODES) if approval_modes.ENFORCED else [],

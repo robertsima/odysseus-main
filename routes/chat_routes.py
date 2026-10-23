@@ -1143,6 +1143,11 @@ def setup_chat_routes(
             auto_escalated = True
             logger.info("chat→agent auto-escalation: explicit web intent")
         active_doc_id = form_data.get("active_doc_id", "").strip()
+        # What the open document stands for: this turn's choice; the chat's saved
+        # one and the "document" default are resolved where the lookup runs.
+        doc_target = str(form_data.get("doc_target") or "").strip().lower()
+        if doc_target not in ("document", "project", "general"):
+            doc_target = ""
         logger.info(f"[doc-inject] chat_mode={chat_mode}, active_doc_id={active_doc_id!r}")
 
         # Active email reader — when the user has an email open in the UI, the
@@ -1298,6 +1303,9 @@ def setup_chat_routes(
                 workspace_rejected = None
                 if pending_tool_approval.document_id:
                     active_doc_id = pending_tool_approval.document_id
+                    # The sealed action names its document; the target of the
+                    # chat does not take it away.
+                    doc_target = "document"
                 # Restore only the coarse request toggle needed by the exact
                 # sealed action. Current privilege, global-disable, incognito,
                 # compare, and tool-policy gates still run.
@@ -1478,9 +1486,18 @@ def setup_chat_routes(
         # editor into the prompt. Explicit document requests are excluded from
         # this gate by build_chat_context.
         active_doc = None
+        if not doc_target and session:
+            try:
+                from core.database import get_session_settings as _gss
+                doc_target = (_gss(session) or {}).get("doc_target") or ""
+            except Exception:
+                doc_target = ""
+        doc_target = doc_target or "document"
         _doc_db = SessionLocal()
         try:
-            if ctx.suppress_active_document:
+            if doc_target != "document":
+                logger.info("[doc-inject] skipped: doc_target=%s", doc_target)
+            elif ctx.suppress_active_document:
                 logger.info("[doc-inject] skipped ambient active document for corrective/low-information turn")
             elif active_doc_id:
                 logger.info(f"[doc-inject] active_doc_id from frontend: {active_doc_id}")
@@ -1523,7 +1540,7 @@ def setup_chat_routes(
                         logger.info(f"[doc-inject] found by ID: title={active_doc.title!r}, lang={active_doc.language!r}, is_active={active_doc.is_active}, content_len={len(active_doc.current_content or '')}")
                 else:
                     logger.warning(f"[doc-inject] NOT FOUND by ID {active_doc_id}")
-            if not active_doc and not ctx.suppress_active_document:
+            if not active_doc and doc_target == "document" and not ctx.suppress_active_document:
                 _email_doc_q = _doc_db.query(DBDocument).filter(
                     DBDocument.session_id == session,
                     DBDocument.is_active == True,
@@ -1532,7 +1549,7 @@ def setup_chat_routes(
                 active_doc = _owner_session_filter(_email_doc_q, ctx.user).order_by(DBDocument.updated_at.desc()).first()
                 if active_doc:
                     logger.info(f"[doc-inject] found email draft by session fallback: title={active_doc.title!r}")
-            if not active_doc and not ctx.suppress_active_document:
+            if not active_doc and doc_target == "document" and not ctx.suppress_active_document:
                 _session_doc_q = _doc_db.query(DBDocument).filter(
                     DBDocument.session_id == session,
                     DBDocument.is_active == True
@@ -1546,7 +1563,7 @@ def setup_chat_routes(
             # neither lookup above can associate them with this conversation,
             # so the agent never sees what it just wrote. Guarded so we never
             # leak a doc that belongs to a DIFFERENT session.
-            if not active_doc and not ctx.suppress_active_document:
+            if not active_doc and doc_target == "document" and not ctx.suppress_active_document:
                 try:
                     from src.agent_tools.document_tools import get_active_document
                     # Per-chat pointer: another chat's document never lands here.
