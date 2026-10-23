@@ -513,12 +513,15 @@ class PreviewFileTool:
 
         # The SAME resolver read_file uses, so this never renders what read_file
         # would refuse (outside the workspace, .ssh, app state, hard links).
-        try:
+        def _resolve():
             try:
-                path = _resolve_tool_path(raw_path, allow_private=context_allows_private(ctx),
+                return _resolve_tool_path(raw_path, allow_private=context_allows_private(ctx),
                                           allow_attachment_read=True)
             except TypeError:
-                path = _resolve_tool_path(raw_path)
+                return _resolve_tool_path(raw_path)
+
+        try:
+            path = await asyncio.to_thread(_resolve)
         except ValueError as exc:
             return _error(str(exc))
 

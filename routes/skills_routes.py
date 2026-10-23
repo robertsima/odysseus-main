@@ -1288,7 +1288,7 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
     @router.get("")
     async def list_skills(request: Request):
         user = _owner(request)
-        skills = skills_manager.load(owner=user)
+        skills = await asyncio.to_thread(skills_manager.load, owner=user)
         return {"skills": skills, "count": len(skills)}
 
     @router.get("/index")
@@ -1297,7 +1297,7 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         agent's system prompt sees. Useful for the UI's "what does the model
         actually have access to?" view."""
         user = _owner(request)
-        idx = skills_manager.index_for(owner=user)
+        idx = await asyncio.to_thread(skills_manager.index_for, owner=user)
         return {"index": idx, "count": len(idx)}
 
     @router.get("/slash-catalog")
@@ -1308,9 +1308,12 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         a slash command the model would not normally be allowed to discover.
         """
         user = _owner(request)
-        all_skills = {s.get("name"): s for s in skills_manager.load(owner=user)}
+        # Both calls walk the skills tree; keep that off the event loop.
+        loaded = await asyncio.to_thread(skills_manager.load, owner=user)
+        indexed = await asyncio.to_thread(skills_manager.index_for, owner=user)
+        all_skills = {s.get("name"): s for s in loaded}
         entries = []
-        for s in skills_manager.index_for(owner=user):
+        for s in indexed:
             name = (s.get("name") or "").strip()
             if not name:
                 continue

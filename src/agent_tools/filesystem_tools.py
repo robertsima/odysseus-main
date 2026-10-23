@@ -3,6 +3,7 @@ import json
 import os
 import re
 import difflib
+import functools
 import shutil
 import time
 from typing import Optional, Dict, Any, Tuple, List
@@ -240,6 +241,16 @@ def _worktree_refusal(tool: str, ctx: dict, paths) -> Optional[dict]:
     return {"error": f"{tool}: {msg}", "exit_code": 1} if msg else None
 
 
+async def _off_loop(fn, *args, **kwargs):
+    """Run a blocking path-policy check on a worker thread.
+
+    Resolving a model-supplied path runs realpath over every data subdirectory,
+    which stalled the event loop for seconds on a NAS data folder. to_thread
+    copies the context, so workspace and policy contextvars still apply.
+    """
+    return await asyncio.to_thread(functools.partial(fn, *args, **kwargs))
+
+
 class EditFileTool:
     async def execute(self, content: str, ctx: dict) -> dict:
         from src.tool_execution import _resolve_tool_path, _resolve_search_root, _truncate
@@ -253,10 +264,14 @@ class EditFileTool:
         replace_all = bool(args.get("replace_all", False))
         if not raw_path:
             return {"error": "edit_file: path required", "exit_code": 1}
-        try:
-            path = _resolve_tool_path(raw_path)
+        def _check():
+            resolved = _resolve_tool_path(raw_path)
             from src.rag_sensitivity import assert_vault_writable
-            assert_vault_writable(path, operation="edit")
+            assert_vault_writable(resolved, operation="edit")
+            return resolved
+
+        try:
+            path = await _off_loop(_check)
         except ValueError as e:
             return {"error": f"edit_file: {e}", "exit_code": 1}
         except PermissionError as e:
@@ -361,19 +376,22 @@ class ReadFileTool:
                 limit = int(_a.get("limit") or 0)
             except (json.JSONDecodeError, TypeError, ValueError):
                 pass
-        try:
+        def _resolve():
             try:
                 # Reading is the one operation a chat's attachments (and its
                 # parents') are open to; the write tools never pass this.
-                path = _resolve_tool_path(raw_path, allow_private=context_allows_private(ctx),
+                return _resolve_tool_path(raw_path, allow_private=context_allows_private(ctx),
                                           allow_attachment_read=True)
             except TypeError:
                 # A resolver that predates the attachment flag keeps its own
                 # private-grant handling.
                 try:
-                    path = _resolve_tool_path(raw_path, allow_private=context_allows_private(ctx))
+                    return _resolve_tool_path(raw_path, allow_private=context_allows_private(ctx))
                 except TypeError:
-                    path = _resolve_tool_path(raw_path)
+                    return _resolve_tool_path(raw_path)
+
+        try:
+            path = await _off_loop(_resolve)
         except ValueError as e:
             return {"error": f"read_file: {e}", "exit_code": 1}
         try:
@@ -434,10 +452,14 @@ class WriteFileTool:
                     body = str(_a.get("content", ""))
             except (json.JSONDecodeError, TypeError, ValueError):
                 pass
-        try:
-            path = _resolve_tool_path(raw_path)
+        def _check():
+            resolved = _resolve_tool_path(raw_path)
             from src.rag_sensitivity import assert_vault_writable
-            assert_vault_writable(path, operation="write")
+            assert_vault_writable(resolved, operation="write")
+            return resolved
+
+        try:
+            path = await _off_loop(_check)
         except ValueError as e:
             return {"error": f"write_file: {e}", "exit_code": 1}
         except PermissionError as e:
@@ -501,9 +523,13 @@ class ApplyPatchTool:
                 return {"error": "apply_patch: no file operations found", "exit_code": 1}
             prepared = []
             for op in ops:
-                path = _resolve_tool_path(op["path"])
-                from src.rag_sensitivity import assert_vault_writable
-                assert_vault_writable(path, operation=op["kind"])
+                def _check(op=op):
+                    resolved = _resolve_tool_path(op["path"])
+                    from src.rag_sensitivity import assert_vault_writable
+                    assert_vault_writable(resolved, operation=op["kind"])
+                    return resolved
+
+                path = await _off_loop(_check)
                 kind = op["kind"]
                 if kind == "add":
                     if os.path.exists(path):
@@ -781,7 +807,7 @@ class LsTool:
             raw_path = _s.split("\n", 1)[0].strip()
         depth = max(1, min(depth, _OUTLINE_MAX_DEPTH))
         try:
-            root = _resolve_search_root(raw_path, allow_private=allow_private)
+            root = await _off_loop(_resolve_search_root, raw_path, allow_private=allow_private)
         except ValueError as e:
             return {"error": f"ls: {e}", "exit_code": 1}
 
@@ -861,7 +887,8 @@ class GlobTool:
         if not pattern:
             return {"error": "glob: pattern is required", "exit_code": 1}
         try:
-            root = _resolve_search_root(str(args.get("path", "")), allow_private=allow_private)
+            root = await _off_loop(_resolve_search_root, str(args.get("path", "")),
+                                   allow_private=allow_private)
         except ValueError as e:
             return {"error": f"glob: {e}", "exit_code": 1}
 
@@ -995,7 +1022,8 @@ class GrepTool:
             max_hits = _CODENAV_MAX_HITS
         max_hits = max(1, min(max_hits, _CODENAV_MAX_HITS))
         try:
-            root = _resolve_search_root(str(args.get("path", "")), allow_private=allow_private)
+            root = await _off_loop(_resolve_search_root, str(args.get("path", "")),
+                                   allow_private=allow_private)
         except ValueError as e:
             return {"error": f"grep: {e}", "exit_code": 1}
 
