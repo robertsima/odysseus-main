@@ -1,10 +1,8 @@
 """Navigation in the page shell (static/index.html, static/js/sidebar-layout.js,
-static/js/navOrder.js): the Command menu, the sidebar on phones, the rail
-order, and the product names the Agamemnon identity puts on them.
-
-Command menu items are identified by ``data-command-target``, not by their
-wording: an earlier version pinned the "New chat" label and broke when it was
-reworded with no change in behavior.
+static/js/navOrder.js, static/js/navRail.js): the sidebar on phones, the
+collapsed rail's group icons and flyouts, the saved layout, and the product
+names the Agamemnon identity puts on them. The Command menu this file used to
+cover is gone; its destinations are in the groups and the fixed rail actions.
 """
 from __future__ import annotations
 
@@ -20,20 +18,16 @@ from tests.helpers.static_app import (
 pytestmark = pytest.mark.browser
 
 HELMET = "/static/branding/agamemnon-trojan-helmet.svg"
-COMMANDS = ["rail-email", "rail-agents", "rail-workbench", "rail-new-session", "rail-search-btn"]
 
 
-def run_command(page, target: str) -> None:
-    """The sidebar has no Command button any more. The menu belongs to the
-    rail's Command button, which opens the sidebar and the menu together; the
-    rail is hidden while the sidebar is up, so the click is sent to it directly."""
-    page.evaluate("document.getElementById('rail-command').click()")
-    page.wait_for_function("!document.getElementById('sidebar-command-menu').hidden")
-    page.click(f'#sidebar-command-menu [data-command-target="{target}"]')
+def open_tool(page, row: str) -> None:
+    """Click a tool's sidebar row. The row is in the page whether or not the
+    sidebar is showing, so the click is sent to it directly."""
+    page.evaluate("(id) => document.getElementById(id).click()", row)
 
 
 @pytest.mark.parametrize("width", [1440, 700, 390])
-def test_command_menu_opens_the_phalanx_and_the_workbench_under_their_names(open_app, width):
+def test_phalanx_and_the_workbench_open_from_their_rows_under_their_names(open_app, width):
     page = open_app(width)
     # The Agamemnon identity names the chat Scribe and the agents Phalanx.
     expect(page.locator(".ag-page-heading h1")).to_have_text("Scribe")
@@ -42,10 +36,10 @@ def test_command_menu_opens_the_phalanx_and_the_workbench_under_their_names(open
     assert page.evaluate("document.querySelector('link[rel=icon]').getAttribute('href')") == HELMET
     assert probe(page, "#ag-open-theme", wait=False) is None
     assert page.evaluate("getComputedStyle(document.querySelector('#theme-tabs [data-tab=\"theme-tab-customize\"]')).display") != "none"
-    assert page.evaluate("document.getElementById('sidebar-command-menu').hidden") is True
-
+    assert probe(page, "#sidebar-command-menu", wait=False) is None
     assert probe(page, "#sidebar-command-toggle", wait=False) is None
-    run_command(page, "rail-agents")
+    assert probe(page, "#rail-command", wait=False) is None
+    open_tool(page, "tool-agents-btn")
     page.wait_for_function("!document.getElementById('agents-dashboard').hidden")
     assert probe(page, "#agents-dashboard .ag-card")["visible"]
     expect(page.locator(".ag-phalanx-title")).to_have_text("Phalanx")
@@ -53,7 +47,7 @@ def test_command_menu_opens_the_phalanx_and_the_workbench_under_their_names(open
     page.click("#close-agents-dashboard")
     page.wait_for_function("document.getElementById('agents-dashboard').hidden")
 
-    run_command(page, "rail-workbench")
+    open_tool(page, "tool-workbench-btn")
     page.wait_for_function("!document.getElementById('workbench-modal').classList.contains('hidden')")
     assert visible_panels(page) == ["changes"]
     page.click("#wb-tab-activity")
@@ -108,45 +102,43 @@ def test_open_phone_sidebar_keeps_the_wordmark_clear_of_the_hamburger(open_app, 
         assert not overlaps, (box, hamburger)
 
 
-def test_command_menu_closes_on_escape_and_runs_search_email_and_new_chat(open_app, static_app):
+def test_the_old_command_destinations_are_reachable_from_the_rail(open_app, static_app):
     page = open_app(1440, chat=False)
-    rail = page.locator("#rail-command")
-    page.evaluate("document.getElementById('rail-command').click()")
-    expect(rail).to_have_attribute("aria-expanded", "true")
-    page.keyboard.press("Escape")
-    expect(rail).to_have_attribute("aria-expanded", "false")
-
+    page.evaluate("document.getElementById('hamburger-btn').click()")
+    page.wait_for_function("document.documentElement.classList.contains('ody-sidebar-mini')")
+    # Search and New chat are fixed actions at the top of the mini rail.
     page.evaluate("window.searchClicked = false; document.getElementById('rail-search-btn')"
                   ".addEventListener('click', () => { window.searchClicked = true; }, {once: true})")
-    run_command(page, "rail-search-btn")
+    page.click("#rail-search-btn")
     page.wait_for_function("window.searchClicked === true")
-
-    page.goto(static_app.url)
-    wait_ready(page, chat=False)
-    run_command(page, "rail-email")
+    page.keyboard.press("Escape")
+    # Email is a tool in the Work group's flyout.
+    page.click("#navgrp-work")
+    page.click('#nav-flyout [data-nav-item="email"]')
     page.wait_for_function("document.querySelector('#email-lib-modal')?.offsetWidth > 0")
-
+    assert page.evaluate("document.getElementById('nav-flyout').hidden")
+    # Phalanx and the Workbench are in the Agents group's flyout.
     page.goto(static_app.url)
     wait_ready(page, chat=False)
-    run_command(page, "rail-new-session")
-    page.wait_for_function("document.querySelector('#chat-container')?.classList.contains('welcome-active')")
+    # The mini mode is remembered across the reload.
+    page.wait_for_function("document.documentElement.classList.contains('ody-sidebar-mini')")
+    page.click("#navgrp-agents")
+    labels = page.evaluate("[...document.querySelectorAll('#nav-flyout .nav-flyout-item')].map(n => n.dataset.navItem)")
+    assert labels == ["agents", "workbench"]
 
 
-def test_legacy_palette_keeps_classic_style_and_rail_order_persists(open_app, static_app):
+def test_legacy_palette_keeps_classic_style_and_the_saved_layout_persists(open_app, static_app):
     page = open_app(1440, theme=LIGHT_THEME, chat=False)
     assert page.evaluate("document.documentElement.dataset.style") == "classic"
     assert page.evaluate("document.querySelector('.brand-crest-icon').getBoundingClientRect().width > 0")
-    page.evaluate("async () => { const m = await import('/static/js/navOrder.js');"
-                  " m.writeNavOrder(['command', 'email', 'calendar']); m.applyNavOrder(); }")
-    page.wait_for_function("document.querySelector('#icon-rail .icon-rail-btn')?.id === 'rail-command'")
-    # Alt+ArrowDown moves a rail button down one place. The rail is hidden
-    # in this layout, so the key event goes to the button directly.
-    page.evaluate("document.getElementById('rail-command').dispatchEvent("
-                  "new KeyboardEvent('keydown', {key: 'ArrowDown', altKey: true, bubbles: true}))")
-    page.wait_for_function("document.querySelector('#icon-rail .icon-rail-btn')?.id !== 'rail-command'")
-    assert page.evaluate("JSON.parse(localStorage.getItem('odysseus-nav-order-v1')).value[0]") != "command"
+    page.evaluate("async () => { const m = await import('/static/js/navLayout.js');"
+                  " m.updateLayout((layout) => m.moveGroupBy(layout, 'more', -1)); }")
+    order = "[...document.querySelectorAll('#sidebar .nav-group')].map(g => g.dataset.navGroup)"
+    page.wait_for_function(f"{order}.join() === 'work,more,agents'")
+    assert page.evaluate("[...document.querySelectorAll('#rail-nav-groups [data-nav-group-btn]')].map(b => b.dataset.navGroupBtn).join()") == "work,more,agents"
+    assert page.evaluate("JSON.parse(localStorage.getItem('odysseus-nav-layout-v2')).value.groups[1].id") == "more"
     page.goto(static_app.url)
     wait_ready(page, chat=False)
-    assert page.evaluate("document.querySelector('#icon-rail .icon-rail-btn').id") != "rail-command"
+    assert page.evaluate(f"{order}.join()") == "work,more,agents"
     assert page.evaluate("document.documentElement.dataset.style") == "classic"
     assert page.evaluate("JSON.parse(localStorage.getItem('odysseus-theme')).name") == json.loads(LIGHT_THEME)["name"]

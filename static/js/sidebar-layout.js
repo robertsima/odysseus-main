@@ -431,9 +431,6 @@ export function initSidebarLayout(Storage, opts) {
     if (window.innerWidth >= 700) return;
     const btn = e.target.closest('[id^="tool-"], [id^="rail-"]');
     if (!btn) return;
-    // The Command button opens the sidebar to show its menu. It launches no
-    // tool, so it must not close the sidebar it just opened.
-    if (btn.id === 'rail-command') return;
     setTimeout(() => {
       const sb = document.getElementById('sidebar');
       const rail = document.getElementById('icon-rail');

@@ -167,7 +167,7 @@ def test_phone_fleet_names_actions_and_metadata_are_reachable_and_readable(open_
 @pytest.mark.parametrize("width", [700, 390])
 def test_compact_fleet_and_chat_agent_strip_stay_distinct(open_app, width):
     page = open_app(width)
-    assert page.evaluate("document.getElementById('sidebar-command-menu').hidden") is True
+    assert page.evaluate("document.getElementById('sidebar-command-menu')") is None
     page.wait_for_function("!document.getElementById('agent-strip').hidden")
     toggle = page.locator(".agent-strip-toggle")
     page.evaluate("document.querySelector('.agent-strip-toggle').click()")

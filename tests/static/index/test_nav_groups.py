@@ -33,6 +33,11 @@ def open_sidebar(page) -> None:
     settle(page, "#sidebar")
 
 
+def more_collapsed_in_layout(page) -> bool:
+    layout = json.loads(page.evaluate("localStorage.getItem('odysseus-nav-layout-v2')"))["value"]
+    return next(group for group in layout["groups"] if group["id"] == "more")["collapsed"]
+
+
 def collapsed(page, group: str) -> bool:
     return page.evaluate("(id) => document.getElementById(id).classList.contains('collapsed')", group)
 
@@ -62,7 +67,7 @@ def test_more_remembers_it_was_opened(open_app, static_app, width):
     open_sidebar(page)
     page.click("#more-section .nav-group-title")
     expect(page.locator("#tool-gallery-btn")).to_be_visible()
-    assert json.loads(page.evaluate("localStorage.getItem('section-collapsed')"))["more-section"] is False
+    assert more_collapsed_in_layout(page) is False
     page.goto(static_app.url)
     wait_ready(page, chat=False)
     open_sidebar(page)
@@ -71,6 +76,7 @@ def test_more_remembers_it_was_opened(open_app, static_app, width):
     # Folding it again is remembered the same way.
     page.click("#more-section .nav-group-title")
     page.wait_for_function("document.getElementById('more-section').classList.contains('collapsed')")
+    assert more_collapsed_in_layout(page) is True
     page.goto(static_app.url)
     wait_ready(page, chat=False)
     assert collapsed(page, "more-section")

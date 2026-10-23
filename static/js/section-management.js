@@ -17,6 +17,10 @@ export function initSectionCollapse(Storage) {
     // Skip email section — it doesn't collapse (title opens popup instead)
     if (section.id === 'email-section') return;
 
+    // Navigation groups fold through navOrder.js, which keeps the state in the
+    // navigation layout (per account) and draws its own header.
+    if (section.classList.contains('nav-group')) return;
+
     // Add chevron (always visible — rotates when collapsed)
     header.insertAdjacentHTML('beforeend', _chevronHtml);
 

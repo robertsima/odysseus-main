@@ -43071,9 +43071,6 @@ div.ag-convo-tool { cursor: default; }
 #rail-agents { position: relative; }
 [data-nav-reorderable="true"] { cursor: grab; }
 [data-nav-reorderable="true"]:active { cursor: grabbing; }
-.nav-order-dragging { opacity: .35 !important; transform: scale(.92); }
-.nav-order-target { outline: 2px solid color-mix(in srgb, var(--wb-accent) 72%, transparent) !important; outline-offset: -2px; }
-.icon-rail.nav-order-active, #tools-section.nav-order-active { background-image: linear-gradient(180deg, color-mix(in srgb, var(--wb-accent) 5%, transparent), transparent); }
 @container agentsroom (max-width: 820px) {
   .ag-body, .agents-dashboard:has(.ag-launch) .ag-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(180px, 42%) minmax(0, 1fr); }
   .ag-pane-splitter { display: none; }
