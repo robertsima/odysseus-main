@@ -56,7 +56,23 @@ def test_notes_help_belongs_to_notes_not_next_foreground_panel(live_app, live_pa
     assert hint.evaluate("el => !!el.closest('#notes-pane')")
     page.locator('#tool-memory-btn').evaluate('el => el.click()')
     expect(page.locator('#memory-modal')).to_be_visible()
-    assert hint.evaluate("el => {const r=el.getBoundingClientRect(); return !document.elementFromPoint(r.x+r.width/2,r.y+r.height/2)?.closest('#notes-first-open-hint')}")
+    # Wherever the next panel lands (over Notes, or tiled beside it), no point
+    # of it shows the Notes hint on top.
+    painted_over = page.evaluate("""() => {
+        const m = document.querySelector('#memory-modal').getBoundingClientRect();
+        const hits = [];
+        for (let i = 1; i < 10; i++) for (let j = 1; j < 10; j++) {
+            const x = m.left + m.width * i / 10, y = m.top + m.height * j / 10;
+            if (document.elementFromPoint(x, y)?.closest('#notes-first-open-hint')) hits.push([x, y]);
+        }
+        return hits;
+    }""")
+    assert painted_over == []
+    # And the hint stays inside the Notes pane it explains.
+    assert hint.evaluate("""el => {
+        const h = el.getBoundingClientRect(), p = el.closest('#notes-pane').getBoundingClientRect();
+        return h.left >= p.left && h.right <= p.right && h.top >= p.top && h.bottom <= p.bottom;
+    }""")
 
 
 @pytest.mark.parametrize('width', [1440, 390])
