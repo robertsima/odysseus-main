@@ -93,7 +93,6 @@
     "tests/static/js/emailInbox/test_email_open_dedup_js.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/static/js/emailLibrary/test_email_library_prewarm.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/static/js/emailLibrary/utils/test_email_linkify_security_js.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
-    "tests/static/js/serverPrefs/test_account_preference_sync.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/static/js/workbench/test_agent_card_order.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)",
     "tests/static/lib/katex/katex/test_markdown_lazy_lib_loading_js.py": "pins source text; phase 4 rewrites it as a behavior test or deletes it (D29)"
   },
