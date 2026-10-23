@@ -171,6 +171,12 @@ def setup_workbench_routes() -> APIRouter:
         since = max(0, since)
 
         def _build():
+            if session_id == activity.GLOBAL_FEED:
+                # The position is read before the events, so an event published
+                # in between shows up in both and the client drops the copy.
+                cursor = activity.encode_cursor(activity.global_cursor())
+                return {"session_id": session_id, "events": activity.history(session_id, since_seq=since, limit=limit),
+                        "seq": 0, "cursor": cursor}
             return {
                 "session_id": session_id,
                 "events": activity.history(session_id, since_seq=since, limit=limit),
@@ -181,11 +187,25 @@ def setup_workbench_routes() -> APIRouter:
 
     @router.get("/activity/stream")
     async def activity_stream(request: Request, session_id: str = Query(default=activity.GLOBAL_FEED),
-                              since: int = Query(default=0)):
-        """Server-sent events: replay after ``since``, then live. Pass
-        ``session_id=*`` for every session."""
+                              since: int = Query(default=0), cursor: str = Query(default="")):
+        """Server-sent events: replay what the client missed, then live. Pass
+        ``session_id=*`` for every session.
+
+        Every event frame has an ``id:``. A browser that reconnects by itself
+        sends it back as ``Last-Event-ID``; for one session that is the
+        session's ``seq``, for ``*`` it is a cursor holding every session's
+        position (also accepted as ``cursor``). ``since`` is the older start
+        position the page first connected with; the newer of the two wins."""
         _admin(request)
-        gen = activity.subscribe(session_id or activity.GLOBAL_FEED, since_seq=max(0, since))
+        key = session_id or activity.GLOBAL_FEED
+        last_id = request.headers.get("last-event-id", "")
+        since = max(0, since)
+        pos = None
+        if key == activity.GLOBAL_FEED:
+            pos = activity.merge_cursors(activity.decode_cursor(cursor), activity.decode_cursor(last_id))
+        elif last_id.isdigit():
+            since = max(since, int(last_id))
+        gen = activity.subscribe(key, since_seq=since, cursor=pos)
         return StreamingResponse(gen, media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 

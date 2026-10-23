@@ -28,6 +28,7 @@ gate; this module only stores what callers give it, clamped.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -787,30 +788,167 @@ def _recent_sessions_with_activity(limit: int) -> List[str]:
 
 # ── live feed ────────────────────────────────────────────────────────────────
 
-def _sse(ev: dict) -> str:
-    return f"data: {json.dumps(ev, ensure_ascii=False, default=str)}\n\n"
+# Most events one reconnect replays. A client that was away longer than this
+# is told how many events it skipped (a ``gap`` frame) and resyncs from history.
+REPLAY_CAP = 200
+# Sessions named in one global-feed cursor. The cursor travels in a header on
+# every browser reconnect, so it stays small; a session that falls off it is
+# treated as new on the next reconnect and its events are replayed again,
+# which clients ignore because they key events on (session, seq).
+CURSOR_MAX_SESSIONS = 60
+CURSOR_PREFIX = "g1."
+
+
+def encode_cursor(cursor: Dict[str, Any]) -> str:
+    """The global feed's position: one sequence number per session.
+
+    Sequence numbers belong to a session, so there is no single number that
+    says where "all sessions" is. The position is ``{"s": {session: seq},
+    "t": when it was taken}``: a session missing from ``s`` is replayed only
+    from events newer than ``t``."""
+    raw = json.dumps({"s": cursor.get("s") or {}, "t": cursor.get("t") or 0},
+                     separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return CURSOR_PREFIX + base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def decode_cursor(text: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Parse :func:`encode_cursor` output. Anything unreadable is no cursor."""
+    text = str(text or "")
+    if not text.startswith(CURSOR_PREFIX):
+        return None
+    body = text[len(CURSOR_PREFIX):]
+    try:
+        data = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+        sessions = data["s"]
+        stamp = float(data.get("t") or 0)
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return None
+    if not isinstance(sessions, dict):
+        return None
+    return {"s": {str(k): v for k, v in sessions.items()
+                  if isinstance(v, int) and not isinstance(v, bool) and v >= 0}, "t": stamp}
+
+
+def merge_cursors(*cursors: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The furthest position per session; the oldest ``t`` (replay more, never less)."""
+    real = [c for c in cursors if c]
+    if not real:
+        return None
+    sessions: Dict[str, int] = {}
+    for cur in real:
+        for sid, seq in cur["s"].items():
+            sessions[sid] = max(sessions.get(sid, 0), seq)
+    return {"s": sessions, "t": min(c["t"] for c in real)}
+
+
+def _sse(ev: dict, event_id: Optional[str] = None) -> str:
+    head = f"id: {event_id}\n" if event_id else ""
+    return f"{head}data: {json.dumps(ev, ensure_ascii=False, default=str)}\n\n"
+
+
+def global_cursor() -> Dict[str, Any]:
+    """Where every recent session stands now (blocking: reads timelines)."""
+    stamp = time.time()
+    return {"s": {name: last_seq(name) for name in _recent_sessions_with_activity(GLOBAL_HISTORY_MAX_SESSIONS)},
+            "t": stamp}
+
+
+def _global_missed(cursor: Dict[str, Any], owner: Optional[str]) -> Tuple[List[dict], int, Dict[str, int]]:
+    """Events after ``cursor`` across recent sessions (blocking).
+
+    Returns (events oldest first, newest ``REPLAY_CAP`` only; how many were
+    skipped; the position of every session looked at)."""
+    known = cursor["s"]
+    names = list(dict.fromkeys(list(known) + _recent_sessions_with_activity(GLOBAL_HISTORY_MAX_SESSIONS)))
+    missed: List[dict] = []
+    skipped = 0
+    tops: Dict[str, int] = {}
+    for name in names:
+        have = known.get(name)
+        rows = history(name, since_seq=have or 0, limit=MAX_EVENTS_PER_SESSION)
+        tops[name] = max(have or 0, last_seq(name))
+        if have is None:
+            rows = [ev for ev in rows if (ev.get("ts") or 0) > cursor["t"]]  # a session born after the cursor
+        elif have and rows and rows[0].get("seq", 0) > have + 1:
+            skipped += rows[0]["seq"] - have - 1  # fell out of the bounded timeline
+        if owner is not None:
+            rows = [ev for ev in rows if ev.get("owner") in (owner, None)]
+        missed.extend(rows)
+    missed.sort(key=lambda ev: ev.get("ts") or 0)
+    if len(missed) > REPLAY_CAP:
+        skipped += len(missed) - REPLAY_CAP
+        missed = missed[-REPLAY_CAP:]
+    return missed, skipped, tops
 
 
 async def subscribe(session_id: str, *, since_seq: int = 0, owner: Optional[str] = None,
-                    heartbeat_s: float = HEARTBEAT_S) -> AsyncGenerator[str, None]:
-    """SSE frames: replay everything after ``since_seq``, then live.
+                    heartbeat_s: float = HEARTBEAT_S,
+                    cursor: Optional[Dict[str, Any]] = None) -> AsyncGenerator[str, None]:
+    """SSE frames: replay what the client missed, then live.
 
-    ``session_id`` may be :data:`GLOBAL_FEED` for every session; ``owner``
-    then filters the live frames to that owner's events (events with no owner
-    are shown, they come from unattributed system work).
+    Every event frame carries an ``id:``. For one session it is that session's
+    ``seq``; ``since_seq`` is the position to resume after. For
+    :data:`GLOBAL_FEED` the id is :func:`encode_cursor` of every session's
+    position and ``cursor`` is the position to resume after; with no cursor
+    the feed starts at "now" (history comes from the history endpoint).
+    Replays are capped at :data:`REPLAY_CAP`; events beyond it, or ones that
+    already left the bounded timeline, are reported in one ``gap`` frame.
+    ``owner`` filters frames to that owner's events (events with no owner are
+    shown, they come from unattributed system work).
     """
     key = str(session_id or "global")
+    is_global = key == GLOBAL_FEED
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue = asyncio.Queue()
+    # Subscribe before reading history so nothing published in between is lost;
+    # the position check below drops what the replay already covered.
     with _lock:
         _subscribers.setdefault(key, set()).add((queue, loop))
-        replay = [] if key == GLOBAL_FEED else history(key, since_seq=since_seq, limit=MAX_EVENTS_PER_SESSION)
-    seen = since_seq
     try:
+        pos: Dict[str, int] = {}
+        stamp = time.time()
+        replay: List[dict] = []
+        skipped = 0
+        if is_global:
+            if cursor:
+                stamp = cursor["t"]
+                replay, skipped, tops = await asyncio.to_thread(_global_missed, cursor, owner)
+                pos = dict(tops)
+            else:
+                fresh = await asyncio.to_thread(global_cursor)
+                pos, stamp = fresh["s"], fresh["t"]
+        else:
+            rows = await asyncio.to_thread(history, key, since_seq=since_seq, limit=MAX_EVENTS_PER_SESSION)
+            if since_seq > 0 and rows and rows[0].get("seq", 0) > since_seq + 1:
+                skipped += rows[0]["seq"] - since_seq - 1
+            if len(rows) > REPLAY_CAP:
+                skipped += len(rows) - REPLAY_CAP
+                rows = rows[-REPLAY_CAP:]
+            replay = rows
+            pos = {key: since_seq}
+
+        def advance(ev: dict) -> str:
+            sid = str(ev.get("session_id") or key)
+            pos[sid] = max(pos.get(sid, 0), ev.get("seq", 0))
+            if not is_global:
+                return str(pos[sid])
+            while len(pos) > CURSOR_MAX_SESSIONS:
+                pos.pop(next(iter(pos)))
+            return encode_cursor({"s": pos, "t": stamp})
+
+        if skipped:
+            first = replay[0].get("seq", 0) if replay and not is_global else 0
+            yield _sse({"type": "gap", "session_id": key, "skipped": skipped,
+                        "from_seq": since_seq, "to_seq": max(0, first - 1)})
         for ev in replay:
-            seen = max(seen, ev.get("seq", 0))
-            yield _sse(ev)
-        yield f"data: {json.dumps({'type': 'ready', 'session_id': key, 'seq': seen})}\n\n"
+            yield _sse(ev, advance(ev))
+        ready = {"type": "ready", "session_id": key}
+        if is_global:
+            ready["cursor"] = encode_cursor({"s": pos, "t": stamp})
+            yield _sse(ready)
+        else:
+            ready["seq"] = pos.get(key, 0)
+            yield _sse(ready, str(pos[key]) if pos.get(key) else None)
         beat = 0
         while True:
             try:
@@ -819,12 +957,12 @@ async def subscribe(session_id: str, *, since_seq: int = 0, owner: Optional[str]
                 beat += 1
                 yield f": heartbeat {beat}\n\n"
                 continue
-            if key != GLOBAL_FEED and ev.get("seq", 0) <= seen and ev.get("session_id") == key:
-                continue  # already replayed
+            sid = str(ev.get("session_id") or key)
+            if ev.get("seq", 0) <= pos.get(sid, 0) and (is_global or sid == key):
+                continue  # already replayed or already covered by the baseline
             if owner is not None and ev.get("owner") not in (owner, None):
                 continue
-            seen = max(seen, ev.get("seq", 0)) if ev.get("session_id") == key else seen
-            yield _sse(ev)
+            yield _sse(ev, advance(ev))
     finally:
         with _lock:
             _subscribers.get(key, set()).discard((queue, loop))

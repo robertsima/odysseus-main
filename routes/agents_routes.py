@@ -568,11 +568,16 @@ def setup_agents_routes(session_manager) -> APIRouter:
 
         async def gen():
             async for frame in activity.subscribe(activity.GLOBAL_FEED, since_seq=max(0, since)):
-                if not frame.startswith("data: "):
+                # Frames carry an `id:` line holding every session's position;
+                # this feed is filtered to the viewer's chats, so the id (which
+                # names other sessions) is dropped and only the data is passed on.
+                data = next((ln for ln in frame.splitlines() if ln.startswith("data: ")), None)
+                if data is None:
                     yield frame
                     continue
+                frame = data + "\n\n"
                 try:
-                    ev = json.loads(frame[6:])
+                    ev = json.loads(data[6:])
                 except ValueError:
                     continue
                 sid = ev.get("session_id") if isinstance(ev, dict) else None
