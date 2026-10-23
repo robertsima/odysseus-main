@@ -62,44 +62,50 @@ test('every view has a Launch button', async () => {
   }
 });
 
-test('a launch closes its form; a refused launch keeps it and says why', async () => {
-  let answer = () => ({ session_id: 'w2', session_name: 'Lead Engineer: fix' });
-  const launches = [];
+// The fake keeps the first route it is given for a path, so one route reads the answer the test sets.
+let answer = () => ({ session_id: 'w2', session_name: 'Lead Engineer: fix' });
+const launches = [];
+test('an assigned task closes its sheet; a refused one keeps it and says why', async () => {
+  room.fake.route('GET', '/api/agents/profiles', () => ({ profiles: [] }));
   room.fake.route('POST', '/api/agents/launch', ({ body }) => {
     launches.push(JSON.parse(body));
     return answer();
   });
   dashboard.open();
 
+  const type = (text) => {
+    const box = root.querySelector('[data-aa-field="task"]');
+    box.value = text;
+    box.dispatchEvent(new window.Event('input', { bubbles: true }));
+  };
   room.click('[data-ag="launch"]');
-  root.querySelector('#ag-task').value = 'fix checkout';
-  room.click('[data-ag="launch-go"]');
-  await waitFor(() => !root.querySelector('#ag-launch'), { what: 'the form to close' });
+  type('fix checkout');
+  room.click('[data-aa="go"]');
+  await waitFor(() => !root.querySelector('#ag-launch'), { what: 'the sheet to close' });
   assert.equal(launches.at(-1).task, 'fix checkout');
 
   answer = () => jsonResponse({ detail: 'no such workspace' }, { status: 400 });
   room.click('[data-ag="launch"]');
-  root.querySelector('#ag-task').value = 'fix it again';
-  room.click('[data-ag="launch-go"]');
-  await waitFor(() => /no such workspace/.test(root.querySelector('#ag-launch-msg')?.textContent || ''), { what: 'the refusal' });
-  assert.ok(root.querySelector('#ag-launch'), 'the form stays to fix and retry');
-  assert.match(document.getElementById('toast').textContent, /Worker not started/);
+  type('fix it again');
+  room.click('[data-aa="go"]');
+  await waitFor(() => /no such workspace/.test(root.querySelector('[data-aa-part="msg"]')?.textContent || ''), { what: 'the refusal' });
+  assert.ok(root.querySelector('#ag-launch'), 'the sheet stays to fix and retry');
   dashboard.close();
 });
 
-test('a launch with no model anywhere is stopped in the form', async () => {
-  room.overview.profiles = [{ name: 'Scout' }];
-  await dashboard.refresh();
-  const before = room.fake.calls.filter((c) => c.url.pathname === '/api/agents/launch').length;
+test('a task the server blocks shows the blocker with its buttons in the sheet', async () => {
+  answer = () => jsonResponse({
+    error: 'x', code: 'WORKSPACE_REQUIRED',
+    blocker: { code: 'WORKSPACE_REQUIRED', summary: 'No folder chosen.', detail: {}, actions: [{ id: 'run_without_files', label: 'Run without files', requires: ['no_workspace'] }] },
+  }, { status: 409 });
   dashboard.open();
   room.click('[data-ag="launch"]');
-  root.querySelector('#ag-task').value = 'look around';
-  root.querySelector('#ag-parent').value = '';
-  room.click('[data-ag="launch-go"]');
-  await waitFor(() => root.querySelector('#ag-launch-msg').textContent, { what: 'the form message' });
-
-  assert.match(root.querySelector('#ag-launch-msg').textContent, /pick a chat to report to/);
-  assert.equal(room.fake.calls.filter((c) => c.url.pathname === '/api/agents/launch').length, before);
+  const box = root.querySelector('[data-aa-field="task"]');
+  box.value = 'look around';
+  box.dispatchEvent(new window.Event('input', { bubbles: true }));
+  room.click('[data-aa="go"]');
+  await waitFor(() => root.querySelector('[data-aa-action="run_without_files"]'), { what: 'the recovery button' });
+  assert.match(root.querySelector('.aa-blocker-text').textContent, /No folder chosen/);
   dashboard.close();
 });
 

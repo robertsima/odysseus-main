@@ -43,6 +43,9 @@ class Blocker:
     source: Dict[str, Any] = field(default_factory=dict)
     detail: Dict[str, Any] = field(default_factory=dict)
     at: str = ""
+    # What the person can do about it: ``[{id, label, ...args}]`` (see
+    # `recovery_actions`). Empty when nothing can be offered from here.
+    actions: List[Dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.recovery not in RECOVERIES:
@@ -73,6 +76,7 @@ class Blocker:
             source=dict(data.get("source") or {}),
             detail=dict(data.get("detail") or {}),
             at=str(data.get("at") or ""),
+            actions=[dict(a) for a in (data.get("actions") or []) if isinstance(a, dict) and a.get("id")],
         )
 
 
@@ -89,6 +93,8 @@ _PREFLIGHT = {
                           "user", "Start the task with a loadout that can write files, or ask for analysis only."),
     "SHELL_NOT_AVAILABLE": ("The worker was not started because the task runs commands and it has no shell.",
                             "user", "Run the command yourself, or start the task with a loadout that has a shell."),
+    "DOCUMENT_UNREADABLE": ("The worker was not started because it has no tool that opens the document the task names.",
+                            "user", "Paste the relevant excerpt into the task, or allow the reading tool for this run."),
     "UNKNOWN_REQUIREMENT": ("The worker was not started because the launch named an unknown requirement.",
                             "retry", None),
     "CONFLICTING_REQUIREMENT": ("The worker was not started because the launch listed conflicting requirements.",
@@ -124,8 +130,95 @@ def from_preflight(payload: Dict[str, Any]) -> Blocker:
         summary, recovery = _clip(message, 200), "user"
         hint = next_action.get("do") if isinstance(next_action, dict) else ""
         action = _clip(hint, 200) or _FALLBACK_ACTION
+    needed = list(next_action.get("enable_tools") or []) if isinstance(next_action, dict) else []
     return Blocker(code=code, summary=summary, recovery=recovery, user_action=action,
-                   source={"kind": "preflight", "ref": ""}, detail=detail)
+                   source={"kind": "preflight", "ref": ""}, detail=detail,
+                   actions=recovery_actions(code, candidates=candidates, needed_tools=needed))
+
+
+def from_document_gap(gap: Dict[str, Any]) -> Blocker:
+    """Adapt `worker_preflight.document_gap`: the task names a source the agent cannot open."""
+    gap = gap or {}
+    detail: Dict[str, Any] = {"message": _clip(gap.get("message"), 400), "kind": str(gap.get("kind") or "document")}
+    if gap.get("tools"):
+        detail["tools"] = [str(t) for t in gap["tools"]]
+    summary, recovery, action = _PREFLIGHT["DOCUMENT_UNREADABLE"]
+    return Blocker(code="DOCUMENT_UNREADABLE", summary=summary, recovery=recovery, user_action=action,
+                   source={"kind": "preflight", "ref": ""}, detail=detail,
+                   actions=recovery_actions("DOCUMENT_UNREADABLE"))
+
+
+# What a person reads for each code, in the app's own words (no "worker", no
+# tool names). `Blocker.summary` is for the activity feed and keeps its wording.
+_PERSON_SUMMARY = {
+    "WORKSPACE_REQUIRED": "This task works on a code folder, and none is chosen.",
+    "WORKSPACE_INVALID": "The chosen code folder can't be used.",
+    "WORKSPACE_UNREADABLE": "The app can't read the chosen code folder.",
+    "TOOLS_UNAVAILABLE": "This agent can't read files, and the task needs to.",
+    "WRITE_NOT_ALLOWED": "The task changes files, and this agent can't edit files.",
+    "SHELL_NOT_AVAILABLE": "The task runs commands, and this agent can't run commands.",
+    "DOCUMENT_UNREADABLE": "This agent can't open the document the task names.",
+    "UNKNOWN_REQUIREMENT": "The task options aren't recognised.",
+    "CONFLICTING_REQUIREMENT": "The task options contradict each other.",
+    "WORKER_CAPACITY": "This chat is already running as many agents as it allows.",
+    "WORKER_DEPTH": "Agents started by agents can't go any deeper.",
+}
+
+
+def recovery_actions(code: str, *, candidates: Optional[List[str]] = None,
+                     needed_tools: Optional[List[str]] = None,
+                     grantable_tools: Optional[List[str]] = None,
+                     command: str = "") -> List[Dict[str, Any]]:
+    """What the person can do about a refused start: ``[{id, label, ...args}]``.
+
+    Only moves the policy already permits. ``grantable_tools`` is what the chat
+    starting the task holds itself; ``allow_for_this_run`` is offered for
+    ``needed_tools`` only where the two overlap, so a recovery never widens
+    anything. There is no action that switches to an admin agent.
+    """
+    import os
+
+    grant = [t for t in (needed_tools or []) if t in set(grantable_tools or [])]
+    actions: List[Dict[str, Any]] = []
+
+    def allow() -> None:
+        if grant:
+            actions.append({"id": "allow_for_this_run", "label": "Allow for this run only", "extra_tools": grant})
+
+    if code in ("WORKSPACE_REQUIRED", "WORKSPACE_INVALID"):
+        if candidates:
+            actions.append({"id": "choose_workspace", "label": "Choose a code folder",
+                            "candidates": [{"path": c, "name": os.path.basename(str(c).rstrip("/\\")) or str(c)}
+                                           for c in candidates[:12]]})
+        actions.append({"id": "run_without_files", "label": "Run without files", "requires": ["no_workspace"]})
+    elif code == "TOOLS_UNAVAILABLE":
+        allow()
+        actions.append({"id": "pick_another_agent", "label": "Pick another agent"})
+    elif code == "WRITE_NOT_ALLOWED":
+        allow()
+        actions.append({"id": "read_only", "label": "Analyse only, no edits", "requires": ["read_only"]})
+        actions.append({"id": "pick_another_agent", "label": "Pick another agent"})
+    elif code == "SHELL_NOT_AVAILABLE":
+        actions.append({"id": "pick_another_agent", "label": "Pick another agent"})
+        actions.append({"id": "analysis_only", "label": "Explain, don't run",
+                        "task_prefix": "Do not run any commands. Explain what they would do and what to expect.\n\n"})
+    elif code == "DOCUMENT_UNREADABLE":
+        actions.append({"id": "attach_excerpt", "label": "Paste an excerpt"})
+        allow()
+        actions.append({"id": "choose_accessible_file", "label": "Choose a text file"})
+        actions.append({"id": "start_anyway", "label": "Start anyway"})
+    elif code in ("WORKER_CAPACITY", "WORKER_DEPTH"):
+        actions.append({"id": "wait", "label": "Wait for one to finish"})
+        actions.append({"id": "open_agents", "label": "Open Agents"})
+    return actions
+
+
+def public(blocker: Blocker, actions: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """The shape the UI gets: ``{code, summary, detail, actions}``."""
+    return {"code": blocker.code,
+            "summary": _PERSON_SUMMARY.get(blocker.code) or blocker.summary,
+            "detail": dict(blocker.detail),
+            "actions": list(blocker.actions if actions is None else actions)}
 
 
 def from_needs(text: str, *, source: Optional[Dict[str, Any]] = None) -> Optional[Blocker]:

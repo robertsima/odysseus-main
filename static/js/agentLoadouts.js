@@ -18,6 +18,7 @@
  */
 import uiModule from './ui.js';
 import { invalidateSettings } from './appConfig.js';
+import agentActions from './agentActions.js';
 
 const LIST_KEYS = ['disabled_tools', 'enabled_tools', 'skill_names', 'allowed_mcp_servers', 'allowed_models', 'model_fallbacks'];
 const NUMBER_KEYS = ['max_rounds', 'max_parallel_workers', 'temperature', 'max_tokens'];
@@ -27,7 +28,7 @@ function blankLoadout() {
     max_rounds: 0, max_parallel_workers: 1, disabled_tools: [], tool_access: 'all', enabled_tools: [],
     memory_access: 'read', skill_access: 'all', skill_names: [], mcp_access: 'all', allowed_mcp_servers: [],
     private_vault_access: false, shell_access: 'sandbox', approval_mode: 'inherit', delegation_policy: 'explicit', instructions: '',
-    persona_name: '', temperature: null, max_tokens: null };
+    persona_name: '', temperature: null, max_tokens: null, quick_actions: [], _unsaved: true };
 }
 
 async function ask(text, { confirmText = 'Confirm', title = 'Confirm', danger = false } = {}) {
@@ -146,6 +147,52 @@ export function mountLoadoutsEditor(container, { profiles: initial = [], canEdit
       node('span', 'agent-profile-summary-meta', [p.model ? p.model : 'workers use the calling chat’s model', toolsSummary(p)].join(' · ')),
     );
     if (p.description) summary.appendChild(node('span', 'agent-profile-summary-desc', p.description));
+    if (p.name && !p._unsaved) {
+      // Buttons inside <summary> do not toggle the row.
+      summary.appendChild(agentActions.actionButtonsEl(p.name));
+      const chips = node('span', 'agent-profile-summary-chips');
+      (p.quick_actions || []).forEach((q) => {
+        const chip = node('button', 'aa-chip', q.label);
+        chip.type = 'button';
+        chip.title = 'Assign this as a task';
+        chip.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); agentActions.openAssign({ agent: p.name, task: agentActions.fillPlaceholders(q.prompt) }); });
+        chips.appendChild(chip);
+      });
+      if (chips.childNodes.length) summary.appendChild(chips);
+    }
+  }
+  // Up to six one-click starting prompts, shown as chips on the agent.
+  function quickActionsField(p, markDirty_) {
+    const wrap = node('div', 'agent-profile-field agent-quick-actions');
+    wrap.appendChild(node('span', '', 'Quick actions'));
+    const hint = node('span', 'admin-toggle-sub', 'Starting prompts shown as chips. Use {project} and {document} to fill in the chat context.');
+    const rows = node('div', 'agent-quick-rows');
+    const add = button('Add quick action');
+    const draw = () => {
+      rows.textContent = '';
+      if (!Array.isArray(p.quick_actions)) p.quick_actions = [];
+      p.quick_actions.forEach((q, i) => {
+        const row = node('div', 'agent-quick-row');
+        const label = node('input', 'settings-input');
+        label.maxLength = 40; label.placeholder = 'Label'; label.value = q.label || ''; label.disabled = !canEdit;
+        label.setAttribute('aria-label', 'Quick action label');
+        label.addEventListener('input', () => { q.label = label.value; markDirty_(); });
+        const prompt = node('textarea', 'settings-textarea');
+        prompt.rows = 2; prompt.maxLength = 2000; prompt.placeholder = 'Prompt'; prompt.value = q.prompt || ''; prompt.disabled = !canEdit;
+        prompt.setAttribute('aria-label', 'Quick action prompt');
+        prompt.addEventListener('input', () => { q.prompt = prompt.value; markDirty_(); });
+        const drop = button('Remove');
+        drop.disabled = !canEdit;
+        drop.addEventListener('click', () => { p.quick_actions.splice(i, 1); draw(); markDirty_(); });
+        row.append(label, prompt, drop);
+        rows.appendChild(row);
+      });
+      add.disabled = !canEdit || p.quick_actions.length >= 6;
+    };
+    add.addEventListener('click', () => { p.quick_actions.push({ label: '', prompt: '' }); draw(); markDirty_(); rows.lastChild?.querySelector('input')?.focus(); });
+    draw();
+    wrap.append(hint, rows, add);
+    return wrap;
   }
 
   function render() {
@@ -211,6 +258,7 @@ export function mountLoadoutsEditor(container, { profiles: initial = [], canEdit
       head.appendChild(remove);
       card.appendChild(head);
       card.appendChild(field('Description', mk('input', 'description', { placeholder: 'What this worker is for (shown to the agent)', maxlength: '300' })));
+      card.appendChild(quickActionsField(p, () => { markDirty(); refreshSummary(); }));
       // Each loadout's own voice. A chat running under it uses these instead
       // of the shared persona from the Prompt window.
       const voice = node('div', 'agent-profile-voice');
