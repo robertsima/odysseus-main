@@ -20,7 +20,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote, urlsplit, parse_qsl
 
 ROOT = Path(__file__).resolve().parents[2]
 STATIC = ROOT / "static"
@@ -119,6 +119,25 @@ def _api_response(state: StubState, method: str, path: str, body: dict) -> tuple
         return 200, {"ok": True, "appearance": body.get("appearance")}
     if method != "GET":
         return 200, {"ok": True}
+    if path == "/api/agents/profiles":
+        return 200, {"profiles": [
+            {"name": "Reader", "description": "Reads project files", "quick_actions": [
+                {"label": "Summarise", "prompt": "Summarise {document}"}, {"label": "List risks", "prompt": "List the risks"}]},
+            {"name": "Writer", "description": "Drafts and edits documents", "quick_actions": []}]}
+    if path.startswith("/api/agents/profiles/") and path.endswith("/access"):
+        blocker = None
+        if "repo" in str(body.get("task") or "") and "no_workspace" not in str(body.get("requires") or ""):
+            blocker = {"code": "WORKSPACE_REQUIRED", "summary": "This task works on a code folder, and none is chosen.",
+                       "detail": {}, "actions": [
+                           {"id": "choose_workspace", "label": "Choose a code folder",
+                            "candidates": [{"path": "/repo/main", "name": "main"}]},
+                           {"id": "run_without_files", "label": "Run without files", "requires": ["no_workspace"]}]}
+        return 200, {"name": "Reader",
+                     "talk": {"summary": "Can read and edit project files and search indexed notes. Cannot run commands or contact other agents. Asks before external actions.", "facts": []},
+                     "assign": {"summary": "Can read and edit project files and search indexed notes. Cannot run commands or contact other agents. Asks before external actions. Results return to this chat.", "facts": [], "blocker": blocker},
+                     "advanced": {"tool_access": "Selected tools", "tools": ["read_file", "edit_file", "search_documents"], "tool_count": 3,
+                                  "skills": "all skills", "shell": "No commands", "approval": "inherit", "withheld": []},
+                     "quick_actions": []}
     if path == "/api/auth/status":
         return 200, {"authenticated": True, "username": "tester", "is_admin": True}
     if path == "/api/auth/settings":
@@ -208,6 +227,8 @@ def make_handler(state: StubState):
                     body = {}
                 if not isinstance(body, dict):
                     body = {}
+                if self.command == "GET":
+                    body = dict(parse_qsl(urlsplit(self.path).query))
                 if self.command in ("POST", "PUT"):
                     state.posts.append((path, body))
                 status, payload = _api_response(state, self.command, path, body)

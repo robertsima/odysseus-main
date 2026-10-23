@@ -74,7 +74,7 @@ def test_launch_form_opens_over_the_fleet_with_focus_in_the_task(open_app):
     # to put it in the document flow above the fleet.
     assert launch["visible"] and launch["top"] >= fleet["top"]
     assert 0 <= launch["top"] < page.viewport_size["height"]
-    assert page.evaluate("document.activeElement.id") == "ag-task"
+    assert page.evaluate("document.activeElement.dataset.aaField") == "task"
 
 
 @pytest.mark.parametrize("width", [1440, 390])

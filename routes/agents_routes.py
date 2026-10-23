@@ -854,8 +854,195 @@ def setup_agents_routes(session_manager) -> APIRouter:
                               "persona_name": p.get("persona_name") or "",
                               "temperature": p.get("temperature"),
                               "memory_access": p.get("memory_access", "read"),
-                              "delegation_policy": p.get("delegation_policy", "explicit")}
+                              "delegation_policy": p.get("delegation_policy", "explicit"),
+                              "quick_actions": list(p.get("quick_actions") or [])}
                              for p in agent_profiles.load_profiles()]}
+
+    def _starter_policies(user: Optional[str], session_id: str) -> tuple:
+        """``(owner ceiling, starting chat's policy)``. A chat whose policy cannot
+        be read is treated as a top-level chat of the owner rather than failing
+        the screen; launching re-reads it strictly."""
+        from src import agent_loadouts
+
+        top = agent_loadouts.caller_policy(None, user)
+        if not session_id:
+            return top, top
+        try:
+            return top, agent_loadouts.caller_policy(session_id, user)
+        except ValueError:
+            return top, top
+
+    def _split_names(raw: Any) -> list:
+        if isinstance(raw, str):
+            raw = raw.split(",")
+        if not isinstance(raw, (list, tuple)):
+            return []
+        return sorted({str(item).strip() for item in raw if str(item).strip()})
+
+    def _grantable(needed: list, profile: Dict[str, Any], starter: Dict[str, Any]) -> list:
+        """Of ``needed``, the tools the starting chat holds itself and the agent lacks.
+
+        The one place "allow for this run" is decided, so it can never offer
+        more than the chat starting the task already has.
+        """
+        from src import agent_profiles
+
+        if (profile.get("tool_access") or "all") == "all":
+            return []
+        held = agent_profiles.expand_tool_aliases(starter.get("allowed_tools") or ())
+        return [t for t in needed if t in held]
+
+    def _blocker_from_payload(payload: Dict[str, Any], profile: Dict[str, Any],
+                              starter: Dict[str, Any]) -> Dict[str, Any]:
+        from src import blockers
+
+        blocker = blockers.from_preflight(payload)
+        problems = payload.get("problems") or []
+        first = problems[0] if problems and isinstance(problems[0], dict) else {}
+        needed = list((payload.get("next_action") or {}).get("enable_tools") or [])
+        return blockers.public(blocker, blockers.recovery_actions(
+            blocker.code, candidates=list(first.get("candidates") or []), needed_tools=needed,
+            grantable_tools=_grantable(needed, profile, starter)))
+
+    def _document_blocker(gap: Dict[str, Any], profile: Dict[str, Any], starter: Dict[str, Any]) -> Dict[str, Any]:
+        from src import blockers
+
+        # read_file is left out: it cannot open an editor document or the logs,
+        # and on a vault note it needs a private-notes grant the run does not get.
+        needed = [t for t in gap.get("tools") or () if t != "read_file"][:1]
+        return blockers.public(blockers.from_document_gap(gap), blockers.recovery_actions(
+            "DOCUMENT_UNREADABLE", needed_tools=needed, grantable_tools=_grantable(needed, profile, starter)))
+
+    def _one_off(profile: Dict[str, Any], extra: list, starter: Dict[str, Any]):
+        """``(profile for this run, granted, refused)`` with ``extra`` tools added."""
+        from src.agent_tools.loadout_tools import _one_off_profile
+
+        one_off, granted, refused = _one_off_profile(profile, extra, starter)
+        return (one_off or profile), granted, refused
+
+    @router.get("/profiles/{name}/access")
+    async def profile_access(request: Request, name: str, session_id: str = Query(default=""),
+                             task: str = Query(default=""), workspace: str = Query(default=""),
+                             requires: str = Query(default=""), extra_tools: str = Query(default="")):
+        """What this agent can do when you talk to it and when you assign it a
+        task, in plain sentences, and (with ``task``) what would stop the task.
+
+        Read-only and owner-scoped: ``session_id`` must be one of the caller's
+        chats. ``workspace``, ``requires`` and ``extra_tools`` re-check after the
+        person took a recovery action.
+        """
+        import asyncio
+
+        from src import agent_loadouts, agent_profiles, loadout_access_summary, worker_preflight
+
+        user, owned = _owned(request)
+        session_id = session_id.strip()
+        if session_id and session_id not in owned:
+            raise HTTPException(404, "Session not found")
+        profile = agent_profiles.get_profile(name)
+        if not profile:
+            raise HTTPException(404, f"No agent named {name!r}")
+        top, starter = _starter_policies(user, session_id)
+        try:
+            capped, _notes = agent_loadouts.cap_to_starter(profile, session_id or None, user, policy=starter)
+        except ValueError:
+            capped = profile
+        effective = capped or profile
+        extra = _split_names(extra_tools)
+        if extra:
+            effective, _granted, _refused = _one_off(effective, extra, starter)
+        body = loadout_access_summary.build_access(
+            profile, talk_allowed=top["allowed_tools"], starter_allowed=starter["allowed_tools"],
+            worker_depth=starter.get("worker_depth", 0))
+        if effective is not profile:
+            assign = loadout_access_summary.build_access(
+                effective, talk_allowed=top["allowed_tools"], starter_allowed=starter["allowed_tools"],
+                worker_depth=starter.get("worker_depth", 0))
+            body["assign"] = assign["assign"]
+        task = task.strip()
+        if task:
+            from src.agent_tools.session_tools import _caller_workspace
+
+            checked = await asyncio.to_thread(
+                lambda: worker_preflight.run_preflight(
+                    task, explicit_workspace=workspace.strip() or None,
+                    inherited_workspace=_caller_workspace(session_id or None),
+                    unavailable_tools=worker_preflight.worker_unavailable_tools(user, effective),
+                    requires=_split_names(requires), loadout_name=profile["name"]))
+            if not checked.ok:
+                body["assign"]["blocker"] = _blocker_from_payload(checked.blocked_payload(), effective, starter)
+            else:
+                gap = worker_preflight.document_gap(task, effective)
+                if gap:
+                    body["assign"]["blocker"] = _document_blocker(gap, effective, starter)
+        return body
+
+    @router.post("/profiles/{name}/chat")
+    async def chat_with_profile(request: Request, name: str):
+        """Open a new chat of the caller's with this agent applied ("Talk to agent").
+
+        The chat gets exactly what ``POST /sessions/{id}/loadout`` would give it,
+        under the same guard. It runs on the agent's own model when it has one;
+        otherwise on the model of ``from_session`` (one of the caller's chats),
+        else on the model of the caller's latest chat.
+        """
+        import asyncio
+        import uuid
+
+        from src import agent_profiles, shell_access
+        from src.ai_interaction import _resolve_model
+
+        user, owned = _owned(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        body = body if isinstance(body, dict) else {}
+        profile = agent_profiles.get_profile(name)
+        if not profile:
+            raise HTTPException(404, f"No agent named {name!r}")
+        from_session = str(body.get("from_session") or "").strip()
+        if from_session and from_session not in owned:
+            raise HTTPException(404, "Session not found")
+        patch = agent_profiles.session_patch(profile)
+        sid = str(uuid.uuid4())
+        shell_access.guard_settings_change(request, sid, patch)
+
+        resolved = None
+        for spec in [profile.get("model"), *(profile.get("model_fallbacks") or [])]:
+            if not spec:
+                continue
+            try:
+                resolved = await asyncio.to_thread(_resolve_model, spec, user)
+                break
+            except ValueError:
+                continue
+        if resolved is None:
+            donor = owned.get(from_session) if from_session else None
+            if donor is None:
+                usable = [s for s in owned.values()
+                          if getattr(s, "model", "") and getattr(s, "endpoint_url", "")]
+                donor = usable[-1] if usable else None
+            if donor is None:
+                raise HTTPException(400, "There is no model to start this chat on. Open any chat once, "
+                                         "or give this agent a model.")
+            resolved = (donor.endpoint_url, donor.model, getattr(donor, "headers", None))
+        url, model, headers = resolved
+        session = session_manager.create_session(session_id=sid, name=profile["name"], endpoint_url=url,
+                                                 model=model, rag=False, owner=user)
+        if headers:
+            session.headers = headers
+            from routes.session_routes import _persist_session_headers
+            _persist_session_headers(sid, headers)
+        from core.database import update_session_settings
+
+        if update_session_settings(sid, patch) is None:
+            try:
+                session_manager.delete_session(sid)
+            except Exception:
+                logger.debug("could not remove the half-made chat %s", sid, exc_info=True)
+            raise HTTPException(500, "Could not set up the chat with this agent")
+        return {"session_id": sid, "name": profile["name"], "model": model}
 
     def _can_edit_loadouts(request: Request) -> bool:
         try:
@@ -1057,21 +1244,75 @@ def setup_agents_routes(session_manager) -> APIRouter:
     @router.post("/launch")
     async def launch(request: Request):
         user, owned = _owned(request)
+        from fastapi.responses import JSONResponse
+
+        from src import agent_loadouts, agent_profiles, blockers, worker_preflight
+
         body = await request.json()
-        parent = str((body or {}).get("parent_session") or "").strip() or None
+        body = body if isinstance(body, dict) else {}
+        parent = str(body.get("parent_session") or "").strip() or None
         if parent and parent not in owned:
             raise HTTPException(404, "Parent chat not found")
+        task = str(body.get("task") or "")
+        profile_name = str(body.get("profile") or "").strip() or None
+        model = str(body.get("model") or "").strip() or None
+        for field in ("requires", "extra_tools"):
+            if body.get(field) is not None and not isinstance(body.get(field), (list, str)):
+                raise HTTPException(400, f"{field} must be a list of names")
+        requires = _split_names(body.get("requires"))
+        extra = _split_names(body.get("extra_tools"))
+
+        def refused(blocker: Dict[str, Any]):
+            return JSONResponse(status_code=409, content={
+                "error": blocker["summary"], "code": blocker["code"], "blocker": blocker})
+
+        launch_kwargs: Dict[str, Any] = {
+            "owner": user, "task": task, "profile_name": profile_name, "parent_session": parent,
+            "model": model, "workspace": str(body.get("workspace") or "").strip() or None,
+            "requires": requires,
+        }
+        starter = None
+        profile = agent_profiles.get_profile(profile_name) if profile_name else None
+        if extra or (profile and task.strip()):
+            try:
+                _top, starter = _starter_policies(user, parent or "")
+            except Exception:
+                starter = None
+        if extra:
+            if not profile:
+                raise HTTPException(400, "Extra tools are added to a named agent for one run; choose an agent")
+            if starter is None:
+                raise HTTPException(503, "Could not read this chat's permissions; nothing was allowed")
+            base = profile
+            try:
+                base, _notes = agent_loadouts.cap_to_starter(profile, parent, user, policy=starter)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc))
+            one_off, granted, denied = _one_off(base or profile, extra, starter)
+            if not granted:
+                raise HTTPException(400, "This chat can't allow those tools for the agent: it doesn't have "
+                                         "them itself.")
+            if one_off is not profile and one_off is not base:
+                launch_kwargs.update(profile_name=None, model=None,
+                                     inline_profile={**one_off, **({"model": model} if model else {})})
+                profile = one_off
+        if profile and task.strip() and not body.get("start_anyway"):
+            gap = worker_preflight.document_gap(task, profile)
+            if gap:
+                return refused(_document_blocker(gap, profile, starter or _starter_policies(user, parent or "")[1]))
         try:
-            return await agent_control.launch_worker(
-                owner=user, task=str((body or {}).get("task") or ""),
-                profile_name=str((body or {}).get("profile") or "").strip() or None,
-                parent_session=parent, model=str((body or {}).get("model") or "").strip() or None,
-                workspace=str((body or {}).get("workspace") or "").strip() or None,
-            )
+            return await agent_control.launch_worker(**launch_kwargs)
+        except worker_preflight.WorkerBlocked as exc:
+            if starter is None:
+                _top, starter = _starter_policies(user, parent or "")
+            return refused(_blocker_from_payload(exc.payload, profile or {}, starter))
         except ValueError as exc:
-            # A preflight refusal (WorkerBlocked) reads as the reason and the
-            # fix, e.g. which checkout to pick.
-            raise HTTPException(400, _launch_error_text(str(exc)))
+            text = str(exc)
+            if text.startswith("worker nesting limit reached"):
+                blocker = blockers.Blocker(code="WORKER_DEPTH", summary=text, recovery="user",
+                                           user_action="Do this part in the chat that started it.")
+                return refused(blockers.public(blocker, blockers.recovery_actions("WORKER_DEPTH")))
+            raise HTTPException(400, _launch_error_text(text))
         except RuntimeError as exc:
             raise HTTPException(503, f"The worker could not be started: {exc}")
 

@@ -90,6 +90,43 @@ def _reasoning_effort(raw: Any, profile: str) -> str:
     return value
 
 
+MAX_QUICK_ACTIONS = 6
+MAX_QUICK_LABEL = 40
+MAX_QUICK_PROMPT = 2000
+
+
+def _quick_actions(raw: Any, profile: str) -> List[Dict[str, str]]:
+    """The one-click starting prompts of an agent: ``[{label, prompt}]``.
+
+    A prompt may hold ``{project}`` and ``{document}``; the UI fills them from
+    the chat's context. A row the editor left blank is dropped; a half-filled
+    one, a long one or a seventh one is refused rather than cut, so what is
+    saved is what the person typed.
+    """
+    if raw in (None, ""):
+        return []
+    if not isinstance(raw, list):
+        raise ValueError(f"profile {profile!r}: quick_actions must be a list of {{label, prompt}}")
+    out: List[Dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ValueError(f"profile {profile!r}: each quick action must have a label and a prompt")
+        label = str(item.get("label") or "").strip()
+        prompt = str(item.get("prompt") or "").strip()
+        if not label and not prompt:
+            continue
+        if not label or not prompt:
+            raise ValueError(f"profile {profile!r}: each quick action needs both a label and a prompt")
+        if len(label) > MAX_QUICK_LABEL:
+            raise ValueError(f"profile {profile!r}: a quick action label is at most {MAX_QUICK_LABEL} characters")
+        if len(prompt) > MAX_QUICK_PROMPT:
+            raise ValueError(f"profile {profile!r}: a quick action prompt is at most {MAX_QUICK_PROMPT} characters")
+        out.append({"label": label, "prompt": prompt})
+    if len(out) > MAX_QUICK_ACTIONS:
+        raise ValueError(f"profile {profile!r}: at most {MAX_QUICK_ACTIONS} quick actions")
+    return out
+
+
 def validate_profiles(value: Any) -> List[Dict[str, Any]]:
     """Normalise a list of profiles, raising ValueError on bad input."""
     if not isinstance(value, list):
@@ -153,6 +190,7 @@ def validate_profiles(value: Any) -> List[Dict[str, Any]]:
             "delegation_policy": _choice(raw.get("delegation_policy"), "delegation_policy", name, _DELEGATION, "explicit"),
             "max_parallel_workers": max(0, min(8, workers)),
             "max_rounds": 0 if rounds <= 0 else min(MAX_ROUNDS_CAP, rounds),
+            "quick_actions": _quick_actions(raw.get("quick_actions"), name),
         })
         if out[-1]["approval_mode"] not in {"inherit", "auto", "ask_risky", "ask_all"}:
             raise ValueError(f"profile {name!r}: invalid approval_mode")
@@ -384,6 +422,7 @@ def profile_from_session(base: Dict[str, Any], settings: Dict[str, Any]) -> Dict
         "model": base.get("model") or "",
         "model_fallbacks": list(base.get("model_fallbacks") or []),
         "max_rounds": base.get("max_rounds", DEFAULT_ROUNDS),
+        "quick_actions": list(base.get("quick_actions") or []),
         "instructions": settings.get("agent_instructions") or "",
         "persona_name": settings.get("agent_persona_name") or "",
         "temperature": settings.get("agent_temperature"),
