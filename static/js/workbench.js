@@ -64,6 +64,17 @@ const state = {
   runs: new Map(),          // run_id → run summary (built from events)
   paused: false,
   feedConnection: 'off', // SSE connection, independent of the selected run's status
+  // Reconnect bookkeeping. Positions are per session (sequence numbers belong
+  // to one session): session_id → highest seq ingested. `seen` makes ingestion
+  // idempotent, so a replay after a reconnect changes no list, count or badge.
+  cursors: new Map(),
+  seen: new Set(),
+  baseline: 0,            // global feed: server time its cursor was taken
+  pendingKey: null,       // a connect attempt is loading its history
+  suspendedKey: null,     // stream dropped while the tab was hidden; registry kept
+  lastUpdateAt: 0,        // last event, history load or successful run poll (ms)
+  pendingNew: 0,          // changes held back while the feed is paused
+  gapNotice: null,        // { status: 'catching-up' | 'caught-up' } after a gap frame
   focusRun: null,
   // Approved repositories for the Changes / Commits pickers.
   repos: [],
@@ -259,8 +270,55 @@ function preserveView(box, render) {
 }
 
 // ── activity model ────────────────────────────────────────────────────────
+const SEEN_MAX = 8000;
+/** Remember an event by (session, seq). False when it was already ingested. */
+function markSeen(ev) {
+  const sid = ev.session_id || '';
+  const key = `${sid}:${ev.seq}`;
+  if (state.seen.has(key)) return false;
+  state.seen.add(key);
+  if (state.seen.size > SEEN_MAX) {
+    let drop = SEEN_MAX / 8;
+    for (const old of state.seen) { state.seen.delete(old); if (--drop <= 0) break; }
+  }
+  if (typeof ev.seq === 'number' && ev.seq > (state.cursors.get(sid) || 0)) state.cursors.set(sid, ev.seq);
+  return true;
+}
+
+// A finished run or a tool that writes may have changed a checkout. The
+// Changes and Commits views listen for `wb:repo-stale` and refresh themselves;
+// a burst of tool results sends at most one per second.
+const REPO_STALE_MIN_MS = 1000;
+const REPO_TOOL_RE = /write|edit|patch|apply|commit|shell|bash|git|notebook|delete|remove|move_file/i;
+let _staleSentAt = 0;
+let _staleTimer = null;
+let _staleDetail = null;
+function repoStaleReason(ev) {
+  if (ev.kind === 'run_finished') return 'run_finished';
+  if (ev.kind === 'file_change' || ev.kind === 'commit') return ev.kind;
+  if (ev.kind === 'tool_result') {
+    const tool = (ev.data && ev.data.tool) || String(ev.title || '').split(' ')[0];
+    if (REPO_TOOL_RE.test(String(tool || ''))) return 'tool_result';
+  }
+  return '';
+}
+function notifyRepoStale(detail) {
+  _staleDetail = detail;
+  const fire = () => {
+    _staleTimer = null;
+    _staleSentAt = Date.now();
+    const d = _staleDetail; _staleDetail = null;
+    try { document.dispatchEvent(new CustomEvent('wb:repo-stale', { detail: d })); } catch (_) {}
+  };
+  if (_staleTimer) return;
+  const wait = REPO_STALE_MIN_MS - (Date.now() - _staleSentAt);
+  if (wait <= 0) fire();
+  else _staleTimer = setTimeout(fire, wait);
+}
+
 function ingest(ev, { live = true } = {}) {
-  if (!ev || typeof ev.seq !== 'number' && ev.seq == null) return;
+  if (!ev || typeof ev.seq !== 'number' && ev.seq == null) return false;
+  if (!markSeen(ev)) return false;
   state.events.push(ev);
   if (state.events.length > MAX_EVENTS) state.events.splice(0, state.events.length - MAX_EVENTS);
   if (ev.seq > state.lastSeq && (state.prefs.scope === 'all' || ev.session_id === state.sessionId)) state.lastSeq = ev.seq;
@@ -285,6 +343,10 @@ function ingest(ev, { live = true } = {}) {
     }
   }
   if (live) {
+    state.lastUpdateAt = Date.now();
+    if (state.paused) { state.pendingNew += 1; renderFeedStatus(); }
+    const staleReason = repoStaleReason(ev);
+    if (staleReason) notifyRepoStale({ session_id: ev.session_id, run_id: ev.run_id || null, reason: staleReason });
     updateChatCard(ev);
     scheduleStrip();
     // Any delegated-work event is a reason to re-ask the server what this
@@ -296,6 +358,7 @@ function ingest(ev, { live = true } = {}) {
       try { document.dispatchEvent(new CustomEvent('workbench:run-started', { detail: ev })); } catch (_) {}
     }
   }
+  return true;
 }
 
 function isOpen() {
@@ -366,6 +429,8 @@ async function refreshAgentRuns({ force = false } = {}) {
     if (state.sessionId !== sid || state.agentRunsInFlight) return;
   }
   if (!force && Date.now() - state.agentRunsAt < AGENT_RUNS_MIN_MS) return;
+  // Changes the poll made to the run registry that Activity has not shown yet.
+  let polled = 0;
   const run = (async () => {
     const ctl = typeof AbortController === 'function' ? new AbortController() : null;
     const timer = ctl ? setTimeout(() => ctl.abort(), AGENT_RUNS_TIMEOUT_MS) : null;
@@ -380,20 +445,27 @@ async function refreshAgentRuns({ force = false } = {}) {
       }
       state.agentRuns = next;
       state.agentRunsAt = Date.now();
+      state.lastUpdateAt = state.agentRunsAt;
       // An SSE run_started can outlive its run_finished event (tab sleeps,
       // reconnect, or bounded server history). The successful poll is the
       // authority: never keep a previously seen child "running" indefinitely.
       for (const known of state.runs.values()) {
         const row = next.get(known.run_id);
+        const before = known.status;
         if (row) {
           known.status = row.status;
           known.finished_at = row.finished_at;
           known.data = { ...(known.data || {}), ...(row.summary || {}) };
+          if (known.status !== before) polled += 1;
         } else if (isLive(known.status) &&
                    (known.session_id === sid || state.chatCards.has(known.run_id)) &&
                    Date.now() / 1000 - (known.started_at || 0) > 2) {
           known.status = 'interrupted';
           known.finished_at = Date.now() / 1000;
+          polled += 1;
+        }
+        if (known.status !== before && !isLive(known.status)) {
+          notifyRepoStale({ session_id: known.session_id, run_id: known.run_id, reason: 'run_finished' });
         }
         if (state.chatCards.has(known.run_id)) updateChatCard({
           run_id: known.run_id, source: known.source, session_id: state.sessionId, kind: 'restore',
@@ -404,6 +476,18 @@ async function refreshAgentRuns({ force = false } = {}) {
       for (const row of next.values()) {
         const known = state.runs.get(row.run_id);
         if (known && row.title && known.title !== row.title) { known.title = row.title; refreshCardTitle(known); }
+        if (!known) {
+          // A run only the poll knows about (its start event never reached
+          // this tab, or it began while the stream was down) still belongs in
+          // Activity, so polling and streaming feed one registry.
+          state.runs.set(row.run_id, {
+            run_id: row.run_id, source: row.source, session_id: row.session_id, title: row.title,
+            status: row.status, started_at: row.started_at, finished_at: row.finished_at,
+            detail: row.detail || '', events: [], data: { ...(row.summary || {}) }, tools: 0, errors: 0,
+          });
+          polled += 1;
+          if (!isLive(row.status)) notifyRepoStale({ session_id: row.session_id, run_id: row.run_id, reason: 'run_finished' });
+        }
       }
     } catch (e) {
       // Keep whatever we had, but say why -- a silent failure here is what
@@ -426,6 +510,15 @@ async function refreshAgentRuns({ force = false } = {}) {
   await run;
   renderAgentStrip();
   restoreChatCards();
+  if (polled) refreshActivityAfterPoll(polled);
+}
+/** A poll changed the run registry. Show it, unless the user paused the feed;
+ *  then count it so the pause control says something is waiting. */
+function refreshActivityAfterPoll(changes) {
+  if (state.paused) { state.pendingNew += changes; renderFeedStatus(); return; }
+  if (isOpen() && state.prefs.tab === 'activity') renderActivity();
+  else updateBadges();
+  renderFeedStatus();
 }
 
 function stripRuns() {
@@ -611,7 +704,7 @@ async function reconcileRunningRuns(sessionId) {
   const stale = Array.from(state.runs.values()).filter((r) => r.status === 'running' && r.session_id === sessionId);
   if (!stale.length) return;
   try {
-    const r = await api(`/api/workbench/runs?session_id=${encodeURIComponent(sessionId)}&active=true&limit=200`);
+    const r = await timedApi(`/api/workbench/runs?session_id=${encodeURIComponent(sessionId)}&active=true&limit=200`);
     const live = new Set((r.runs || []).map((x) => x.run_id));
     for (const run of stale) {
       if (!live.has(run.run_id)) { run.status = 'interrupted'; run.finished_at = run.finished_at || run.started_at; }
@@ -623,73 +716,238 @@ async function reconcileRunningRuns(sessionId) {
 function streamKey() {
   return state.prefs.scope === 'all' ? '*' : (state.sessionId || '');
 }
-let _connectGen = 0;
-async function connect(force = false) {
-  const key = streamKey();
-  // `esKey` is set before the history fetch, so a second caller during that
-  // await (the session watcher and open() both connect at startup) no longer
-  // starts a parallel connection that ingested the history twice.
-  if (!force && state.esKey === key && key) return;
-  const gen = ++_connectGen;
-  disconnect();
+// A request the page waits on while connecting. Without a bound, one stalled
+// request (a browser out of connections to the host, a proxy holding it) left
+// the connect attempt pending for good and nothing ever opened the stream.
+// The race guarantees the wait ends even where fetch ignores the abort.
+const CONNECT_REQUEST_TIMEOUT_MS = 8000;
+const RECONNECT_BACKOFF_MS = [1000, 2000, 4000, 8000, 15000, 30000];
+function timedApi(path, ms = CONNECT_REQUEST_TIMEOUT_MS) {
+  const ctl = typeof AbortController === 'function' ? new AbortController() : null;
+  let timer = null;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      if (ctl) { try { ctl.abort(); } catch (_) {} }
+      const err = new Error(`no answer from ${path.split('?')[0]} within ${ms / 1000}s`);
+      err.timeout = true;
+      reject(err);
+    }, ms);
+  });
+  const request = api(path, ctl ? { signal: ctl.signal } : {});
+  request.catch(() => {});  // an abort after the timeout won the race is not an error
+  return Promise.race([request, timeout]).finally(() => clearTimeout(timer));
+}
+const backoff = (attempt) => RECONNECT_BACKOFF_MS[Math.min(attempt, RECONNECT_BACKOFF_MS.length - 1)];
+
+// The global feed's position is one seq per session, carried as `g1.<base64url
+// json {s: {session: seq}, t: server time}>`; the server writes it as each
+// frame's `id:` and reads it back from `cursor=` or `Last-Event-ID`.
+function decodeCursor(text) {
+  try {
+    const body = String(text || '');
+    if (!body.startsWith('g1.')) return null;
+    const b64 = body.slice(3).replace(/-/g, '+').replace(/_/g, '/');
+    const data = JSON.parse(atob(b64 + '='.repeat((4 - (b64.length % 4)) % 4)));
+    return data && typeof data.s === 'object' ? { s: data.s, t: Number(data.t) || 0 } : null;
+  } catch (_) { return null; }
+}
+function encodeCursor(sessions, t) {
+  const b64 = btoa(JSON.stringify({ s: sessions, t: t || 0 })).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  return `g1.${b64}`;
+}
+function streamUrl(key) {
+  const base = `/api/workbench/activity/stream?session_id=${encodeURIComponent(key)}`;
+  if (key !== '*') return `${base}&since=${state.cursors.get(key) || state.lastSeq || 0}`;
+  if (!state.cursors.size && !state.baseline) return base;
+  return `${base}&cursor=${encodeURIComponent(encodeCursor(Object.fromEntries(state.cursors), state.baseline))}`;
+}
+function resetFeed() {
   state.events = [];
   state.runs.clear();
   state.lastSeq = 0;
+  state.cursors.clear();
+  state.seen.clear();
+  state.baseline = 0;
+  state.pendingNew = 0;
+  state.gapNotice = null;
+  state.suspendedKey = null;
+}
+
+let _connectGen = 0;
+let _reopenTimer = null;
+let _resyncTimer = null;
+let _reopenAttempt = 0;
+async function connect(force = false) {
+  const key = streamKey();
+  // A caller that arrives while an attempt is loading history (the session
+  // watcher and open() both connect at startup) joins it instead of starting a
+  // parallel one. The attempt is bounded by CONNECT_REQUEST_TIMEOUT_MS, so
+  // this can never hold the connection back for long.
+  if (!force && key && (state.esKey === key || state.pendingKey === key)) return;
+  const gen = ++_connectGen;
+  disconnect();
+  resetFeed();
   if (!key) { renderActivity(); return; }
-  state.esKey = key;
-  // History first (bounded), then the live stream from the last seq we saw.
-  // "All sessions" gets history too: the server merges the real sessions for
-  // the `*` key, and `subscribe` deliberately replays nothing for it, so the
-  // two halves do not overlap.
+  state.pendingKey = key;
+  setLive('connecting');
+  const loaded = await loadSnapshot(key, gen);
+  if (gen !== _connectGen) return;  // superseded by a newer connect
+  state.pendingKey = null;
+  if (loaded === 'denied') return;
+  // The stream opens even when history failed: live events matter more than
+  // the backlog, and the backlog is retried below until it arrives.
+  openStream(key, gen);
+  if (loaded === 'failed') scheduleResync(key, gen);
+  renderActivity();
+}
+/** History first (bounded), then the live stream from the position it ends
+ *  at. "All sessions" gets history too: the server merges the real sessions
+ *  for the `*` key and hands back the cursor the stream continues from. */
+async function loadSnapshot(key, gen) {
   try {
-    const h = await api(`/api/workbench/activity?session_id=${encodeURIComponent(key)}&limit=400`);
-    if (gen !== _connectGen) return;  // superseded by a newer connect
+    const h = await timedApi(`/api/workbench/activity?session_id=${encodeURIComponent(key)}&limit=400`);
+    if (gen !== _connectGen) return 'superseded';
     (h.events || []).forEach((ev) => ingest(ev, { live: false }));
     if (key !== '*') {
       state.lastSeq = h.seq || state.lastSeq;
+      if (h.seq && h.seq > (state.cursors.get(key) || 0)) state.cursors.set(key, h.seq);
       await reconcileRunningRuns(key);
-      if (gen !== _connectGen) return;
+      if (gen !== _connectGen) return 'superseded';
+    } else {
+      const cur = decodeCursor(h.cursor);
+      if (cur) {
+        state.baseline = cur.t;
+        for (const [sid, seq] of Object.entries(cur.s)) if (seq > (state.cursors.get(sid) || 0)) state.cursors.set(sid, seq);
+      }
     }
     await refreshAgentRuns({ force: true });
-    if (gen !== _connectGen) return;
+    if (gen !== _connectGen) return 'superseded';
+    state.lastUpdateAt = Date.now();
     renderAgentStrip();
     restoreChatCards();
+    return 'ok';
   } catch (e) {
-    if (gen !== _connectGen) return;
-    if (e.status === 403) { state.enabled = false; hideRail(); return; }
+    if (gen !== _connectGen) return 'superseded';
+    if (e && e.status === 403) { state.enabled = false; hideRail(); return 'denied'; }
+    try { console.warn(`[workbench] activity history did not load: ${e && e.message}; will retry`); } catch (_) {}
+    return 'failed';
   }
-  const es = new EventSource(`/api/workbench/activity/stream?session_id=${encodeURIComponent(key)}&since=${state.lastSeq}`);
+}
+function scheduleResync(key, gen, attempt = 0) {
+  if (_resyncTimer) clearTimeout(_resyncTimer);
+  _resyncTimer = setTimeout(async () => {
+    _resyncTimer = null;
+    if (gen !== _connectGen) return;
+    const result = await loadSnapshot(key, gen);
+    if (gen !== _connectGen) return;
+    if (result === 'failed') scheduleResync(key, gen, attempt + 1);
+    else if (result === 'ok') {
+      if (state.gapNotice) state.gapNotice.status = 'caught-up';
+      if (state.paused) { state.pendingNew += 1; renderFeedStatus(); } else if (isOpen()) renderActivity();
+    }
+  }, backoff(attempt));
+}
+function openStream(key, gen) {
+  closeStream();
+  const es = new EventSource(streamUrl(key));
   state.es = es;
-  es.onopen = () => setLive('live');
+  state.esKey = key;
+  state.suspendedKey = null;
+  es.onopen = () => { _reopenAttempt = 0; setLive('live'); };
   es.onmessage = (m) => {
     let ev = null;
     try { ev = JSON.parse(m.data); } catch (_) { return; }
-    if (!ev || ev.type === 'ready') { setLive('live'); return; }
+    if (!ev) return;
+    if (ev.type === 'ready') { state.lastUpdateAt = Date.now(); setLive('live'); return; }
+    if (ev.type === 'gap') { onGap(key, gen, ev); return; }
     ingest(ev, { live: true });
   };
-  // EventSource reconnects itself; the `since` is stale but history replay
-  // covers the gap on reopen.
-  es.onerror = () => setLive('reconnecting');
-  renderActivity();
+  // The browser reconnects by itself and sends Last-Event-ID, so the server
+  // replays only what was missed. When it gives up (the stream is CLOSED, for
+  // example after an error response) this reopens it from the positions held
+  // here, with backoff.
+  es.onerror = () => {
+    if (state.es !== es) return;
+    setLive('reconnecting');
+    if (es.readyState === 2) scheduleReopen(key, gen);
+  };
 }
-function disconnect() {
+function scheduleReopen(key, gen) {
+  if (_reopenTimer) return;
+  _reopenTimer = setTimeout(() => {
+    _reopenTimer = null;
+    if (gen !== _connectGen || state.esKey !== key) return;
+    if (state.es && state.es.readyState !== 2) return;
+    openStream(key, gen);
+  }, backoff(_reopenAttempt++));
+}
+/** The server could not replay everything this tab missed. Say so, then fetch
+ *  history again; events already ingested are ignored, the rest fill in. */
+function onGap(key, gen, ev) {
+  state.gapNotice = { status: 'catching-up', skipped: ev.skipped || 0 };
+  if (state.paused) renderFeedStatus(); else if (isOpen()) renderActivity();
+  scheduleResync(key, gen);
+}
+function closeStream() {
+  if (_reopenTimer) { clearTimeout(_reopenTimer); _reopenTimer = null; }
   if (state.es) { try { state.es.close(); } catch (_) {} }
   state.es = null;
   state.esKey = null;
+}
+function disconnect() {
+  closeStream();
+  if (_resyncTimer) { clearTimeout(_resyncTimer); _resyncTimer = null; }
+  state.pendingKey = null;
+  _reopenAttempt = 0;
   setLive('off');
 }
 function setLive(mode) {
   state.feedConnection = mode;
   renderFeedStatus();
 }
+
+// What the feed indicator says. Four states the reader can act on: Live,
+// Reconnecting (the stream is down and coming back), Stale (it claims to be
+// live but nothing, not even a run poll, has arrived for a while) and Paused
+// (the user held the feed; agents keep running). "Offline" is the stream not
+// being connected at all, which is not the same as paused.
+const FEED_STALE_AFTER_MS = 45000;
+export function feedStatus({ paused, connection, lastUpdateAt, now = Date.now(), pendingNew = 0 }) {
+  const at = lastUpdateAt ? fmtTime(lastUpdateAt / 1000) : '';
+  const when = at ? ` · ${at}` : '';
+  if (paused) {
+    const waiting = pendingNew ? ` · ${pendingNew} new` : '';
+    const link = connection === 'reconnecting' || connection === 'connecting' ? ' · reconnecting' : connection === 'off' ? ' · offline' : '';
+    return { state: 'paused', text: `Feed paused${waiting}${link}${when}`,
+      title: 'You paused the feed. New activity is held back; agents keep running. Resume to show it.' };
+  }
+  if (connection === 'connecting') return { state: 'reconnecting', text: `Feed connecting…${when}`, title: 'Loading activity history' };
+  if (connection === 'reconnecting') return { state: 'reconnecting', text: `Feed reconnecting…${when}`, title: 'The activity stream dropped. It resumes from where it stopped.' };
+  if (connection === 'live') {
+    if (!lastUpdateAt || now - lastUpdateAt > FEED_STALE_AFTER_MS) {
+      return { state: 'stale', text: `Feed stale${when}`, title: 'Connected, but nothing has arrived for a while. Activity may be out of date.' };
+    }
+    return { state: 'live', text: `Feed live${when}`, title: 'Activity feed connection (separate from run status)' };
+  }
+  return { state: 'off', text: `Feed offline${when}`, title: 'The activity stream is not connected' };
+}
 function renderFeedStatus() {
   const el = $('wb-live');
+  const pause = $('wb-pause');
+  if (pause) {
+    pause.textContent = state.paused ? `Resume feed${state.pendingNew ? ` (${state.pendingNew} new)` : ''}` : 'Pause feed';
+    pause.classList.toggle('wb-btn-primary', state.paused);
+  }
   if (!el) return;
-  el.dataset.state = state.paused ? 'paused' : state.feedConnection;
-  const labels = { live: 'Feed live', reconnecting: 'Feed reconnecting…', off: 'Feed offline' };
-  el.textContent = state.paused
-    ? `Feed paused${state.feedConnection === 'reconnecting' ? ' · reconnecting…' : ''}`
-    : (labels[state.feedConnection] || 'Feed offline');
+  const s = feedStatus({ paused: state.paused, connection: state.feedConnection, lastUpdateAt: state.lastUpdateAt,
+    now: Date.now(), pendingNew: state.pendingNew });
+  el.dataset.state = s.state;
+  el.textContent = s.text;
+  el.title = s.title;
+}
+// Staleness is a matter of time passing, not of an event arriving.
+function startFeedClock() {
+  setInterval(() => { if (!document.hidden) renderFeedStatus(); }, 5000);
 }
 
 // Follow the chat's current session. There is no session-change event, so a
@@ -720,23 +978,45 @@ function watchSession() {
 
 // An event stream per hidden tab is what exhausts the browser's per-host
 // connection budget (see AGENT_RUNS_TIMEOUT_MS). A tab that has been hidden
-// for a while drops its stream; coming back replays history and reconnects,
-// so nothing is lost but the idle connection.
+// for a while drops its stream. Coming back reopens it from the positions this
+// tab already holds, so the server replays only what was missed and the run
+// registry is kept; before the grace period ends the stream is still open and
+// only the run list is refreshed. One refresh either way, never a burst.
 const HIDDEN_STREAM_GRACE_MS = 30000;
 let _hiddenTimer = null;
+function onVisible() {
+  if (!state.enabled) return;
+  const key = streamKey();
+  if (!key) { refreshAgentRuns({ force: true }); return; }
+  if (state.pendingKey === key) return;  // an attempt is loading; it refreshes when done
+  if (state.es && state.esKey === key) {
+    if (state.es.readyState === 2) openStream(key, _connectGen);
+    refreshAgentRuns({ force: true });
+    return;
+  }
+  if (state.suspendedKey === key) {
+    openStream(key, _connectGen);
+    refreshAgentRuns({ force: true });
+    return;
+  }
+  connect();
+}
 function watchVisibility() {
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
       if (_hiddenTimer || !state.es) return;
       _hiddenTimer = setTimeout(() => {
         _hiddenTimer = null;
-        if (document.hidden && state.es) disconnect();
+        if (document.hidden && state.es) {
+          const key = state.esKey;
+          disconnect();
+          state.suspendedKey = key;
+        }
       }, HIDDEN_STREAM_GRACE_MS);
       return;
     }
     if (_hiddenTimer) { clearTimeout(_hiddenTimer); _hiddenTimer = null; }
-    if (state.enabled && state.sessionId && !state.es) connect(true);
-    else refreshAgentRuns({ force: true });
+    onVisible();
   });
 }
 
@@ -851,6 +1131,11 @@ function renderAgamemnonRunControl(runs) {
   const output = events.filter((event) => ['tool_result', 'file_change', 'commit', 'note', 'error'].includes(event.kind)).map((event) => `${fmtTime(event.ts)}  ${event.title || event.kind}${event.detail ? `\n${event.detail}` : ''}`).join('\n\n');
   set('ag-run-console-output', output || data.result_excerpt || data.error || 'No output or artifacts recorded yet.');
 }
+function gapNoticeHtml() {
+  const n = state.gapNotice;
+  if (!n) return '';
+  return `<div class="wb-feed-note" role="status">Some activity was skipped. ${n.status === 'caught-up' ? 'Caught up from history.' : 'Catching up from history…'}</div>`;
+}
 function renderActivity() {
   const box = $('wb-activity');
   if (!box) return;
@@ -868,6 +1153,7 @@ function renderActivity() {
     : '<span class="wb-group-title">Event stream</span>';
   preserveView(box, () => {
     box.innerHTML = `
+      ${gapNoticeHtml()}
       <section class="wb-card wb-runs">
         <div class="wb-card-scroll" data-wb-scroll="runs">
           <div class="wb-group-h"><span class="wb-group-title">Running</span><span class="wb-count">${active.length}</span></div>
@@ -1602,12 +1888,11 @@ function wireWindow() {
   $('wb-filter')?.addEventListener('change', (e) => { state.prefs.filter = e.target.value; savePrefs(); state.focusRun = null; renderActivity(); });
   $('wb-pause')?.addEventListener('click', (e) => {
     state.paused = !state.paused;
-    e.currentTarget.textContent = state.paused ? 'Resume feed' : 'Pause feed';
-    e.currentTarget.classList.toggle('wb-btn-primary', state.paused);
+    if (!state.paused) state.pendingNew = 0;
     renderFeedStatus();
     renderActivity();
   });
-  $('wb-clear')?.addEventListener('click', () => { state.events = []; state.runs.clear(); state.focusRun = null; renderActivity(); });
+  $('wb-clear')?.addEventListener('click', () => { state.events = []; state.runs.clear(); state.focusRun = null; state.pendingNew = 0; state.gapNotice = null; renderFeedStatus(); renderActivity(); });
   const scope = $('wb-scope'); if (scope) scope.value = state.prefs.scope;
   const filt = $('wb-filter'); if (filt) filt.value = state.prefs.filter;
 
@@ -1777,6 +2062,7 @@ export async function init() {
   // only the window, its rail button and the event stream are feature-gated.
   watchSession();
   watchVisibility();
+  startFeedClock();
   if (!state.enabled) return;
   // A sub-process run starting in this chat opens the Agents room, not this
   // window; the room does that from its own stream (agentsDashboard.js
@@ -1804,4 +2090,7 @@ export async function openRun(runId, sessionId) {
   setTab('activity');
 }
 export const _state = state;
+export const _connect = connect;
+export const _ingest = ingest;
+export const _refreshAgentRuns = refreshAgentRuns;
 export default { init, open, close, toggle, refreshSettings, openRun };
