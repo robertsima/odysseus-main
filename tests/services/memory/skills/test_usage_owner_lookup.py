@@ -143,3 +143,25 @@ def test_concurrent_uses_are_not_lost(tmp_path, monkeypatch):
     for t in threads:
         t.join(10)
     assert sm._load_usage()["alice::deploy-app"]["uses"] == 4
+
+
+def test_uses_from_separate_managers_are_not_lost(tmp_path, monkeypatch):
+    """Requests build their own manager; all of them write one sidecar."""
+    import threading
+    import time
+
+    _write(tmp_path, "general/deploy-app", "deploy-app", owner="alice")
+    real_save = SkillsManager._save_usage
+
+    def slow_save(self, usage):
+        time.sleep(0.05)
+        real_save(self, usage)
+
+    monkeypatch.setattr(SkillsManager, "_save_usage", slow_save)
+    managers = [SkillsManager(str(tmp_path)) for _ in range(4)]
+    threads = [threading.Thread(target=m.record_use, args=("deploy-app", "alice")) for m in managers]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+    assert SkillsManager(str(tmp_path))._load_usage()["alice::deploy-app"]["uses"] == 4

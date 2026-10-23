@@ -138,15 +138,17 @@ def _hidden_by_integration(skill: Dict, available_integrations: Optional[set]) -
 class SkillsManager:
     """Read/write SKILL.md files under <data_dir>/skills/."""
 
+    # Usage counters are read-modify-write on one JSON file, and prompt builds
+    # record them from a background thread. Shared by every instance: callers
+    # build a fresh manager per request, all writing the same file.
+    _usage_lock = threading.RLock()
+
     def __init__(self, data_dir: str):
         self.data_dir = data_dir
         self.skills_root = os.path.join(data_dir, "skills")
         self.usage_file = os.path.join(self.skills_root, "_usage.json")
         self.legacy_file = os.path.join(data_dir, "skills.json")  # back-compat
         os.makedirs(self.skills_root, exist_ok=True)
-        # Usage counters are read-modify-write on one JSON file, and prompt
-        # builds record them from a background thread.
-        self._usage_lock = threading.RLock()
 
     # ----------------------------------------------------------------------
     # Path helpers
