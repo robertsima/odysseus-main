@@ -31,6 +31,7 @@ _ACCESS_MODES = frozenset({"none", "read", "write"})
 _SELECTION_MODES = frozenset({"all", "selected", "none"})
 _MODEL_ACCESS_MODES = frozenset({"current", "selected", "all"})
 _DELEGATION_POLICIES = frozenset({"never", "explicit", "auto"})
+DOC_TARGETS = ("document", "project", "general")
 _LIST_KEYS = frozenset({"skill_names", "allowed_models", "allowed_mcp_servers", "enabled_tools"})
 MAX_AGENT_INSTRUCTIONS = 8000
 MAX_AGENT_PERSONA_NAME = 60
@@ -83,6 +84,11 @@ def validate_patch(patch: Any) -> Dict[str, Any]:
             if value is not None and not isinstance(value, str):
                 raise ValueError(f"{key} must be a string")
             out[key] = (value or "").strip()[:1000] or None
+        elif key == "doc_target":
+            # What the open document stands for in this chat (context strip).
+            if value is not None and not (isinstance(value, str) and value in DOC_TARGETS):
+                raise ValueError(f"doc_target must be one of {', '.join(DOC_TARGETS)}")
+            out[key] = value
         elif key == "shell_access":
             from src import shell_access
             if value is None:
@@ -241,6 +247,43 @@ def effective_approval_mode(settings: Optional[Dict[str, Any]]) -> str:
         return approval_modes.normalize_mode(get_setting("agent_approval_mode", approval_modes.DEFAULT_MODE))
     except Exception:
         return approval_modes.DEFAULT_MODE
+
+
+def project_label(workspace: Optional[str], folder: Optional[str] = None) -> Optional[str]:
+    """The project a chat belongs to, for the context strip.
+
+    A workspace under a ``Projects`` folder (``AI Mind/Projects/Tall Tree
+    Group/Agreements``) belongs to the folder right after ``Projects``. Any other
+    workspace is named by its last segment. With no workspace the chat's sidebar
+    folder stands in; with neither there is no project.
+
+    Unify with ``src/library_index.py`` project detection when that lands.
+    """
+    path = str(workspace or "").strip().replace("\\", "/").rstrip("/")
+    if path:
+        parts = [p for p in path.split("/") if p]
+        for index, part in enumerate(parts[:-1]):
+            if part.casefold() == "projects":
+                return parts[index + 1]
+        if parts:
+            return parts[-1]
+    return str(folder or "").strip() or None
+
+
+def access_summary(settings: Optional[Dict[str, Any]], approval_mode: str, shell: str) -> Dict[str, str]:
+    """What this chat may do, in the words the context strip shows."""
+    settings = settings or {}
+    external = {"auto": "auto", "ask_risky": "ask", "ask_all": "ask_all"}.get(approval_mode, "auto")
+    if settings.get("tool_access") == "none":
+        return {"summary": "No tools", "files": "none", "external": external, "shell": "off"}
+    if ((settings.get("toggles") or {}).get("mode")) == "chat":
+        return {"summary": "Chat only · no file changes", "files": "none", "external": external, "shell": "off"}
+    summary = {
+        "auto": "File editing allowed · Actions run without asking",
+        "ask_risky": "File editing allowed · External actions require approval",
+        "ask_all": "Every change requires approval",
+    }.get(approval_mode, "File editing allowed · Actions run without asking")
+    return {"summary": summary, "files": "edit", "external": external, "shell": shell}
 
 
 def effective_worker_limit(settings: Optional[Dict[str, Any]]) -> int:

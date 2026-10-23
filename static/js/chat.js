@@ -2281,10 +2281,13 @@ function _personaNameForTurn() {
       if (activeEmailComposerCtx?.docId) {
         activeDocIdForSend = activeEmailComposerCtx.docId;
       }
-      const shouldSaveActiveDoc = !approvalForSend || (
-        approvalForSend.document_id
-        && approvalForSend.document_id === activeDocIdForSend
-      );
+      // What the open document stands for (context strip). Only "document"
+      // saves it and sends its id; an approval continuation keeps its document.
+      const docTargetForSend = (window.chatSettingsModule?.docTarget?.() || {}).target || 'document';
+      const documentIsTarget = docTargetForSend === 'document';
+      const shouldSaveActiveDoc = !approvalForSend
+        ? documentIsTarget
+        : !!(approvalForSend.document_id && approvalForSend.document_id === activeDocIdForSend);
       if (documentModule && activeDocIdForSend && shouldSaveActiveDoc) {
         try {
           _sendPerf.mark('doc_save_begin');
@@ -2382,6 +2385,7 @@ function _personaNameForTurn() {
         }
         fd.append('active_doc_id', activeDocIdForSend);
       }
+      if (activeDocIdForSend && !approvalForSend) fd.append('doc_target', docTargetForSend);
       // Active email context — when an email reader is open, pass its
       // uid/folder/account so "reply", "summarize", "what does this say"
       // resolve to the email the user is actually looking at instead of
@@ -2413,9 +2417,9 @@ function _personaNameForTurn() {
 	      if (!isAgentMode && workspaceAgentIntent) {
 	        isAgentMode = true;
 	      }
-	      // Auto-escalate to agent mode when a document is open — the user expects
-	      // the AI to see the document and have tools to edit it
-	      if (!isIncognito && !isAgentMode && documentModule && activeDocIdForSend) {
+	      // A document that is this chat's target gets the tools to edit it; one that
+	      // is merely open does not change the mode.
+	      if (!isIncognito && !isAgentMode && documentModule && activeDocIdForSend && documentIsTarget) {
 	        isAgentMode = true;
 	      }
 	      fd.append('mode', isAgentMode ? 'agent' : 'chat');
