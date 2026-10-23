@@ -206,6 +206,43 @@ def setup_agents_routes(session_manager) -> APIRouter:
         no other chat started. Workers carry ``parent_session``."""
         return bool(settings.get("agent_profile")) and not settings.get("parent_session")
 
+    def _stored_conversations(user: Optional[str], known: Set[str]) -> Dict[str, Any]:
+        """Live agent conversations in the database that the session cache lacks.
+
+        After a restart the cache holds only the 100 most recent chats that
+        have messages, so a conversation not yet written to, or an older one,
+        was missing from Phalanx. Each one found is loaded into the cache, so
+        the routes that check ownership against it see it as well.
+        """
+        try:
+            from core.database import SessionLocal, Session as DbSession
+            db = SessionLocal()
+            try:
+                query = db.query(DbSession.id, DbSession.settings_json).filter(
+                    DbSession.archived == False,  # noqa: E712
+                    DbSession.settings_json.like('%agent_profile%'))
+                if user is not None:
+                    query = query.filter(DbSession.owner == user)
+                stored = [(row.id, row.settings_json) for row in query.all() if row.id not in known]
+            finally:
+                db.close()
+        except Exception:
+            logger.debug("stored conversation lookup failed", exc_info=True)
+            return {}
+        found: Dict[str, Any] = {}
+        for sid, raw in stored:
+            try:
+                settings = json.loads(raw) if raw else {}
+                if not isinstance(settings, dict) or not _is_conversation(settings):
+                    continue
+                sess = session_manager.get_session(sid)
+            except Exception:
+                logger.debug("could not load stored conversation %s", sid, exc_info=True)
+                continue
+            if user is None or getattr(sess, "owner", None) == user:
+                found[sid] = sess
+        return found
+
     def _created_at(ids: Set[str]) -> Dict[str, float]:
         """Creation time of each chat, as epoch seconds (the stable list order)."""
         if not ids:
@@ -283,6 +320,8 @@ def setup_agents_routes(session_manager) -> APIRouter:
         # The launch form reports to a live chat whichever view is open; in
         # the archive view `owned` below holds only archived chats.
         from core.database import get_session_settings
+        if not show_archived:
+            owned.update(_stored_conversations(user, set(owned)))
         live_chats = {sid: sess for sid, sess in owned.items() if not getattr(sess, "archived", False)}
         live_settings = {sid: get_session_settings(sid) or {} for sid in live_chats}
         live_parents = {sid: settings.get("parent_session") for sid, settings in live_settings.items()}

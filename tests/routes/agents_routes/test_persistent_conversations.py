@@ -143,3 +143,18 @@ def test_bob_never_sees_alices_conversations(phalanx):
     assert sid not in rows(phalanx, "bob", archived=True)
     mine = talk(phalanx, "bob")
     assert set(rows(phalanx, "bob")) == {mine}
+
+
+def test_a_conversation_survives_a_restart_before_its_first_message(phalanx):
+    """The session cache reloads only the 100 most recent chats that have
+    messages, so a conversation opened but not yet written to (or an old one)
+    was gone from Phalanx after a restart."""
+    sid = talk(phalanx)
+    manager = phalanx.session_manager
+    manager.sessions.clear()
+    manager.load_sessions()
+    assert sid not in manager.get_sessions_for_user("alice"), "precondition: the cache skips it"
+    row = rows(phalanx)[sid]
+    assert row["conversation"] and row["status"] == "idle"
+    assert sid in manager.get_sessions_for_user("alice"), "other routes see it again too"
+    assert sid not in rows(phalanx, user="bob")
