@@ -183,7 +183,7 @@ function sheetHtml(st, agents) {
       <summary>Advanced</summary>
       <div class="aa-adv-body">
         <label class="aa-field"><span>Model override</span>
-          <input class="aa-input" data-aa-field="model" value="${esc(st.model)}" placeholder="optional, e.g. qwen3 or model@endpoint"></label>
+          <input class="aa-input" data-aa-field="model" data-model-override-control value="${esc(st.model)}" placeholder="optional, e.g. qwen3 or model@endpoint"></label>
         <label class="aa-field"><span>Code folder</span>
           <input class="aa-input" data-aa-field="workspace" value="${esc(st.workspace)}" placeholder="optional; the chat's folder, or the one the task names"></label>
         <label class="aa-field"><span>Send the result to</span>
