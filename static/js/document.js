@@ -6492,7 +6492,8 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     menu.style.position = 'fixed';
     menu.style.top = (rect.bottom + 4) + 'px';
     menu.style.left = rect.left + 'px';
-    menu.style.zIndex = '9999';
+    // Above the phone-width editor pane (10010) and the Review sheet (10020).
+    menu.style.zIndex = '10030';
     items.forEach(([md, label, ico]) => {
       const it = document.createElement('button');
       it.className = 'doc-overflow-item';
@@ -9616,7 +9617,8 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
     menu.style.top = (rect.bottom + 2) + 'px';
     menu.style.right = (window.innerWidth - rect.right) + 'px';
     menu.style.left = 'auto';
-    menu.style.zIndex = '9999';
+    // Above the phone-width editor pane (10010) and the Review sheet (10020).
+    menu.style.zIndex = '10030';
 
     const langLabel = lang ? lang.toUpperCase() : 'TXT';
     // Form-backed markdown doc → primary export is the filled PDF, not the
@@ -9702,12 +9704,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       // Same path as the menu's own PDF item: form documents show the filled-PDF
       // confirmation, everything else goes through Print as PDF.
       previewPdf: () => (_isFormBackedDoc(content()) ? _downloadFilledPdf() : exportAsPdf()),
-      openExport: (rect) => {
-        showExportMenu(null, rect);
-        // The sheet sits above the editor pane; the menu has to sit above the sheet.
-        const m = document.getElementById('doc-export-menu');
-        if (m) m.style.zIndex = '10030';
-      },
+      openExport: (rect) => showExportMenu(null, rect),
     });
   }
 
