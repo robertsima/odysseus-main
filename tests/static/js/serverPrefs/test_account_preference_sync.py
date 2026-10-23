@@ -1,15 +1,14 @@
-"""Navigation order and theme follow the account, not the browser.
+"""Account preferences follow the account, not the browser.
 
-Both were localStorage-only in practice: the navigation order never reached the
-server at all, and the theme consulted it only when localStorage was completely
-empty — so a browser that had ever picked a theme never saw a change made
-anywhere else. These tests drive the reconcile rules in `serverPrefs.js` and
-`navOrder.js` under Node with a stubbed `fetch`. The theme boot is tested in
-tests/static/js/theme/ and the route in tests/routes/prefs_routes/.
+The theme was localStorage-only in practice: it consulted the server only when
+localStorage was completely empty, so a browser that had ever picked a theme
+never saw a change made anywhere else. These tests drive the reconcile rules in
+`serverPrefs.js` under Node with a stubbed `fetch`. The navigation layout's
+agreement with the account is tested in tests/static/js/navLayout/, the theme
+boot in tests/static/js/theme/ and the route in tests/routes/prefs_routes/.
 """
 
 import json
-import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -19,7 +18,6 @@ from tests import REPO_ROOT
 
 ROOT = REPO_ROOT
 JS = ROOT / "static" / "js"
-NAV_ORDER = (JS / "navOrder.js").read_text(encoding="utf-8")
 
 
 def run_node(script: str) -> subprocess.CompletedProcess:
@@ -188,90 +186,3 @@ await settled(); report({ source: r.source });
 """)
     assert out["source"] == "local"
     assert out["puts"] == [["demo", {"value": "fresh", "updated_at": 999}]]
-
-
-# ── navigation order ─────────────────────────────────────────────────────────
-
-NAV_DOM = """
-const nodes = new Map();
-const doc = {
-  getElementById: (id) => nodes.get(id) || null,
-  createComment: () => ({ comment: true, remove() { this.parentNode.remove(this); } }),
-};
-function container(id, ids) {
-  const root = { id, ownerDocument: doc, all: [],
-    get children() { return this.all.filter((n) => !n.comment); },
-    insertBefore(n, before) { this.all.splice(this.all.indexOf(before), 0, n); n.parentNode = this; },
-    remove(n) { this.all.splice(this.all.indexOf(n), 1); n.parentNode = null; },
-  };
-  nodes.set(id, root);
-  root.all = ids.map((childId) => {
-    const n = { id: childId, parentNode: root, remove() { this.parentNode.remove(this); } };
-    nodes.set(childId, n); return n;
-  });
-  return root;
-}
-const rail = container('icon-rail', ['rail-notes', 'rail-agents', 'rail-tasks']);
-container('tools-section', []);
-"""
-NAV_IMPORT = "const nav = await import(%s);\n" % url("navOrder.js")
-
-
-def test_a_reordered_rail_is_written_to_the_account():
-    out = node_case({}, {}, NAV_IMPORT + NAV_DOM + """
-nav.writeNavOrder(['tasks', 'agents', 'notes']);
-await settled(); report({});
-""")
-    key, entry = out["puts"][0]
-    assert key == "nav-order"
-    assert entry["value"][:3] == ["tasks", "agents", "notes"]
-
-
-def test_a_second_browser_adopts_the_accounts_order():
-    """The whole point: this browser has its own stored order, and the account
-    has a newer one. The account's wins and the rail is re-laid-out."""
-    out = node_case(
-        {"odysseus-nav-order-v1": json.dumps({"value": ["notes", "agents", "tasks"], "updated_at": 100})},
-        {"nav-order": {"value": ["tasks", "agents", "notes"], "updated_at": 900}},
-        NAV_IMPORT + NAV_DOM + """
-const applied = await nav.syncNavOrderWithAccount(doc);
-await settled();
-report({ applied: applied.slice(0, 3), rail: rail.children.map((n) => n.id) });
-""")
-    assert out["applied"] == ["tasks", "agents", "notes"]
-    assert out["rail"] == ["rail-tasks", "rail-agents", "rail-notes"]
-    # Adopting the account's order must not bounce straight back to the server.
-    assert out["puts"] == []
-
-
-def test_a_stale_account_order_does_not_override_a_fresh_local_one():
-    out = node_case(
-        {"odysseus-nav-order-v1": json.dumps({"value": ["tasks", "agents", "notes"], "updated_at": 900})},
-        {"nav-order": {"value": ["notes", "agents", "tasks"], "updated_at": 100}},
-        NAV_IMPORT + NAV_DOM + """
-const applied = await nav.syncNavOrderWithAccount(doc);
-await settled(); report({ applied: applied.slice(0, 3) });
-""")
-    assert out["applied"] == ["tasks", "agents", "notes"]
-    assert out["puts"][0][1]["value"][:3] == ["tasks", "agents", "notes"]
-
-
-def test_an_order_stored_by_an_older_build_still_reads():
-    out = node_case({"odysseus-nav-order-v1": json.dumps(["tasks", "notes"])}, {},
-                    NAV_IMPORT + NAV_DOM + "report({ order: nav.readNavOrder().slice(0, 2) });")
-    assert out["order"] == ["tasks", "notes"]
-
-
-def test_resetting_the_order_is_recorded_so_it_is_not_undone_on_reload():
-    """Dropping only the local copy left the account holding the old order,
-    which the next page load restored."""
-    out = node_case({}, {"nav-order": {"value": ["tasks", "agents", "notes"], "updated_at": 100}},
-                    NAV_IMPORT + NAV_DOM + """
-nav.resetNavOrder(doc);
-await settled(); report({});
-""")
-    assert out["puts"], "reset must reach the account"
-    # The default order's first item, read from navOrder.js so a redesign of the
-    # rail (PR #49 put search first) does not have to edit this test.
-    first_default = re.search(r"NAV_ITEMS = Object\.freeze\(\[\s*Object\.freeze\(\{ key: '([\w-]+)'", NAV_ORDER).group(1)
-    assert out["puts"][0][1]["value"][0] == first_default

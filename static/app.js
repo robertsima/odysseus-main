@@ -38,7 +38,7 @@ import './js/agentsDashboard.js?v=20260930agentroom1';
 // Today: the calm entry point, what needs you now plus one-line capture (self-initialising).
 import todayModule from './js/today.js?v=20261010today1';
 // User-customizable tool order shared by the icon rail and sidebar Tools list.
-import './js/navOrder.js?v=20260916accountprefs1';
+import './js/navOrder.js?v=20261023navgroups1';
 import voiceRecorderModule from './js/voiceRecorder.js';
 import censorModule from './js/censor.js';
 import galleryModule from './js/gallery.js';

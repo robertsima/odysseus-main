@@ -15,7 +15,6 @@ from tests.helpers.static_app import (
 
 pytestmark = pytest.mark.browser
 
-COMMANDS = ["rail-email", "rail-agents", "rail-workbench", "rail-new-session", "rail-search-btn"]
 CANVASES = "document.querySelectorAll('canvas[id$=\"-canvas\"]').length"
 
 
@@ -39,12 +38,8 @@ def test_page_style_and_colourway_switch_independently(open_app, static_app, wid
     if width < 768:
         page.click("#hamburger-btn")
         settle(page, "#sidebar")
-    page.evaluate("document.getElementById('rail-command').click()")
-    menu = page.evaluate("[...document.querySelectorAll('#sidebar-command-menu button')]"
-                         ".map(b => ({target: b.dataset.commandTarget, named: b.textContent.trim().length > 0}))")
-    assert [item["target"] for item in menu] == COMMANDS and all(item["named"] for item in menu), menu
-    assert page.evaluate("document.activeElement.dataset.commandTarget") == "rail-email"
-    page.click('#sidebar-command-menu [data-command-target="rail-agents"]')
+    assert page.evaluate("document.getElementById('rail-command')") is None
+    page.evaluate("document.getElementById('tool-agents-btn').click()")
     page.wait_for_function("getComputedStyle(document.getElementById('agents-dashboard')).display !== 'none'")
     page.evaluate("document.getElementById('close-agents-dashboard')?.click()")
 

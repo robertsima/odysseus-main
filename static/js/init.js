@@ -102,6 +102,8 @@ document.addEventListener('DOMContentLoaded', markComposerUserEdited, { once: tr
   document.querySelectorAll('.sidebar .section').forEach((section) => {
     const id = section.id;
     if (!id) return;
+    // Navigation groups keep their fold state in the navigation layout.
+    if (section.classList.contains('nav-group')) return;
     const shouldCollapse = (id in saved) ? saved[id] : !!_defaultCollapsed[id];
     if (shouldCollapse) section.classList.add('collapsed');
   });

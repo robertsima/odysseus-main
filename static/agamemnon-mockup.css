@@ -399,21 +399,9 @@ html[data-style="agamemnon"] #agents-dashboard .ag-appearance-options{grid-templ
 .ody-brand-name,.ody-nav-label,.ody-agents-title,.ody-agents-summary,.ody-workbench-title{display:none!important}
 .sidebar-inner::before{content:none!important}
 .sidebar #sidebar-new-chat-btn[hidden],.sidebar #sidebar-search-btn[hidden]{display:none!important}
-.command-nav{margin:4px 0 12px;position:relative}
-.command-nav button{font:inherit;cursor:pointer;color:var(--fg);background:var(--panel);border:1px solid var(--border)}
-#sidebar-command-toggle{display:flex;align-items:center;justify-content:space-between;width:100%;min-height:44px;padding:8px 12px;text-align:left;font-weight:700;letter-spacing:.06em;text-transform:uppercase}
-#sidebar-command-menu[hidden]{display:none!important}
-#sidebar-command-menu{display:grid;gap:2px;padding:5px;border:1px solid var(--border);background:var(--panel);box-shadow:0 10px 22px #0005;position:relative;z-index:5}
-#sidebar-command-menu button{min-height:44px;padding:9px 12px;text-align:left;border:0;background:transparent}
-#sidebar-command-menu button:hover,#sidebar-command-menu button:focus-visible,#sidebar-command-toggle:focus-visible{outline:2px solid var(--red);outline-offset:-2px;background:var(--bg)}
 .theme-style-card label{display:flex;justify-content:space-between;align-items:center;gap:20px;cursor:pointer;min-height:48px}
 .theme-style-card small{display:block;margin-top:5px;line-height:1.45;opacity:.8}
 .theme-style-card input{width:22px;height:22px;flex:none;accent-color:var(--red)}
-/* Classic restores its original direct navigation. The Command list exists
-   only in Agamemnon; do not show the same destinations twice in either style. */
-html[data-style="classic"] .command-nav{display:none}
-html[data-style="classic"] #rail-command{display:none}
-html[data-style="agamemnon"] body:has(#sidebar:not(.hidden)) #rail-command{display:none}
 html[data-style="agamemnon"] .sidebar :is(#sidebar-new-chat-btn,#sidebar-search-btn){display:none}
 /* Both styles share the 240px sidebar and 40px crest; the fixed hamburger
    sits in the icon rail, not in the branding row. */

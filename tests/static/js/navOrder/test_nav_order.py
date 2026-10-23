@@ -1,5 +1,5 @@
 """Reordering the navigation (static/js/navOrder.js): dragging a tool in the
-sidebar, the core controls that never move, and the order surviving a reload.
+sidebar, the core controls that never move, and the layout surviving a reload.
 """
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from tests.helpers.static_app import wait_ready
 
 pytestmark = pytest.mark.browser
 
-KEY = "odysseus-nav-order-v1"
+KEY = "odysseus-nav-layout-v2"
 CORE_RAIL = ["rail-delete-session", "rail-chats", "rail-documents", "rail-settings"]
 
 
@@ -48,6 +48,6 @@ def test_core_controls_cannot_be_moved(open_app):
     page.evaluate("(ids) => ids.forEach(id => document.getElementById(id).dispatchEvent("
                   "new KeyboardEvent('keydown', {key: 'ArrowDown', altKey: true, bubbles: true})))", CORE_RAIL)
     page.wait_for_timeout(200)
-    assert page.evaluate("localStorage.getItem('odysseus-nav-order-v1')") is None
+    assert page.evaluate("localStorage.getItem('odysseus-nav-layout-v2')") is None
     assert page.evaluate("[...document.querySelectorAll('#icon-rail .icon-rail-btn')].map(b => b.id)"
                          ".filter(id => ['rail-delete-session', 'rail-chats', 'rail-documents', 'rail-settings'].includes(id))") == CORE_RAIL

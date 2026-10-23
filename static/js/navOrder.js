@@ -1,314 +1,316 @@
-// Shared navigation order for the icon rail and the sidebar groups (Work, Agents, More).
+// The sidebar's navigation groups, drawn from the layout in navLayout.js.
 //
-// The module deliberately owns no tool click handlers. It only moves the
-// existing DOM nodes, so every tool keeps the listeners installed by app.js
-// and its feature module. Importing this file is enough to initialize it; the
-// exported API is useful to the Settings/UI customizer and for tests.
+// The module owns no tool click handlers. It moves the existing row nodes into
+// the group they belong to (and builds a container for a group the person
+// created), so every tool keeps the listeners app.js and its feature module
+// installed. Importing this file initializes it. The collapsed rail's group
+// icons and flyouts are navRail.js; the Edit navigation dialog is navEditor.js.
 //
-// The order belongs to the signed-in account, not to the browser. localStorage
-// stays the fast path so the rail is in the right order on first paint, but the
-// authoritative copy lives in /api/prefs so a second browser (or a new device)
-// picks up the same arrangement. See serverPrefs.js for the reconcile rules.
+// Layout belongs to the signed-in account (see navLayout.js and serverPrefs.js).
 
-import { reconcile, writePref } from './serverPrefs.js';
+import {
+  NAV_GROUPS, NAV_ITEMS, defaultLayout, getLayout, subscribe, syncLayoutWithAccount, updateLayout,
+  setGroupCollapsed, moveItem, moveGroupRelative, moveItemBy, moveGroupBy, renameGroup, createGroup,
+  findGroup, resetLayout, readLayout, writeLayout, migrateFlatOrder,
+} from './navLayout.js';
+import { askText, isGroupContainerHidden, isRowShown, showMenu, sidebarNode } from './navDom.js';
+import { initNavRail } from './navRail.js';
+import { openNavEditor } from './navEditor.js';
 
-export const NAV_ORDER_KEY = 'odysseus-nav-order-v1';
-export const NAV_ORDER_PREF = 'nav-order';
+export { NAV_GROUPS, NAV_ITEMS };
 
-// Sidebar groups. Each group is its own container (#work-section and so on);
-// an item only ever reorders inside the group it lives in. The rail has no
-// groups: it follows the same sequence as one flat list.
-export const NAV_GROUPS = Object.freeze({
-  work: 'work-section',
-  agents: 'agents-section',
-  more: 'more-section',
-});
-const GROUP_IDS = Object.values(NAV_GROUPS);
+const ROW = '.list-item[data-nav-item]';
+const CHEVRON = '<svg class="section-collapse-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>';
+const DOTS = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg>';
 
-// Dynamic indicators and Settings stay fixed. One-sided tools
-// (Email on the rail, Lotus in the sidebar) still participate where present.
-// Theme lives in the sidebar footer, so only its rail button reorders.
-export const NAV_ITEMS = Object.freeze([
-  Object.freeze({ key: 'search', rail: 'rail-search-btn', sidebar: null }),
-  Object.freeze({ key: 'new-chat', rail: 'rail-new-session', sidebar: null }),
-  Object.freeze({ key: 'command', rail: 'rail-command', sidebar: null }),
-  Object.freeze({ key: 'today', rail: 'rail-today', sidebar: 'tool-today-btn', group: 'work' }),
-  Object.freeze({ key: 'library', rail: 'rail-archive', sidebar: 'tool-library-btn', group: 'work' }),
-  Object.freeze({ key: 'notes', rail: 'rail-notes', sidebar: 'tool-notes-btn', group: 'work' }),
-  Object.freeze({ key: 'tasks', rail: 'rail-tasks', sidebar: 'tool-tasks-btn', group: 'work' }),
-  Object.freeze({ key: 'calendar', rail: 'rail-calendar', sidebar: 'tool-calendar-btn', group: 'work' }),
-  Object.freeze({ key: 'email', rail: 'rail-email', sidebar: null }),
-  Object.freeze({ key: 'agents', rail: 'rail-agents', sidebar: 'tool-agents-btn', group: 'agents' }),
-  Object.freeze({ key: 'workbench', rail: 'rail-workbench', sidebar: 'tool-workbench-btn', group: 'agents' }),
-  Object.freeze({ key: 'memory', rail: 'rail-memory', sidebar: 'tool-memory-btn', group: 'more' }),
-  Object.freeze({ key: 'lotus', rail: null, sidebar: 'tool-lotus-btn', group: 'more' }),
-  Object.freeze({ key: 'compare', rail: 'rail-compare', sidebar: 'tool-compare-btn', group: 'more' }),
-  Object.freeze({ key: 'cookbook', rail: 'rail-cookbook', sidebar: 'tool-cookbook-btn', group: 'more' }),
-  Object.freeze({ key: 'research', rail: 'rail-research', sidebar: 'tool-research-btn', group: 'more' }),
-  Object.freeze({ key: 'gallery', rail: 'rail-gallery', sidebar: 'tool-gallery-btn', group: 'more' }),
-  Object.freeze({ key: 'theme', rail: 'rail-theme', sidebar: null }),
-]);
-
-// Before the groups existed the navigation was one flat list. A browser that
-// saved that default unchanged (a reset writes it) has no real preference, so
-// it follows the new default instead of carrying the old sequence over.
-const LEGACY_DEFAULT_ORDER = Object.freeze([
-  'search', 'new-chat', 'command', 'today', 'calendar', 'compare', 'cookbook', 'research',
-  'email', 'gallery', 'library', 'memory', 'lotus', 'agents', 'workbench', 'notes', 'tasks', 'theme',
-]);
-const LEGACY_DEFAULT_NO_TODAY = LEGACY_DEFAULT_ORDER.filter((key) => key !== 'today');
-
-const KEYS = new Set(NAV_ITEMS.map((item) => item.key));
-const BY_RAIL = new Map(NAV_ITEMS.map((item) => [item.rail, item]));
-const BY_SIDEBAR = new Map(NAV_ITEMS.filter((item) => item.sidebar).map((item) => [item.sidebar, item]));
+const _detached = new WeakMap();
 let _initialized = false;
-let _dragKey = null;
+let _drag = null;
 let _suppressClickUntil = 0;
 
-function storage() {
-  try { return window.localStorage; } catch (_) { return null; }
+function detachedFor(doc) {
+  if (!_detached.has(doc)) _detached.set(doc, new Map());
+  return _detached.get(doc);
 }
 
-function normalize(order) {
-  const result = [];
-  const seen = new Set();
-  for (const key of Array.isArray(order) ? order : []) {
-    const value = String(key);
-    if (KEYS.has(value) && !seen.has(value)) { seen.add(value); result.push(value); }
+function groupElements(doc) {
+  return Array.from(doc.querySelectorAll('.nav-group[data-nav-group]'));
+}
+
+function buildHeader(el, doc) {
+  let header = el.querySelector(':scope > .section-header-flex');
+  if (!header) {
+    header = doc.createElement('div');
+    el.insertBefore(header, el.firstChild);
   }
-  // A tool added after a full order was saved goes where the default order puts it
-  // (Today would otherwise be last for everyone). A short saved list is a choice
-  // about those tools only, so the rest still follow it.
-  const complete = result.length * 2 >= NAV_ITEMS.length;
-  NAV_ITEMS.forEach((item, index) => {
-    if (seen.has(item.key)) return;
-    seen.add(item.key);
-    const successor = complete ? NAV_ITEMS.slice(index + 1).find((later) => result.includes(later.key)) : null;
-    if (successor) result.splice(result.indexOf(successor.key), 0, item.key);
-    else result.push(item.key);
-  });
-  return result;
+  if (header.dataset.navHeader === '1') return header;
+  header.dataset.navHeader = '1';
+  header.className = 'section-header-flex nav-group-header';
+  header.draggable = true;
+  header.innerHTML = `<button type="button" class="nav-group-toggle" aria-expanded="true"><span class="section-title nav-group-title"></span><span class="nav-group-dot" aria-hidden="true"></span>${CHEVRON}</button>`
+    + `<button type="button" class="nav-group-menu-btn" aria-haspopup="menu" aria-expanded="false">${DOTS}</button>`;
+  return header;
 }
 
-export function defaultNavOrder() { return NAV_ITEMS.map((item) => item.key); }
-
-function isLegacyDefault(order) {
-  const list = Array.isArray(order) ? order.map(String) : [];
-  return [LEGACY_DEFAULT_ORDER, LEGACY_DEFAULT_NO_TODAY].some((legacy) => legacy.length === list.length && legacy.every((key, i) => key === list[i]));
+function buildGroupElement(group, doc) {
+  const el = doc.createElement('div');
+  el.className = 'section nav-group';
+  el.id = NAV_GROUPS[group.id] || `nav-group-${group.id}`;
+  el.dataset.navGroup = group.id;
+  return el;
 }
 
-// Stored locally as { value: [...keys], updated_at }. A bare array is what
-// older builds wrote; it still reads, and counts as older than any stamped
-// order so an arrangement made on another browser takes precedence over it.
-function readLocalEntry() {
-  const store = storage();
-  if (!store) return null;
-  try {
-    const raw = JSON.parse(store.getItem(NAV_ORDER_KEY) || 'null');
-    if (Array.isArray(raw)) return raw.length ? { value: raw, updated_at: 0 } : null;
-    if (raw && Array.isArray(raw.value)) return { value: raw.value, updated_at: Number(raw.updated_at) || 0 };
-  } catch (_) {}
-  return null;
+function elementFor(group, doc) {
+  const live = groupElements(doc).find((el) => el.dataset.navGroup === group.id);
+  if (live) return live;
+  const cache = detachedFor(doc);
+  if (cache.has(group.id)) return cache.get(group.id);
+  return buildGroupElement(group, doc);
 }
 
-export function readNavOrder() {
-  const entry = readLocalEntry();
-  return entry && !isLegacyDefault(entry.value) ? normalize(entry.value) : defaultNavOrder();
+function decorateRow(node, key) {
+  if (node.dataset.navItem === key) return;
+  node.dataset.navItem = key;
+  node.draggable = true;
+  node.dataset.navReorderable = 'true';
+  if (!node.title.includes('Drag to reorder')) node.title = node.title ? `${node.title} · Drag to reorder` : 'Drag to reorder';
 }
 
-/** Persist an order. `sync: false` records a value that came *from* the
- *  account, so applying it does not bounce straight back to the server. */
-export function writeNavOrder(order, { sync = true, at } = {}) {
-  const normalized = normalize(order);
-  const stamped = Number(at) || Date.now();
-  try { storage()?.setItem(NAV_ORDER_KEY, JSON.stringify({ value: normalized, updated_at: stamped })); } catch (_) {}
-  if (sync) writePref(NAV_ORDER_PREF, normalized, stamped);
-  return normalized;
-}
+function fillGroup(el, group, doc) {
+  const header = buildHeader(el, doc);
+  const title = header.querySelector('.nav-group-title');
+  if (title.textContent !== group.label) title.textContent = group.label;
+  const toggle = header.querySelector('.nav-group-toggle');
+  toggle.setAttribute('aria-expanded', String(!group.collapsed));
+  toggle.setAttribute('aria-label', group.label);
+  header.querySelector('.nav-group-menu-btn').setAttribute('aria-label', `${group.label} options`);
+  el.classList.toggle('collapsed', !!group.collapsed);
 
-/** Ask the account for its navigation order and adopt it when it is newer than
- *  what this browser last stored. Safe to call before or after the first paint;
- *  applyNavOrder only moves nodes, so re-running it is not disruptive. */
-export async function syncNavOrderWithAccount(doc = document) {
-  const local = readLocalEntry();
-  const { source, entry } = await reconcile(NAV_ORDER_PREF, local);
-  if (source !== 'remote' || !entry || !Array.isArray(entry.value)) return readNavOrder();
-  const normalized = writeNavOrder(entry.value, { sync: false, at: entry.updated_at || Date.now() });
-  applyNavOrder(normalized, doc);
-  return normalized;
-}
-
-function nodeFor(container, id) {
-  if (!container) return null;
-  return Array.from(container.children).find((node) => node.id === id) || null;
-}
-
-function reorderContainer(container, ids, lookup) {
-  if (!container) return;
-  // Insert before a stable non-movable child (for example the rail spacer),
-  // or append when the movable tools are the final children. Existing hidden
-  // nodes are still moved; only their order changes, never their visibility.
-  const desired = ids.map((key) => nodeFor(container, lookup(key))).filter(Boolean);
-  if (!desired.length) return;
-  const movableIds = new Set(desired.map((node) => node.id));
-  const current = Array.from(container.children).filter((node) => movableIds.has(node.id));
-  // Keep non-movable children (dynamic indicators, the rail spacer, Settings,
-  // etc.) in their existing slots. This matters when a feature is
-  // hidden or not available for the current account.
-  const slots = current.map((node) => {
-    const marker = container.ownerDocument.createComment('nav-order-slot');
-    container.insertBefore(marker, node);
-    node.remove();
-    return marker;
-  });
-  desired.forEach((node, index) => {
-    slots[index].parentNode.insertBefore(node, slots[index]);
-    slots[index].remove();
-  });
-}
-
-export function applyNavOrder(order = readNavOrder(), doc = document) {
-  const normalized = normalize(order);
-  const rail = doc.getElementById('icon-rail');
-  reorderContainer(rail, normalized, (key) => NAV_ITEMS.find((item) => item.key === key)?.rail);
-  // Each group sorts only its own items: nodeFor() looks at that group's
-  // children, so an item can never leave its group, whatever the saved order.
-  for (const id of GROUP_IDS) {
-    reorderContainer(doc.getElementById(id), normalized, (key) => NAV_ITEMS.find((item) => item.key === key)?.sidebar);
+  let drop = el.querySelector(':scope > .nav-group-empty');
+  if (!drop) {
+    drop = doc.createElement('div');
+    drop.className = 'nav-group-empty';
+    drop.textContent = 'No tools yet. Drop one here.';
+    el.appendChild(drop);
   }
-  return normalized;
+  // Tools go before the empty-state line, which stays the last child. A node is
+  // only moved when it is not already in its place, so focus and animations on
+  // the rows survive a redraw.
+  let ref = drop;
+  const rows = group.items.map((key) => ({ key, node: sidebarNode(key, doc) })).filter((row) => row.node);
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    const { key, node } = rows[i];
+    decorateRow(node, key);
+    if (node.parentNode !== el || node.nextSibling !== ref) el.insertBefore(node, ref);
+    ref = node;
+  }
+  // A group is "empty" (and stays drawn, as a drop target) only when the layout
+  // places nothing in it. A group whose tools are all hidden for this account
+  // is hidden by nav-groups.css instead.
+  el.dataset.empty = String(group.items.length === 0);
 }
 
-function keyFromNode(node) { return BY_RAIL.get(node?.id)?.key || BY_SIDEBAR.get(node?.id)?.key || null; }
-
-function inContainer(root, key) {
-  const item = NAV_ITEMS.find((entry) => entry.key === key);
-  const id = GROUP_IDS.includes(root?.id) ? item?.sidebar : item?.rail;
-  return !!id && !!nodeFor(root, id);
+/** Draw the layout into the sidebar: create or retire group containers, order
+ *  them, and put each tool's existing row in its group. */
+export function applyNavLayout(layout = getLayout(), doc = document) {
+  const existing = groupElements(doc);
+  const parent = existing[0]?.parentNode || doc.querySelector('.sidebar-inner');
+  if (!parent) return layout;
+  const desired = layout.groups.map((group) => elementFor(group, doc));
+  let ref = existing.length ? existing[existing.length - 1].nextSibling : null;
+  // Fill first: a row still inside a group that is about to be retired is only
+  // found while that group is in the page.
+  layout.groups.forEach((group, index) => fillGroup(desired[index], group, doc));
+  for (const el of existing) {
+    if (desired.includes(el)) continue;
+    detachedFor(doc).set(el.dataset.navGroup, el);
+    el.remove();
+  }
+  for (let i = desired.length - 1; i >= 0; i -= 1) {
+    const el = desired[i];
+    if (el.parentNode !== parent || el.nextSibling !== ref) parent.insertBefore(el, ref);
+    ref = el;
+  }
+  return layout;
 }
+
+// ── Group header actions ─────────────────────────────────────────────────────
+
+function groupId(el) { return el?.closest?.('.nav-group')?.dataset.navGroup || null; }
+
+function toggleGroup(id) {
+  const group = findGroup(getLayout(), id);
+  if (group) updateLayout((layout) => setGroupCollapsed(layout, id, !group.collapsed));
+}
+
+function shownGroup(doc) {
+  return (group) => {
+    const el = groupElements(doc).find((node) => node.dataset.navGroup === group.id);
+    return !!el && !isGroupContainerHidden(el) && (group.items.length === 0 || group.items.some((key) => isRowShown(key, doc)));
+  };
+}
+
+export async function promptNewGroup() {
+  const label = await askText('Name the group.', { title: 'New group', placeholder: 'For example, Clients', confirmText: 'Create', maxLength: 32 });
+  if (!label || !label.trim()) return null;
+  let created = null;
+  updateLayout((layout) => {
+    const made = createGroup(layout, { label });
+    created = made.id;
+    return made.layout;
+  });
+  return created;
+}
+
+export async function promptRename(id) {
+  const group = findGroup(getLayout(), id);
+  if (!group) return;
+  const label = await askText('Group name', { title: 'Rename group', defaultValue: group.label, confirmText: 'Rename', maxLength: 32 });
+  if (label && label.trim()) updateLayout((layout) => renameGroup(layout, id, label));
+}
+
+function openGroupMenu(id, anchor, doc) {
+  const layout = getLayout();
+  const group = findGroup(layout, id);
+  if (!group) return;
+  const shown = shownGroup(doc);
+  const canMove = (delta) => moveGroupBy(layout, id, delta, shown) !== layout;
+  showMenu(anchor, [
+    { label: 'Rename…', onSelect: () => promptRename(id) },
+    { label: 'Move group up', disabled: !canMove(-1), onSelect: () => updateLayout((l) => moveGroupBy(l, id, -1, shown)) },
+    { label: 'Move group down', disabled: !canMove(1), onSelect: () => updateLayout((l) => moveGroupBy(l, id, 1, shown)) },
+    { label: 'New group…', onSelect: () => { promptNewGroup(); } },
+    { label: 'Edit navigation…', onSelect: () => openNavEditor({ doc, group: id }) },
+    { label: 'Delete group…', danger: true, disabled: layout.groups.length < 2, onSelect: () => openNavEditor({ doc, group: id, deleting: true }) },
+  ], { doc, id: 'nav-group-menu', label: `${group.label} options` });
+}
+
+// ── Drag and drop ────────────────────────────────────────────────────────────
 
 function clearDragUi(doc) {
-  doc.querySelectorAll('.nav-order-dragging, .nav-order-target').forEach((node) => node.classList.remove('nav-order-dragging', 'nav-order-target'));
-  doc.getElementById('icon-rail')?.classList.remove('nav-order-active');
-  GROUP_IDS.forEach((id) => doc.getElementById(id)?.classList.remove('nav-order-active'));
+  doc.querySelectorAll('.nav-dragging, .nav-drop-before, .nav-drop-after, .nav-drop-into')
+    .forEach((node) => node.classList.remove('nav-dragging', 'nav-drop-before', 'nav-drop-after', 'nav-drop-into'));
 }
 
-function move(key, delta, doc = document, root = doc.getElementById('icon-rail')) {
-  const order = readNavOrder();
-  const surface = GROUP_IDS.includes(root?.id) ? 'sidebar' : 'rail';
-  const represented = order.filter((value) => nodeFor(root, NAV_ITEMS.find((item) => item.key === value)?.[surface]));
-  const position = represented.indexOf(key);
-  const nextKey = represented[position + delta];
-  if (position < 0 || !nextKey) return false;
-  const index = order.indexOf(key);
-  const next = order.indexOf(nextKey);
-  [order[index], order[next]] = [order[next], order[index]];
-  writeNavOrder(order);
-  applyNavOrder(order, doc);
-  const item = NAV_ITEMS.find((entry) => entry.key === key);
-  doc.getElementById(item?.[surface])?.focus?.();
-  return true;
+function visibleRows(el, skipKey) {
+  return Array.from(el.querySelectorAll(`:scope > ${ROW}`))
+    .filter((row) => row.dataset.navItem !== skipKey && row.style.display !== 'none' && !row.hidden);
 }
 
-function closeMenu(menu) { if (menu?.isConnected) menu.remove(); }
-
-function showContextMenu(event, doc) {
-  event.preventDefault();
-  closeMenu(doc.getElementById('nav-order-context-menu'));
-  const menu = doc.createElement('div');
-  menu.id = 'nav-order-context-menu';
-  menu.setAttribute('role', 'menu');
-  Object.assign(menu.style, { position: 'fixed', zIndex: '10000', left: `${event.clientX}px`, top: `${event.clientY}px`, padding: '4px', background: 'var(--panel, #222)', color: 'var(--fg, #fff)', border: '1px solid var(--border, #555)', borderRadius: '6px', boxShadow: '0 6px 20px rgba(0,0,0,.35)' });
-  const reset = doc.createElement('button');
-  reset.type = 'button'; reset.textContent = 'Reset navigation order'; reset.setAttribute('role', 'menuitem');
-  Object.assign(reset.style, { display: 'block', border: '0', background: 'transparent', color: 'inherit', padding: '6px 9px', cursor: 'pointer', font: 'inherit', whiteSpace: 'nowrap' });
-  reset.addEventListener('click', () => { resetNavOrder(doc); closeMenu(menu); });
-  menu.appendChild(reset); doc.body.appendChild(menu); reset.focus();
-  setTimeout(() => doc.addEventListener('pointerdown', () => closeMenu(menu), { once: true }), 0);
+/** Where a drag at `event` would drop. For a tool: a group, and the row it goes
+ *  before or after (none for an empty or folded group: it goes last). For a
+ *  group: the group it goes before or after. */
+function locateDrop(event) {
+  const el = event.target.closest?.('.nav-group[data-nav-group]');
+  if (!el || !_drag) return null;
+  const id = el.dataset.navGroup;
+  if (_drag.kind === 'group') {
+    if (id === _drag.id) return null;
+    const rect = el.querySelector(':scope > .nav-group-header').getBoundingClientRect();
+    return { kind: 'group', ref: id, after: event.clientY > rect.top + rect.height / 2, el };
+  }
+  const rows = el.classList.contains('collapsed') ? [] : visibleRows(el, _drag.key);
+  for (const row of rows) {
+    const rect = row.getBoundingClientRect();
+    if (event.clientY < rect.top + rect.height / 2) return { kind: 'item', group: id, ref: row.dataset.navItem, after: false, el, row };
+  }
+  const last = rows[rows.length - 1];
+  return { kind: 'item', group: id, ref: last ? last.dataset.navItem : null, after: !!last, el, row: last || null };
 }
 
-export function resetNavOrder(doc = document) {
-  const order = defaultNavOrder();
-  // Record the reset rather than just dropping the local copy: the account
-  // still holds the old arrangement, and an unrecorded reset would be undone
-  // by the next page load (or by any other browser signed into this account).
-  writeNavOrder(order);
-  applyNavOrder(order, doc);
-  return order;
+function showDrop(target, doc) {
+  doc.querySelectorAll('.nav-drop-before, .nav-drop-after, .nav-drop-into')
+    .forEach((node) => node.classList.remove('nav-drop-before', 'nav-drop-after', 'nav-drop-into'));
+  if (!target) return;
+  if (target.kind === 'group') target.el.classList.add(target.after ? 'nav-drop-after' : 'nav-drop-before');
+  else if (target.row) target.row.classList.add(target.after ? 'nav-drop-after' : 'nav-drop-before');
+  else target.el.classList.add('nav-drop-into');
 }
+
+function bindDrag(root, doc) {
+  root.addEventListener('dragstart', (event) => {
+    const row = event.target.closest?.(ROW);
+    const header = !row && event.target.closest?.('.nav-group-header');
+    if (row) _drag = { kind: 'item', key: row.dataset.navItem };
+    else if (header) _drag = { kind: 'group', id: groupId(header) };
+    else return;
+    event.dataTransfer?.setData('text/plain', _drag.key || _drag.id);
+    if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+    (row || header).classList.add('nav-dragging');
+  });
+  root.addEventListener('dragover', (event) => {
+    if (!_drag) return;
+    const target = locateDrop(event);
+    if (!target) { showDrop(null, doc); return; }
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+    showDrop(target, doc);
+  });
+  root.addEventListener('dragleave', (event) => {
+    if (!event.relatedTarget || !root.contains(event.relatedTarget)) showDrop(null, doc);
+  });
+  root.addEventListener('drop', (event) => {
+    if (!_drag) return;
+    const target = locateDrop(event);
+    const drag = _drag;
+    _drag = null;
+    clearDragUi(doc);
+    _suppressClickUntil = Date.now() + 300;
+    if (!target) return;
+    event.preventDefault();
+    if (drag.kind === 'group') updateLayout((layout) => moveGroupRelative(layout, drag.id, target.ref, target.after));
+    else updateLayout((layout) => moveItem(layout, drag.key, target.group, target.ref, target.after));
+  });
+  root.addEventListener('dragend', () => {
+    // Browsers can follow a drop with a click on the dragged button. Swallow
+    // it briefly so rearranging never opens a tool.
+    _suppressClickUntil = Date.now() + 300;
+    _drag = null;
+    clearDragUi(doc);
+  });
+}
+
+// ── Events ───────────────────────────────────────────────────────────────────
+
+function bindSidebar(root, doc) {
+  root.addEventListener('click', (event) => {
+    if (Date.now() < _suppressClickUntil && event.target.closest?.(`${ROW}, .nav-group-header`)) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      return;
+    }
+    const menuBtn = event.target.closest?.('.nav-group-menu-btn');
+    if (menuBtn) { event.stopPropagation(); openGroupMenu(groupId(menuBtn), menuBtn, doc); return; }
+    const toggle = event.target.closest?.('.nav-group-toggle');
+    if (toggle) { event.stopPropagation(); toggleGroup(groupId(toggle)); return; }
+    // A folded group opens when its body is clicked, as the sections always did.
+    const folded = event.target.closest?.('.nav-group.collapsed');
+    if (folded && !event.target.closest('button')) toggleGroup(folded.dataset.navGroup);
+  }, true);
+  root.addEventListener('keydown', (event) => {
+    if (!event.altKey || !['ArrowUp', 'ArrowDown'].includes(event.key)) return;
+    const row = event.target.closest?.(ROW);
+    if (!row) return;
+    event.preventDefault();
+    const key = row.dataset.navItem;
+    updateLayout((layout) => moveItemBy(layout, key, event.key === 'ArrowUp' ? -1 : 1, (other) => isRowShown(other, doc)));
+    sidebarNode(key, doc)?.focus?.();
+  });
+  bindDrag(root, doc);
+}
+
+export function resetNavLayout() { return resetLayout(); }
 
 export function initNavOrder(doc = document) {
   if (_initialized && doc === document) return;
   _initialized = true;
-  const order = readNavOrder();
-  applyNavOrder(order, doc);
-  syncNavOrderWithAccount(doc).catch(() => {});
-  const roots = [doc.getElementById('icon-rail'), ...GROUP_IDS.map((id) => doc.getElementById(id))].filter(Boolean);
-  for (const root of roots) {
-    root.addEventListener('dragstart', (event) => {
-      const node = event.target.closest?.('.icon-rail-btn, .list-item');
-      const key = keyFromNode(node);
-      if (!key) return;
-      _dragKey = key; event.dataTransfer?.setData('text/plain', key);
-      if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
-      node.classList.add('nav-order-dragging'); root.classList.add('nav-order-active');
-    });
-    root.addEventListener('dragover', (event) => {
-      const target = event.target.closest?.('.icon-rail-btn, .list-item');
-      if (_dragKey && keyFromNode(target) && inContainer(root, _dragKey) && inContainer(root, keyFromNode(target))) {
-        event.preventDefault();
-        root.querySelectorAll('.nav-order-target').forEach((node) => node.classList.remove('nav-order-target'));
-        target.classList.add('nav-order-target');
-        if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
-      }
-    });
-    root.addEventListener('drop', (event) => {
-      const targetKey = keyFromNode(event.target.closest?.('.icon-rail-btn, .list-item'));
-      if (!_dragKey || !targetKey || targetKey === _dragKey) return;
-      event.preventDefault();
-      // A drop only reorders inside one container: dragging Tasks onto a
-      // More item leaves both where they are.
-      if (!inContainer(root, _dragKey) || !inContainer(root, targetKey)) { _dragKey = null; clearDragUi(doc); return; }
-      const current = readNavOrder();
-      const next = current.filter((key) => key !== _dragKey);
-      next.splice(Math.max(0, next.indexOf(targetKey) + (current.indexOf(_dragKey) < current.indexOf(targetKey) ? 1 : 0)), 0, _dragKey);
-      writeNavOrder(next); applyNavOrder(next, doc); _dragKey = null; clearDragUi(doc);
-      // Browsers may synthesize a click after dropping a draggable button.
-      // Briefly suppress it so reorganizing navigation never opens a tool.
-      _suppressClickUntil = Date.now() + 300;
-    });
-    root.addEventListener('dragend', () => {
-      _suppressClickUntil = Date.now() + 300;
-      _dragKey = null; clearDragUi(doc);
-    });
-    root.addEventListener('click', (event) => {
-      if (Date.now() >= _suppressClickUntil) return;
-      if (!keyFromNode(event.target.closest?.('.icon-rail-btn, .list-item'))) return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
-    }, true);
-    root.addEventListener('keydown', (event) => {
-      if (!event.altKey || !['ArrowUp', 'ArrowDown'].includes(event.key)) return;
-      const key = keyFromNode(event.target.closest?.('.icon-rail-btn, .list-item'));
-      if (!key) return;
-      event.preventDefault(); move(key, event.key === 'ArrowUp' ? -1 : 1, doc, root);
-    });
-    root.addEventListener('contextmenu', (event) => {
-      if (keyFromNode(event.target.closest?.('.icon-rail-btn, .list-item'))) showContextMenu(event, doc);
-    });
-    for (const item of NAV_ITEMS) {
-      for (const id of [item.rail, item.sidebar]) {
-        const node = doc.getElementById(id);
-        if (node) {
-          node.draggable = true;
-          node.dataset.navReorderable = 'true';
-          node.setAttribute('aria-keyshortcuts', 'Alt+ArrowUp Alt+ArrowDown');
-          const hint = 'Drag to reorder · Alt+↑/↓ · right-click to reset';
-          if (!node.title.includes('Drag to reorder')) node.title = `${node.title || item.key} · ${hint}`;
-        }
-      }
-    }
-  }
+  applyNavLayout(getLayout(), doc);
+  subscribe((layout) => applyNavLayout(layout, doc));
+  syncLayoutWithAccount().catch(() => {});
+  const root = doc.querySelector('.sidebar-inner') || doc.getElementById('sidebar');
+  if (root) bindSidebar(root, doc);
+  doc.getElementById('edit-navigation-btn')?.addEventListener('click', () => openNavEditor({ doc }));
+  initNavRail(doc);
 }
 
 if (typeof document !== 'undefined') {
@@ -316,4 +318,5 @@ if (typeof document !== 'undefined') {
   else initNavOrder();
 }
 
-export default { NAV_GROUPS, initNavOrder, readNavOrder, writeNavOrder, applyNavOrder, resetNavOrder, defaultNavOrder, syncNavOrderWithAccount, NAV_ORDER_KEY, NAV_ORDER_PREF, NAV_ITEMS };
+export { defaultLayout, getLayout, readLayout, writeLayout, migrateFlatOrder, syncLayoutWithAccount, openNavEditor };
+export default { initNavOrder, applyNavLayout, getLayout, defaultLayout, resetNavLayout, NAV_GROUPS, NAV_ITEMS };

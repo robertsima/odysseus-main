@@ -1,25 +1,51 @@
-/* Sidebar navigation groups: Work, Agents and More (and the Theme button in
-   the footer). Loaded after style.css and the Agamemnon sheets so one set of
-   rules covers both page styles. */
+/* Navigation groups: the sidebar's labeled groups, the collapsed rail's group
+   icons with their flyout, the group menu and the Edit navigation dialog.
+   Loaded after style.css and the Agamemnon sheets so one set of rules covers
+   both page styles (html[data-style="agamemnon"] and "classic"). Colors come
+   from the theme tokens only. */
 
 .nav-group { margin-top: 10px; }
 .nav-group:first-of-type { margin-top: 1px; }
 
 /* A group with every item hidden in Customize UI (or by a privilege) hides
-   its header too. The inline display:none those hides leave is what we test. */
-.nav-group:not(:has(> .list-item:not([style*="display:none"]):not([style*="display: none"]))) { display: none !important; }
+   its header too. The inline display:none those hides leave is what we test.
+   A group the layout leaves empty stays drawn: it is a place to drop a tool. */
+.nav-group:not([data-empty="true"]):not(:has(> .list-item:not([style*="display:none"]):not([style*="display: none"]))) { display: none !important; }
 
-/* Quiet group label: small, muted, upper case. */
+/* ── Group header ── */
 .nav-group > .section-header-flex {
-  height: 24px; padding: 4px 8px; margin: 0;
+  height: 26px; padding: 0 2px 0 0; margin: 0; display: flex; align-items: center; gap: 2px;
 }
+.nav-group-toggle {
+  flex: 1; min-width: 0; height: 100%; display: flex; align-items: center; gap: 6px;
+  padding: 0 8px; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer;
+  border-radius: 6px;
+}
+.nav-group-toggle:focus-visible,
+.nav-group-menu-btn:focus-visible { outline: 2px solid var(--red); outline-offset: -2px; }
 .nav-group .nav-group-title,
 html[data-style="agamemnon"] .sidebar .nav-group .nav-group-title {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: 10px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase;
   color: var(--fg); opacity: 0.55;
 }
-.nav-group > .section-header-flex:hover .nav-group-title { opacity: 0.9; }
+.nav-group > .section-header-flex:hover .nav-group-title,
+.nav-group-toggle:focus-visible .nav-group-title { opacity: 0.9; }
 html[data-style="agamemnon"] .sidebar .nav-group .nav-group-title { color: var(--ag-muted, var(--fg)); }
+.nav-group-toggle .section-collapse-chevron { flex: none; opacity: 0.4; }
+.nav-group-toggle:hover .section-collapse-chevron { opacity: 0.8; }
+
+.nav-group-menu-btn {
+  flex: none; width: 26px; height: 22px; display: inline-flex; align-items: center; justify-content: center;
+  padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--fg); opacity: 0.4; cursor: pointer;
+}
+.nav-group-menu-btn:hover,
+.nav-group-menu-btn[aria-expanded="true"] { opacity: 0.9; background: color-mix(in srgb, var(--fg) 8%, transparent); }
+.nav-group.collapsed .nav-group-menu-btn { display: inline-flex; }
+@media (max-width: 768px) {
+  .nav-group > .section-header-flex { height: 34px; }
+  .nav-group-menu-btn { width: 36px; height: 30px; opacity: 0.6; }
+}
 
 /* One row height and one icon size for every item. */
 .nav-group > .list-item {
@@ -40,18 +66,32 @@ html[data-style="agamemnon"] .sidebar .nav-group > .list-item .grow { font-size:
 /* Agamemnon separated the old Tools block with a rule; keep one rule above the
    first group and let spacing separate the rest. */
 html[data-style="agamemnon"] .sidebar .nav-group { margin-top: 6px; padding-top: 0; border-top: 0; }
+html[data-style="agamemnon"] .sidebar .nav-group:first-of-type,
 html[data-style="agamemnon"] .sidebar #work-section { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--ag-border); }
 html[data-style="agamemnon"] .sidebar .nav-group > .section-header-flex { height: 26px; }
+@media (max-width: 768px) {
+  html[data-style="agamemnon"] .sidebar .nav-group > .section-header-flex { height: 34px; }
+}
 
-/* The Command dropdown toggle is gone from the sidebar. The menu stays for
-   the icon rail's Command button and takes no room while closed. */
-.command-nav { margin: 0; }
-html[data-style="agamemnon"] .command-nav { margin: 0; }
+/* A group the layout leaves empty says so, and is a drop target. */
+.nav-group-empty {
+  display: none; margin: 2px 8px 4px; padding: 8px 10px; border: 1px dashed var(--border); border-radius: 6px;
+  font-size: 12px; color: var(--fg); opacity: 0.6;
+}
+.nav-group[data-empty="true"] > .nav-group-empty { display: block; }
+
+/* ── Drag and drop: a line where the tool will land ── */
+.nav-dragging { opacity: 0.4; }
+.nav-group > .list-item.nav-drop-before { box-shadow: inset 0 2px 0 var(--red); }
+.nav-group > .list-item.nav-drop-after { box-shadow: inset 0 -2px 0 var(--red); }
+.nav-group.nav-drop-before { box-shadow: 0 -2px 0 var(--red); }
+.nav-group.nav-drop-after { box-shadow: 0 2px 0 var(--red); }
+.nav-group.nav-drop-into { outline: 2px dashed var(--red); outline-offset: -2px; border-radius: 6px; }
 
 /* Activity dot on a group header. It only appears while the group is folded
    and one of its items has a badge, a running job or a minimized window. */
 .nav-group-dot {
-  display: none; flex: none; width: 6px; height: 6px; margin-left: -2px; margin-right: 2px; border-radius: 50%;
+  display: none; flex: none; width: 6px; height: 6px; border-radius: 50%;
   background: var(--accent, var(--red));
   animation: rail-min-pulse 2s ease-in-out infinite;
 }
@@ -66,3 +106,139 @@ html[data-style="agamemnon"] .command-nav { margin: 0; }
 /* Theme button in the footer, beside Settings. */
 .user-bar-actions { align-items: center; }
 .user-bar-btn.rail-minimized::after { top: 4px; right: 4px; transform: none; }
+
+/* ── Collapsed rail: fixed actions, then one icon per group ── */
+.rail-nav-groups { display: flex; flex-direction: column; align-items: center; gap: 4px; width: 100%; }
+.rail-nav-groups:empty { display: none; }
+/* The rail's own per-tool buttons stay in the page for their listeners and
+   indicators but are not drawn; the flyout opens the tool from them. */
+.icon-rail .nav-rail-tool { display: none !important; }
+.nav-rail-group .nav-rail-icon { display: inline-flex; align-items: center; justify-content: center; }
+.nav-rail-group .nav-rail-icon svg { width: 16px; height: 16px; }
+.nav-mono { font-size: 14px; font-weight: 700; line-height: 1; font-family: inherit; }
+.nav-rail-group[aria-expanded="true"] .rail-hover-label { display: none; }
+.nav-rail-group[aria-expanded="true"] { opacity: 1; background: color-mix(in srgb, var(--accent, var(--red)) 15%, transparent); }
+.nav-rail-group:focus-visible,
+.nav-flyout-item:focus-visible,
+.nav-flyout-close:focus-visible { outline: 2px solid var(--red); outline-offset: -2px; }
+.nav-rail-dot {
+  position: absolute; top: 5px; right: 5px; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--accent, var(--red)); box-shadow: 0 0 0 2px var(--panel); pointer-events: none;
+  animation: rail-min-pulse 2s ease-in-out infinite;
+}
+.nav-rail-badge {
+  position: absolute; top: 1px; right: 1px; min-width: 14px; height: 14px; padding: 0 3px; box-sizing: border-box;
+  border-radius: 999px; font-size: 9px; line-height: 14px; text-align: center; font-variant-numeric: tabular-nums;
+  background: var(--accent, var(--red)); color: var(--bg); pointer-events: none; box-shadow: 0 0 0 1px var(--panel);
+}
+
+/* ── Flyout ── */
+.nav-flyout[hidden] { display: none; }
+.nav-flyout {
+  position: fixed; z-index: 10050; display: flex; flex-direction: column; box-sizing: border-box;
+  min-width: 208px; max-width: 288px;
+  background: var(--panel); color: var(--fg); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35); overflow: hidden;
+}
+html[data-style="agamemnon"] .nav-flyout { border-radius: 0; border-color: var(--ag-border-strong, var(--border)); }
+.nav-flyout-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px; flex: none;
+  padding: 8px 10px 6px; border-bottom: 1px solid var(--border);
+}
+.nav-flyout-title { font-size: 10px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; opacity: 0.65; }
+.nav-flyout-close {
+  display: none; width: 32px; height: 32px; align-items: center; justify-content: center; padding: 0;
+  border: 0; border-radius: 6px; background: transparent; color: inherit; font-size: 20px; line-height: 1; cursor: pointer;
+}
+.nav-flyout-list { display: flex; flex-direction: column; gap: 1px; padding: 4px; overflow-y: auto; min-height: 0; }
+.nav-flyout-item {
+  display: flex; align-items: center; gap: 10px; min-height: 36px; padding: 6px 10px; box-sizing: border-box;
+  border: 0; border-radius: 6px; background: transparent; color: inherit; font: inherit; font-size: 13px; text-align: left; cursor: pointer;
+}
+html[data-style="agamemnon"] .nav-flyout-item { border-radius: 0; font-size: 14px; min-height: 38px; }
+.nav-flyout-item:hover { background: color-mix(in srgb, var(--fg) 8%, transparent); }
+.nav-flyout-item svg { flex: none; width: 16px; height: 16px; opacity: 0.7; }
+.nav-flyout-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nav-flyout-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--accent, var(--red)); }
+.nav-flyout-dot[hidden] { display: none; }
+
+/* On a phone the flyout is a sheet along the bottom edge. */
+.nav-flyout.nav-flyout-sheet {
+  left: 8px; right: 8px; bottom: calc(8px + env(safe-area-inset-bottom, 0px)); top: auto; max-width: none;
+  max-height: min(70vh, calc(100vh - 16px)); border-radius: 12px;
+}
+html[data-style="agamemnon"] .nav-flyout.nav-flyout-sheet { border-radius: 0; }
+.nav-flyout-sheet .nav-flyout-close { display: inline-flex; }
+.nav-flyout-sheet .nav-flyout-item,
+html[data-style="agamemnon"] .nav-flyout-sheet .nav-flyout-item { min-height: 48px; font-size: 15px; }
+
+/* ── Group menu ── */
+.nav-popup-menu {
+  position: fixed; z-index: 10050; min-width: 180px; padding: 4px; display: flex; flex-direction: column;
+  background: var(--panel); color: var(--fg); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+}
+html[data-style="agamemnon"] .nav-popup-menu { border-radius: 0; }
+.nav-popup-item {
+  min-height: 34px; padding: 6px 10px; border: 0; border-radius: 6px; background: transparent; color: inherit;
+  font: inherit; font-size: 13px; text-align: left; cursor: pointer; white-space: nowrap;
+}
+.nav-popup-item:hover:not(:disabled),
+.nav-popup-item:focus-visible { background: color-mix(in srgb, var(--fg) 8%, transparent); outline: none; }
+.nav-popup-item:focus-visible { box-shadow: inset 0 0 0 2px var(--red); }
+.nav-popup-item:disabled { opacity: 0.4; cursor: default; }
+.nav-popup-item.danger { color: var(--red); }
+@media (max-width: 768px) { .nav-popup-item { min-height: 44px; font-size: 15px; } }
+
+/* ── Edit navigation ── */
+.nav-editor-backdrop {
+  position: fixed; inset: 0; z-index: 9000; display: flex; align-items: center; justify-content: center;
+  padding: 16px; box-sizing: border-box; background: rgba(0, 0, 0, 0.5);
+}
+.nav-editor {
+  display: flex; flex-direction: column; width: min(560px, 100%); max-height: min(720px, 100%); box-sizing: border-box;
+  background: var(--panel); color: var(--fg); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
+}
+html[data-style="agamemnon"] .nav-editor { border-radius: 0; border-width: 2px; border-color: var(--ag-border, var(--border)); }
+.nav-editor-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px 4px; }
+.nav-editor-head h3 { margin: 0; font-size: 16px; }
+.nav-editor-help { margin: 0; padding: 0 16px 8px; font-size: 12.5px; line-height: 1.45; opacity: 0.7; }
+.nav-editor-body { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 16px 8px; }
+.nav-editor-group { margin: 0 0 14px; padding-top: 8px; border-top: 1px solid var(--border); }
+.nav-editor-group:first-child { border-top: 0; padding-top: 0; }
+.nav-editor-group-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 6px; }
+.nav-editor-name { flex: 1 1 140px; min-width: 0; }
+.nav-editor input, .nav-editor select, .nav-editor button {
+  box-sizing: border-box; min-height: 32px; padding: 4px 10px; font: inherit; font-size: 13px;
+  color: var(--fg); background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+}
+.nav-editor button { cursor: pointer; }
+.nav-editor button:disabled { opacity: 0.4; cursor: default; }
+.nav-editor button:hover:not(:disabled) { background: color-mix(in srgb, var(--fg) 8%, var(--bg)); }
+.nav-editor button.primary { background: var(--red); border-color: var(--red); color: var(--bg); }
+.nav-editor button.danger { color: var(--red); }
+.nav-editor .nav-editor-close { width: 32px; padding: 0; border: 0; background: transparent; font-size: 22px; line-height: 1; }
+.nav-editor :is(input, select, button):focus-visible { outline: 2px solid var(--red); outline-offset: 1px; }
+html[data-style="agamemnon"] .nav-editor :is(input, select, button) { border-radius: 0; }
+.nav-editor-delete {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; padding: 8px 10px;
+  border: 1px solid var(--red); border-radius: 6px; font-size: 13px;
+}
+.nav-editor-items { list-style: none; margin: 0; padding: 0; }
+.nav-editor-item { display: flex; align-items: center; gap: 6px; padding: 3px 0 3px 12px; }
+.nav-editor-item-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; }
+.nav-editor-none { padding: 4px 12px; font-size: 12.5px; opacity: 0.6; }
+.nav-editor-status { min-height: 18px; padding: 0 16px; font-size: 12px; opacity: 0.75; }
+.nav-editor-foot { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 16px 14px; border-top: 1px solid var(--border); }
+.nav-editor-foot .primary { margin-left: auto; }
+@media (max-width: 768px) {
+  .nav-editor-backdrop { padding: 0; align-items: flex-end; }
+  .nav-editor { width: 100%; max-height: 92vh; border-radius: 12px 12px 0 0; }
+  .nav-editor input, .nav-editor select, .nav-editor button { min-height: 44px; }
+  .nav-editor .nav-editor-close { width: 44px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nav-group-dot, .nav-rail-dot, .nav-group-toggle .section-collapse-chevron { animation: none; transition: none; }
+}
