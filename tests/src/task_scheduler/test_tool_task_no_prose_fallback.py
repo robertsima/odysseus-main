@@ -55,9 +55,21 @@ async def test_tool_task_is_not_completed_by_the_prose_fallback(monkeypatch):
         await sched._execute_llm_task(task, db=None)
     text = str(err.value)
     assert "does not support tools" in text
-    assert "no tools" in text
-    assert "Done, I updated everything." in text  # prose kept, labelled unverified
-    assert "Unverified" in text
+    assert "needs tools" in text
+    assert calls == []  # no prose call whose answer could pass for the result
+
+
+async def test_tool_task_keeps_the_transient_retry_on_a_network_blip(monkeypatch):
+    import httpx
+
+    sched, calls = _setup(monkeypatch)
+
+    async def _blip(*a, **k):
+        raise httpx.ConnectError("connection refused")
+
+    sched._run_agent_loop = _blip
+    with pytest.raises(httpx.ConnectError):
+        await sched._execute_llm_task(_task("Reprioritize my inbox with mcp__todoist__todoist"), db=None)
 
 
 async def test_plain_text_task_still_completes_on_the_fallback(monkeypatch):

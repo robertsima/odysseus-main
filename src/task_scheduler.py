@@ -3091,25 +3091,15 @@ class TaskScheduler:
                     # recording it as a completed run is how a task that
                     # needed its tools reported success without them.
                     logger.warning(f"Agent loop failed for task '{task.name}', which needs tools; not completing on a no-tools fallback: {e}")
-                    prose = ""
-                    try:
-                        prose = (await task_llm_call_async(
-                            [{"role": "system", "content": NO_TOOLS_TASK_SYSTEM_PROMPT},
-                             *([_dt_msg] if _dt_msg else []),
-                             {"role": "user", "content": task.prompt}],
-                            fallback_url=endpoint_url, fallback_model=model,
-                            fallback_headers=fallback_headers,
-                            owner=task.owner, timeout=120,
-                        ) or "").strip()
-                    except Exception:
-                        pass
-                    msg = (
-                        f"Agent loop failed ({type(e).__name__}: {e}) and the "
-                        "fallback call had no tools, so the task's tool work was not done."
-                    )
-                    if prose:
-                        msg += f" Unverified text-only answer: {prose[:800]}"
-                    raise RuntimeError(msg) from e
+                    from src.llm_core import is_transient_upstream_error
+                    if is_transient_upstream_error(e):
+                        # Unchanged, so _transient_retry_delay still schedules
+                        # the short retry a network blip deserves.
+                        raise
+                    raise RuntimeError(
+                        f"Agent loop failed ({type(e).__name__}: {e}), and this task needs "
+                        "tools, so a text-only fallback answer would not show the work was done."
+                    ) from e
                 logger.warning(f"Agent loop failed for task '{task.name}', falling back to simple call: {e}")
                 # No tools on this path, so the system text must not promise any.
                 _fallback_system = (
