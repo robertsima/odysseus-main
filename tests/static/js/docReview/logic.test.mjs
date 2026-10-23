@@ -108,6 +108,15 @@ test('findPlaceholders finds the four kinds with line and section', () => {
   ]);
 });
 
+test('bracketed capitals count as placeholders, links and checkboxes do not', () => {
+  const md = 'Between [CLIENT] and [PROCESSOR NAME] for [TERM].\n'
+    + 'See [the terms] and [ACME](https://acme.test), [REF][1].\n'
+    + '- [ ] open\n- [x] done\n> [!NOTE]\n[A] [OK]';
+  assert.deepEqual(findPlaceholders(md).map((p) => [p.text, p.line]), [
+    ['[CLIENT]', 1], ['[PROCESSOR NAME]', 1], ['[TERM]', 1], ['[OK]', 6],
+  ]);
+});
+
 test('placeholders inside fenced code are ignored, and short underscore runs too', () => {
   const md = 'a ___ b\n\n```js\nconst x = "[[y]]"; // TODO\n```\n\n~~~\nFIXME\n~~~\nreal FIXME';
   assert.deepEqual(findPlaceholders(md).map((p) => [p.text, p.line]), [['FIXME', 10]]);

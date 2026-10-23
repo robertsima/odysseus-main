@@ -246,8 +246,8 @@ card and in the strip when that agent answers.
 
 The document editor's export menu starts with **Review changes**: changed
 sections since a chosen version (default: the version the chat started from, else
-the previous one), placeholders remaining (`[[…]]`, `{{…}}`, `TODO`, `TBD`,
-`____`), unresolved suggestions, and **Preview PDF**. Domain checks (totals,
+the previous one), placeholders remaining (`[[…]]`, `{{…}}`, `[CLIENT NAME]`,
+`TODO`, `TBD`, `____`), unresolved suggestions, and **Preview PDF**. Domain checks (totals,
 commercial impact) are not hard-coded; an agent may add them in its reply.
 
 ## Rules

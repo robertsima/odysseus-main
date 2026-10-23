@@ -8,6 +8,10 @@
 const FENCE = /^\s{0,3}(```|~~~)/;
 const HEADING = /^ {0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$/;
 const PLACEHOLDER = /\[\[[^\]\n]*\]\]|\{\{[^}\n]*\}\}|\b(?:TODO|TBD|FIXME)\b|_{4,}/gi;
+// Contract-style blanks: [CLIENT], [PROCESSOR NAME]. Case-sensitive, so link
+// text like [the terms] is not one; links, reference links, [!NOTE] callouts
+// and [[…]] (matched above) are skipped by the lookarounds.
+const CAPS_BLANK = /(?<![[!\w])\[[A-Z][A-Z0-9 _'.&/-]*[A-Z0-9]\](?![([:\]])/g;
 const MAX_CELLS = 4_000_000;
 
 function lines(md) {
@@ -149,9 +153,14 @@ export function findPlaceholders(md) {
     if (fence) return;
     const h = HEADING.exec(raw);
     if (h) section = h[2].trim();
-    PLACEHOLDER.lastIndex = 0;
-    let m;
-    while ((m = PLACEHOLDER.exec(raw))) found.push({ text: m[0], line: i + 1, section });
+    const hits = [];
+    for (const re of [PLACEHOLDER, CAPS_BLANK]) {
+      re.lastIndex = 0;
+      let m;
+      while ((m = re.exec(raw))) hits.push({ at: m.index, text: m[0] });
+    }
+    hits.sort((a, b) => a.at - b.at);
+    for (const h of hits) found.push({ text: h.text, line: i + 1, section });
   });
   return found;
 }
