@@ -1073,8 +1073,10 @@ def setup_chat_routes(
         external_untrusted_context_seen = False
         tool_approval_continuation = False
         # Workspace: confine the agent's file/shell tools to this folder.
-        workspace, workspace_rejected = _resolve_request_workspace(
-            request, form_data.get("workspace")
+        # Vetting realpaths the folder and the data roots; the data folder can
+        # be a slow NAS, so it runs off the event loop.
+        workspace, workspace_rejected = await asyncio.to_thread(
+            _resolve_request_workspace, request, form_data.get("workspace")
         )
         # Plan mode is a modifier on agent mode — it only makes sense with tools.
         if plan_mode:
@@ -1362,7 +1364,8 @@ def setup_chat_routes(
                     _workspace_agent_intent = False
                     logger.info("chat→agent auto-escalation: contextual browser/form follow-up")
             if not workspace and isinstance(message, str):
-                _auto_workspace, _ = _resolve_workspace_from_message_path(request, message)
+                _auto_workspace, _ = await asyncio.to_thread(
+                    _resolve_workspace_from_message_path, request, message)
                 if _auto_workspace:
                     workspace = _auto_workspace
                     chat_mode = "agent"
@@ -1710,7 +1713,8 @@ def setup_chat_routes(
         # saved folder, re-vetted, for the same callers that may bind one. A
         # resumed approval keeps the folder its sealed action recorded.
         if not workspace and not workspace_rejected and not pending_tool_approval and (_chat_settings or {}).get("workspace"):
-            workspace, _ = _resolve_request_workspace(request, _chat_settings["workspace"])
+            workspace, _ = await asyncio.to_thread(
+                _resolve_request_workspace, request, _chat_settings["workspace"])
         _approval_mode = _session_settings.effective_approval_mode(_chat_settings)
 
         # Light auto-escalation: the user is in chat mode and just expressed a

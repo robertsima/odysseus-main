@@ -674,13 +674,16 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
                     target_settings = get_session_settings(target_sid) or {}
                 except Exception:
                     target_settings = {}
-        preflight = worker_preflight.run_preflight(
-            message,
-            explicit_workspace=extras.get("workspace") or None,
-            inherited_workspace=_inherited_workspace(target_settings.get("workspace"), _caller_workspace(session_id)),
-            unavailable_tools=worker_preflight.worker_unavailable_tools(
-                owner, profile, target_settings.get("disabled_tools") or ()),
-            requires=extras.get("requires") or (),
+        # Off the event loop: workspace vetting realpaths the data roots.
+        preflight = await asyncio.to_thread(
+            lambda: worker_preflight.run_preflight(
+                message,
+                explicit_workspace=extras.get("workspace") or None,
+                inherited_workspace=_inherited_workspace(target_settings.get("workspace"), _caller_workspace(session_id)),
+                unavailable_tools=worker_preflight.worker_unavailable_tools(
+                    owner, profile, target_settings.get("disabled_tools") or ()),
+                requires=extras.get("requires") or (),
+            )
         )
         if not preflight.ok:
             worker_preflight.record_blocked(session_id, owner, message, preflight)

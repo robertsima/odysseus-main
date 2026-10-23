@@ -1018,13 +1018,17 @@ async def _launch_worker(*, owner: Optional[str], task: str, profile_name: Optio
         from src import worker_preflight
         from src.agent_tools.session_tools import _caller_workspace
 
-        checked = worker_preflight.run_preflight(
-            task,
-            explicit_workspace=workspace,
-            inherited_workspace=_caller_workspace(parent_session),
-            unavailable_tools=worker_preflight.worker_unavailable_tools(owner, profile),
-            requires=requires or (),
-            loadout_name=str((profile or {}).get("name") or ""),
+        # Preflight vets workspaces (realpath on the data roots, which can sit
+        # on a slow NAS); on the event loop that froze every chat stream.
+        checked = await asyncio.to_thread(
+            lambda: worker_preflight.run_preflight(
+                task,
+                explicit_workspace=workspace,
+                inherited_workspace=_caller_workspace(parent_session),
+                unavailable_tools=worker_preflight.worker_unavailable_tools(owner, profile),
+                requires=requires or (),
+                loadout_name=str((profile or {}).get("name") or ""),
+            )
         )
         if not checked.ok:
             worker_preflight.record_blocked(parent_session, owner, task, checked)
