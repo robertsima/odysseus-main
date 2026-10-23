@@ -95,8 +95,9 @@ document.addEventListener('DOMContentLoaded', markComposerUserEdited, { once: tr
    places caused two toggles per click, which read as "clicks aren't doing
    anything" (even-count parity). Keep only the initial-state-apply here. */
 {
-  const KEY = Storage.KEYS.SIDEBAR_COLLAPSED;
-  const saved = Storage.getJSON(KEY, {});
+  // Same key section-management.js writes on every toggle. Reading any other
+  // key made a reload forget that More (or Chats) had been opened.
+  const saved = Storage.getJSON('section-collapsed', {}) || {};
   const _defaultCollapsed = { 'sessions-section': true, 'more-section': true };
   document.querySelectorAll('.sidebar .section').forEach((section) => {
     const id = section.id;
