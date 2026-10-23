@@ -1,14 +1,17 @@
 /* agentsDashboard.js — the Agents page: every chat and worker the user runs.
  *
  * A full-page view (rail button, sidebar item, Ctrl+Shift+A, /agents) with:
- *   Fleet     — every chat with agent activity in three triage buckets:
- *               Needs you → Active → Recent, filterable from the header.
+ *   Fleet     — the user's agent conversations (kept until archived, in an
+ *               order the user sets) plus other chats with agent activity,
+ *               filterable by Needs you / Active / Idle / Recent.
  *   Detail    — the selected chat: its live event stream, child runs (sub-
  *               agents, Claude Code, background jobs) with Stop, pending
  *               approvals with Approve/Deny, a Steer box that lands mid-turn
  *               with the log of what became of each steering message, and a
  *               Reply box for an idle chat.
- *   Launch    — start a worker profile in a fresh chat from here.
+ *   New agent conversation — talk to a saved agent in a chat of its own.
+ *   Assign a task          — the agent works separately; its result returns
+ *                            to the chat named in the form.
  *
  * Data comes from /api/agents/* (owner-scoped, routes/agents_routes.py); the
  * live feed is one SSE stream of the user's activity events.
@@ -16,6 +19,7 @@
 
 import uiModule from './ui.js';
 import { mountLoadoutsEditor } from './agentLoadouts.js';
+import { reconcile, writePref } from './serverPrefs.js';
 import agentActions from './agentActions.js';
 import Modals from './modalManager.js';
 import { makeWindowDraggable } from './windowDrag.js';
@@ -26,6 +30,13 @@ import { resolveAgamemnonModelIdentity } from './agamemnonIdentity.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+// How a conversation's last run ended, shown next to its availability (Idle)
+// instead of being folded into it.
+const OUTCOME = {
+  done: 'Done', failed: 'Failed', stopped: 'Stopped', blocked: 'Blocked', partial: 'Partly done',
+  needs_input: 'Needs your input', waiting_approval: 'Waiting for approval',
+};
+export const ORDER_KEY = 'phalanx-order';
 const STATUS = {
   waiting_approval: ['Needs approval', 'warn'],
   // A worker that paused on a card whose approval has since lapsed (expired or
@@ -104,6 +115,10 @@ const state = {
   appearanceSaving: false,
   // Parent session ids whose worker chats are unfolded under them in Recent.
   expandedParents: new Set(),
+  // The user's order of conversations (session ids), synced per account.
+  order: [], orderLoaded: false,
+  // The "New agent conversation" picker.
+  newConvOpen: false, newConvBusy: false,
   // Saved personas the loadout editor can copy from (loadPersonaSources).
   personaSources: null,
   // The user closed the room during the current turn; that turn's runs
@@ -196,8 +211,84 @@ function appearancePickerHtml(agent) {
     <span id="ag-appearance-status" role="status" aria-live="polite"></span>
   </fieldset>`;
 }
+// ── conversation order ────────────────────────────────────────────────────
+// The order is the user's own, per account: localStorage for first paint, the
+// server copy (serverPrefs, key `phalanx-order`) as the source of truth.
+const ORDER_LOCAL = 'odysseus-phalanx-order-v1';
+const cleanOrder = (v) => (Array.isArray(v) ? [...new Set(v.filter((x) => typeof x === 'string' && x))] : []);
+function readLocalOrder() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(ORDER_LOCAL) || 'null');
+    if (raw && Array.isArray(raw.value)) return { value: cleanOrder(raw.value), updated_at: Number(raw.updated_at) || 0 };
+  } catch (_) {}
+  return null;
+}
+function saveOrder(order, { sync = true, at } = {}) {
+  const value = cleanOrder(order);
+  const stamped = Number(at) || Date.now();
+  state.order = value;
+  try { localStorage.setItem(ORDER_LOCAL, JSON.stringify({ value, updated_at: stamped })); } catch (_) {}
+  if (sync) writePref(ORDER_KEY, value, stamped);
+}
+async function syncOrder() {
+  if (state.orderLoaded) return;
+  state.orderLoaded = true;
+  const local = readLocalOrder();
+  state.order = local ? local.value : [];
+  try {
+    const { source, entry } = await reconcile(ORDER_KEY, local);
+    if (source === 'remote' && entry && Array.isArray(entry.value)) {
+      saveOrder(entry.value, { sync: false, at: entry.updated_at || Date.now() });
+      if (state.open) renderFleetOnly();
+    }
+  } catch (_) { /* the local order still applies */ }
+}
+/** Swap a conversation with its neighbour in the list as shown. The saved
+ *  order holds only conversations that exist now, so ids of deleted chats drop. */
+function moveConversation(sid, dir) {
+  const full = orderConversations(state.rows.filter((r) => r.conversation)).map((r) => r.session_id);
+  const shownIds = [...document.querySelectorAll('#agents-dashboard .ag-move[data-ag="move-up"]')].map((b) => b.dataset.sid);
+  const i = shownIds.indexOf(sid);
+  const j = i + dir;
+  if (i < 0 || j < 0 || j >= shownIds.length) return;
+  const a = full.indexOf(sid);
+  const b = full.indexOf(shownIds[j]);
+  if (a < 0 || b < 0) return;
+  [full[a], full[b]] = [full[b], full[a]];
+  saveOrder(full);
+  renderFleetOnly();
+}
+
+// ── new agent conversation ────────────────────────────────────────────────
+function newConversationHtml() {
+  const agents = state.profiles.map((p) => `<li><button type="button" class="ag-newconv-pick" data-ag="new-conversation-pick" data-profile="${esc(p.name)}"${state.newConvBusy ? ' disabled' : ''}><b>${esc(p.name)}</b>${p.description ? `<small>${esc(String(p.description).slice(0, 90))}</small>` : ''}</button></li>`).join('');
+  return `<div class="ag-newconv wb-card" id="ag-newconv" role="group" aria-label="New agent conversation">
+    <div class="ag-newconv-head"><strong>New agent conversation</strong><button type="button" class="wb-icon-btn" data-ag="new-conversation-close" aria-label="Close">✕</button></div>
+    <p class="wb-hint">Pick an agent. This opens a chat of its own that stays in this list until you archive it. It replies when you write to it; it does not work in the background.</p>
+    ${agents ? `<ul class="ag-newconv-list">${agents}</ul>` : '<p class="wb-hint">No agents yet. Define them under Settings › Agents.</p>'}
+  </div>`;
+}
+async function startConversation(name) {
+  if (state.newConvBusy) return;
+  state.newConvBusy = true;
+  try {
+    // Stay in Phalanx: the new chat is selected here; Open chat goes to it.
+    const sid = await agentActions.talkToAgent(name, { open: async () => {} });
+    if (!sid) return;
+    state.selected = sid; state.bucket = 'all'; state.filter = ''; state.fleetPage = 0;
+    state.detailTab = 'overview'; state.events.delete(sid);
+    await refresh();
+    state.newConvOpen = false;
+    render();
+    $('ag-detail')?.querySelector('.ag-detail-name')?.focus?.({ preventScroll: true });
+  } finally {
+    state.newConvBusy = false;
+  }
+}
+
 // ── data ──────────────────────────────────────────────────────────────────
 async function refresh() {
+  syncOrder();
   if (state.refreshing) { state.refreshQueued = true; return; }
   state.refreshing = true;
   try {
@@ -304,6 +395,7 @@ const TRANSITIONS = {
   needs_input: (r) => ['Needs your input', `${r.name}: ${(r.needs || [])[0] || 'waiting for you'}`],
   waiting_approval: (r) => ['Approval needed', `${r.name} is waiting for an approval`],
   finished: (r) => ['Agent finished', r.name],
+  idle: (r) => ['Agent finished', r.name],
   failed: (r) => ['Agent failed', r.name],
 };
 function notifyTransitions(before, after) {
@@ -314,7 +406,7 @@ function notifyTransitions(before, after) {
     const make = TRANSITIONS[r.status];
     const prev = was.get(r.session_id);
     if (!make || !prev || prev === r.status) continue;
-    if ((r.status === 'finished' || r.status === 'failed') && prev !== 'running') continue;
+    if ((r.status === 'finished' || r.status === 'failed' || r.status === 'idle') && prev !== 'running') continue;
     const key = `st:${r.session_id}:${r.status}:${r.finished_at || ''}`;
     if (_notified.has(key)) continue;
     _notified.add(key);
@@ -381,10 +473,13 @@ async function loadCatalog() {
 // something is blocked on you, something is working, everything else is history.
 // The six status groups this replaced put "Failed / Finished / Stopped / Workers
 // & recent" under four separate headers that all mean "not running".
+const working = (r) => r.status === 'running' || (r.conversation && r.child_activity > 0);
 const BUCKETS = [
   ['attention', 'Needs you', (r) => needsYou(r)],
-  ['active', 'Active', (r) => r.status === 'running'],
-  ['recent', 'Recent', (r) => !needsYou(r) && r.status !== 'running'],
+  ['active', 'Active', (r) => working(r)],
+  // A conversation that is not working is Idle, whatever its last run was.
+  ['idle', 'Idle', (r) => !!r.conversation && !needsYou(r) && !working(r)],
+  ['recent', 'Recent', (r) => !r.conversation && !needsYou(r) && !working(r)],
 ];
 
 /** Whether the Workbench shortcut is worth offering. Workbench is admin-gated
@@ -407,8 +502,9 @@ function liveHtml() {
 
 function triageHtml() {
   const t = state.totals;
-  const counts = { attention: (t.waiting_approval || 0) + (t.needs_input || 0), active: t.running || 0, recent: null };
-  const seg = BUCKETS.map(([key, label]) => {
+  const counts = { attention: (t.waiting_approval || 0) + (t.needs_input || 0), active: t.running || 0, idle: null, recent: null };
+  const hasConversations = state.rows.some((r) => r.conversation);
+  const seg = BUCKETS.filter(([key]) => key !== 'idle' || hasConversations).map(([key, label]) => {
     const n = counts[key];
     const on = state.bucket === key;
     const attn = key === 'attention' && n > 0;
@@ -423,7 +519,7 @@ function triageHtml() {
   // here. The tiles are gone; this line is the single place the non-filterable
   // numbers live.
   const hist = [
-    t.workers_running ? `${t.workers_running} worker${t.workers_running === 1 ? '' : 's'} live` : '',
+    t.workers_running ? `${t.workers_running} task${t.workers_running === 1 ? '' : 's'} running` : '',
     `${t.finished_24h || 0} done today`,
     t.failed_24h ? `<em class="ag-hist-bad">${t.failed_24h} failed</em>` : '',
   ].filter(Boolean).join(' · ');
@@ -445,7 +541,7 @@ function render() {
   const viewButtons = aside
     ? '<button type="button" class="wb-btn wb-btn-ghost" data-ag="fleet-view">← Fleet</button>'
     : '<button type="button" class="wb-btn wb-btn-ghost" data-ag="history-view" title="Every agent chat, however old">History</button><button type="button" class="wb-btn wb-btn-ghost" data-ag="archive-view">Archived</button><button type="button" class="wb-btn wb-btn-ghost" data-ag="loadouts-view" title="The reusable agent definitions chats and workers are based on">Loadouts</button>';
-  const headActions = `${viewButtons}<button type="button" class="wb-btn wb-btn-primary" data-ag="launch">Assign a task</button>${!aside && workbenchAvailable() ? '<button type="button" class="wb-btn wb-btn-ghost" data-ag="workbench" title="Repository changes, commits and PRs">Workbench</button>' : ''}`;
+  const headActions = `${viewButtons}<button type="button" class="wb-btn wb-btn-primary" data-ag="new-conversation" aria-expanded="${state.newConvOpen ? 'true' : 'false'}" title="Open a chat with a saved agent. It answers when you write to it.">New agent conversation</button><button type="button" class="wb-btn" data-ag="launch" title="The agent works separately and its result returns to a chat you choose">Assign a task</button>${!aside && workbenchAvailable() ? '<button type="button" class="wb-btn wb-btn-ghost" data-ag="workbench" title="Repository changes, commits and PRs">Workbench</button>' : ''}`;
   const viewTitle = state.configOpen ? "This chat's settings" : state.loadoutsView ? 'Loadouts' : state.historyView ? 'Agent chats' : state.archiveView ? 'Archived agents' : '';
   // One header row. It used to carry a second window title ("Mission floor",
   // under a title bar already reading "Agent Control Room"), and an Expand
@@ -464,6 +560,7 @@ function render() {
     ${state.configOpen ? loadoutWorkspaceHtml() : state.loadoutsView ? loadoutsViewHtml() : state.historyView ? historyHtml() : `<div class="ag-body" style="--ag-fleet-width:${Math.max(250, state.fleetWidth || 380)}px">
       <aside class="ag-fleet wb-card ${state.compactFleet ? 'ag-fleet-compact' : 'ag-fleet-expanded'}">
         <div class="ag-fleet-tools"><input type="search" class="wb-input" id="ag-filter" placeholder="Filter units…" value="${esc(state.filter)}" aria-label="Filter agents"><button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="fleet-density" aria-pressed="${state.compactFleet}" title="${state.compactFleet ? 'Use larger cards' : 'Use compact cards'}">${state.compactFleet ? 'Compact' : 'Large'}</button></div>
+        ${state.newConvOpen ? newConversationHtml() : ''}
         <div class="ag-fleet-list" data-wb-scroll="fleet">${fleetHtml()}</div>
       </aside>
       <div class="ag-pane-splitter" data-ag-splitter role="separator" aria-orientation="vertical" aria-label="Resize fleet and agent details" tabindex="0"><span></span></div>
@@ -605,19 +702,41 @@ function descendants(row, kids, seen = new Set([row.session_id])) {
   return out;
 }
 function isLiveAgent(row) { return row.status === 'running' || needsYou(row); }
-/** A card plus the workers under it: live (or selected) ones always, the rest
- *  only while the parent is unfolded. */
-function treeHtml(row, kids, seen = new Set()) {
+/** A card plus the tasks under it: live (or selected) ones always, finished
+ *  ones in a separate "Completed" section while the parent is unfolded. */
+function treeHtml(row, kids, seen = new Set(), pos = null) {
   seen.add(row.session_id);
   const workers = (kids.get(row.session_id) || []).filter((child) => !seen.has(child.session_id));
-  if (!workers.length) return rowHtml(row);
+  if (!workers.length) return rowHtml(row, { pos });
   const pinned = (child) => !!state.filter.trim() || [child, ...descendants(child, kids)].some((node) => isLiveAgent(node) || node.session_id === state.selected);
   const open = state.expandedParents.has(row.session_id);
-  const folded = workers.filter((child) => !pinned(child)).length;
-  const visible = open ? workers : workers.filter(pinned);
-  const inner = visible.map((child) => treeHtml(child, kids, seen)).join('');
-  return `${rowHtml(row, { folded, open })}${(inner || folded)
-    ? `<div id="ag-workers-${esc(encodeURIComponent(row.session_id))}" class="ag-card-workers" role="group" aria-label="Workers of ${esc(row.name)}"${inner ? '' : ' hidden'}>${inner}</div>` : ''}`;
+  const live = workers.filter(pinned);
+  const done = workers.filter((child) => !pinned(child));
+  const liveHtml = live.map((child) => treeHtml(child, kids, seen)).join('');
+  const doneHtml = open ? done.map((child) => treeHtml(child, kids, seen)).join('') : '';
+  const inner = `${liveHtml}${doneHtml ? `<div class="ag-workers-done-h">Completed tasks</div>${doneHtml}` : ''}`;
+  return `${rowHtml(row, { folded: done.length, open, pos })}${(inner || done.length)
+    ? `<div id="ag-workers-${esc(encodeURIComponent(row.session_id))}" class="ag-card-workers" role="group" aria-label="Tasks of ${esc(row.name)}"${inner ? '' : ' hidden'}>${inner}</div>` : ''}`;
+}
+/** Conversation rows in the user's order. Ids the saved order does not know
+ *  (a new conversation) come first, newest first; ids it names that no longer
+ *  exist are ignored. */
+export function orderConversations(rows, order = state.order) {
+  const place = new Map((order || []).map((id, i) => [id, i]));
+  const known = rows.filter((r) => place.has(r.session_id)).sort((a, b) => place.get(a.session_id) - place.get(b.session_id));
+  const fresh = rows.filter((r) => !place.has(r.session_id))
+    .sort((a, b) => (b.created_at || 0) - (a.created_at || 0) || String(a.session_id).localeCompare(String(b.session_id)));
+  return [...fresh, ...known];
+}
+function rootOf(sid, byId) {
+  let cursor = byId.get(sid); const seen = new Set();
+  while (cursor && !seen.has(cursor.session_id)) {
+    seen.add(cursor.session_id);
+    const parent = byId.get(cursor.parent_session);
+    if (!parent) break;
+    cursor = parent;
+  }
+  return cursor || null;
 }
 function fleetHtml() {
   const rows = filteredRows();
@@ -640,21 +759,32 @@ function fleetHtml() {
     return [root.session_id, (BUCKETS.find(([, , match]) => tree.some(match)) || BUCKETS[BUCKETS.length - 1])[0]];
   }));
   const shownKeys = new Set(shown.map(([key]) => key));
-  const candidates = roots.filter((root) => shownKeys.has(bucketOf.get(root.session_id)));
+  // The selected conversation stays listed whatever the filter or page says.
+  const selectedRoot = rootOf(state.selected, new Map(state.rows.map((row) => [row.session_id, row])))?.session_id;
+  const pinnedRoot = (root) => root.session_id === selectedRoot;
+  // Conversations are one list in a fixed order: a status change moves a
+  // conversation between filters, never within the list.
+  const conversations = orderConversations(roots.filter((root) => root.conversation))
+    .filter((root) => shownKeys.has(bucketOf.get(root.session_id)) || pinnedRoot(root));
+  const others = roots.filter((root) => !root.conversation && (shownKeys.has(bucketOf.get(root.session_id)) || pinnedRoot(root)));
+  const candidates = [...conversations, ...others];
   const pages = Math.max(1, Math.ceil(candidates.length / FLEET_PAGE_SIZE));
   state.fleetPage = Math.min(Math.max(0, state.fleetPage), pages - 1);
   const pageRows = new Set(candidates.slice(state.fleetPage * FLEET_PAGE_SIZE, (state.fleetPage + 1) * FLEET_PAGE_SIZE).map((row) => row.session_id));
-  const html = shown.map(([key, label]) => {
-    const items = candidates.filter((row) => bucketOf.get(row.session_id) === key && pageRows.has(row.session_id));
+  const group = (title, countLabel, items, cls = '') => `<div class="ag-group${cls}">${
+    title ? `<div class="wb-group-h"><span class="wb-group-title">${title}</span><span class="wb-count">${countLabel}</span></div>` : ''
+  }<div class="ag-card-grid">${items.join('')}</div></div>`;
+  const convShown = conversations.filter((row) => pageRows.has(row.session_id));
+  const convHtml = convShown.length
+    ? group('Agent conversations', `${conversations.length}`, convShown.map((row, i) => treeHtml(row, kids, new Set(), { first: i === 0, last: i === convShown.length - 1 })), ' ag-group-conv') : '';
+  const html = convHtml + BUCKETS.filter(([key]) => key !== 'idle').map(([key, label]) => {
+    const items = others.filter((row) => bucketOf.get(row.session_id) === key && pageRows.has(row.session_id));
     if (!items.length) return '';
-    const solo = shown.length === 1;
-    const cards = items.map((row) => treeHtml(row, kids)).join('');
-    return `<div class="ag-group${key === 'attention' ? ' ag-group-attn' : ''}">${
-      solo ? '' : `<div class="wb-group-h"><span class="wb-group-title">${label}</span><span class="wb-count">${items.length} tree${items.length === 1 ? '' : 's'}</span></div>`
-    }<div class="ag-card-grid">${cards}</div></div>`;
+    const solo = shown.length === 1 && shownKeys.has(key);
+    return group(solo ? '' : label, `${items.length} tree${items.length === 1 ? '' : 's'}`, items.map((row) => treeHtml(row, kids)), key === 'attention' ? ' ag-group-attn' : '');
   }).join('');
   if (html) return `${html}${pages > 1 ? `<nav class="ag-fleet-pages" aria-label="Fleet pages"><button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="fleet-page" data-page="${state.fleetPage - 1}"${state.fleetPage === 0 ? ' disabled' : ''}>← Newer</button><span>${state.fleetPage * FLEET_PAGE_SIZE + 1}–${Math.min(candidates.length, (state.fleetPage + 1) * FLEET_PAGE_SIZE)} of ${candidates.length}</span><button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="fleet-page" data-page="${state.fleetPage + 1}"${state.fleetPage >= pages - 1 ? ' disabled' : ''}>Older →</button></nav>` : ''}`;
-  if (!state.rows.length) return '<div class="wb-empty">Nothing is running. Use Assign a task to start one.</div>';
+  if (!state.rows.length) return '<div class="wb-empty">No agent conversations yet. Use New agent conversation to talk to an agent, or Assign a task to have one work separately.</div>';
   if (state.bucket !== 'all') {
     const label = (BUCKETS.find(([k]) => k === state.bucket) || [, ''])[1];
     return `<div class="wb-empty">Nothing in “${label}”. <button type="button" class="ag-inline-link" data-ag="bucket" data-bucket="all">Show all</button></div>`;
@@ -669,8 +799,15 @@ function renderFleetOnly() {
     ? document.activeElement.dataset.sid : null;
   const focusedToggle = list.contains(document.activeElement) && document.activeElement.matches('.ag-workers-toggle')
     ? document.activeElement.dataset.sid : null;
+  const focusedMove = list.contains(document.activeElement) && document.activeElement.matches('.ag-move')
+    ? { act: document.activeElement.dataset.ag, sid: document.activeElement.dataset.sid } : null;
   list.innerHTML = fleetHtml();
   list.scrollTop = top;
+  if (focusedMove) {
+    const moved = list.querySelector(`.ag-move[data-ag="${focusedMove.act}"][data-sid="${CSS.escape(focusedMove.sid)}"]:not([disabled])`)
+      || list.querySelector(`.ag-move[data-sid="${CSS.escape(focusedMove.sid)}"]:not([disabled])`);
+    moved?.focus({ preventScroll: true });
+  }
   if (focusedUnit) list.querySelector(`.ag-card-select[data-sid="${CSS.escape(focusedUnit)}"]`)?.focus({ preventScroll: true });
   if (focusedToggle) list.querySelector(`.ag-workers-toggle[data-sid="${CSS.escape(focusedToggle)}"]`)?.focus({ preventScroll: true });
 }
@@ -934,7 +1071,7 @@ function rowHtml(r, nest = {}) {
   const meta = [
     r.profile ? esc(r.profile) : '',
     r.model ? esc(String(r.model).split('/').pop()) : '',
-    r.children_running ? `${r.children_running}w` : '',
+    
   ].filter(Boolean).join(' · ');
   const blocked = r.pending_approvals
     ? `<span class="ag-row-attn">${r.pending_approvals} approval${r.pending_approvals === 1 ? '' : 's'}</span>` : '';
@@ -945,20 +1082,30 @@ function rowHtml(r, nest = {}) {
   const need = showNeeds
     ? `<div class="ag-row-need" title="${esc(r.needs.join('\n'))}"><span class="ag-row-need-label">Needs:</span> ${esc(r.needs[0])}${r.needs.length > 1 ? ` (+${r.needs.length - 1})` : ''}${r.status === 'needs_input' ? ` <button type="button" class="wb-btn wb-btn-sm wb-btn-ghost ag-need-clear" data-ag="clear-needs" data-sid="${esc(r.session_id)}" title="Already answered (in another chat, or outside Agamemnon)? Clear this request">Mark answered</button>` : ''}</div>` : '';
   const children = (r.children || []).slice(0, 5);
-  const crew = children.length ? `<div class="ag-card-crew" title="${r.children?.length || 0} attached workers"><span class="ag-crew-line"></span>${children.map(c => robotHtml(c, 'micro')).join('')}${r.children.length > children.length ? `<b>+${r.children.length - children.length}</b>` : ''}</div>` : '';
+  const crew = children.length ? `<div class="ag-card-crew" title="${r.children?.length || 0} assigned tasks"><span class="ag-crew-line"></span>${children.map(c => robotHtml(c, 'micro')).join('')}${r.children.length > children.length ? `<b>+${r.children.length - children.length}</b>` : ''}</div>` : '';
   const status = r.status || 'idle';
+  // Availability is the pill; how the last run ended is its own line, and an
+  // idle conversation with a working task says so. Nothing here suggests an
+  // idle conversation is working on its own.
+  const outcome = r.outcome && OUTCOME[r.outcome] && r.outcome !== status
+    ? `<span class="ag-row-outcome" data-outcome="${esc(r.outcome)}" title="How the last run ended">Last run: ${esc(OUTCOME[r.outcome])}</span>` : '';
+  const childWork = r.conversation && status !== 'running' && r.child_activity > 0
+    ? `<span class="ag-row-childwork" title="A task assigned from this conversation is still running">${r.child_activity} task${r.child_activity === 1 ? '' : 's'} running</span>` : '';
+  const pos = nest.pos;
+  const move = r.conversation && pos
+    ? `<button type="button" class="wb-icon-btn ag-move" data-ag="move-up" data-sid="${esc(r.session_id)}" title="Move up" aria-label="Move ${esc(r.name)} up"${pos.first ? ' disabled' : ''}>↑</button><button type="button" class="wb-icon-btn ag-move" data-ag="move-down" data-sid="${esc(r.session_id)}" title="Move down" aria-label="Move ${esc(r.name)} down"${pos.last ? ' disabled' : ''}>↓</button>` : '';
   return `<div class="ag-row ag-card ag-bot-card ag-card-${esc(status)}${sel ? ' active' : ''}${needsYou(r) ? ' attn' : ''}" style="--ag-card-h:${hashUnit(r.session_id) % 360}" data-sid="${esc(r.session_id)}" role="group" aria-label="${esc(r.name)}">
     <div class="ag-card-beacon" aria-hidden="true"></div>
     <div class="ag-card-avatar">${robotHtml(r)}</div>
     <div class="ag-card-copy">
       <div class="ag-row-top"><button type="button" class="ag-row-name ag-card-select" data-ag="select-agent" data-sid="${esc(r.session_id)}" aria-pressed="${sel ? 'true' : 'false'}" title="Inspect ${esc(r.name)}">${esc(r.name)}</button>${dur ? `<span class="ag-row-dur" data-started="${r.started_at}">${esc(dur)}</span>` : ''}</div>
-      <div class="ag-card-status">${pill(status)}${blocked}</div>
+      <div class="ag-card-status">${pill(status)}${outcome}${childWork}${blocked}</div>
       ${need}
-      <div class="ag-row-sub">${meta ? `<span class="ag-row-meta-inline">${meta}</span>` : ''}${r.latest ? `<span class="ag-row-latest" title="${esc(r.latest)}">${esc(latestText(r))}</span>` : '<span class="ag-row-latest">Standing by</span>'}</div>
+      <div class="ag-row-sub">${meta ? `<span class="ag-row-meta-inline">${meta}</span>` : ''}${r.latest ? `<span class="ag-row-latest" title="${esc(r.latest)}">${esc(latestText(r))}</span>` : (r.conversation ? '<span class="ag-row-latest">Replies when you write to it</span>' : '<span class="ag-row-latest">Standing by</span>')}</div>
       ${crew}
-      ${nest.folded ? `<button type="button" class="ag-workers-toggle" data-ag="toggle-workers" data-sid="${esc(r.session_id)}" aria-controls="ag-workers-${esc(encodeURIComponent(r.session_id))}" aria-expanded="${nest.open ? 'true' : 'false'}" title="${nest.open ? 'Hide inactive branches' : 'Show inactive branches'}">${nest.open ? '▾' : '▸'} ${nest.folded} inactive branch${nest.folded === 1 ? '' : 'es'}</button>` : ''}
+      ${nest.folded ? `<button type="button" class="ag-workers-toggle" data-ag="toggle-workers" data-sid="${esc(r.session_id)}" aria-controls="ag-workers-${esc(encodeURIComponent(r.session_id))}" aria-expanded="${nest.open ? 'true' : 'false'}" title="${nest.open ? 'Hide completed tasks' : 'Show completed tasks'}">${nest.open ? '▾' : '▸'} ${nest.folded} completed task${nest.folded === 1 ? '' : 's'}</button>` : ''}
     </div>
-    <div class="ag-card-actions">${isCurrentChat(r.session_id) ? '' : `<button type="button" class="wb-icon-btn" data-ag="open-chat" data-sid="${esc(r.session_id)}" title="Open chat" aria-label="Open ${esc(r.name)} chat">Open</button>`}${status === 'running' ? `<button type="button" class="wb-icon-btn" data-ag="stop-chat" data-sid="${esc(r.session_id)}" title="Stop agent" aria-label="Stop ${esc(r.name)}">Stop</button>` : ''}</div>
+    <div class="ag-card-actions">${move}${isCurrentChat(r.session_id) ? '' : `<button type="button" class="wb-icon-btn" data-ag="open-chat" data-sid="${esc(r.session_id)}" title="Open chat" aria-label="Open ${esc(r.name)} chat">Open</button>`}${status === 'running' ? `<button type="button" class="wb-icon-btn" data-ag="stop-chat" data-sid="${esc(r.session_id)}" title="Stop agent" aria-label="Stop ${esc(r.name)}">Stop</button>` : ''}</div>
   </div>`;
 }
 function renderDetail() {
@@ -1026,7 +1173,7 @@ function renderDetail() {
         <div class="ag-detail-meta">${r.model ? `<span class="wb-meta-item">${esc(r.model)}</span>` : ''}${r.started_at ? `<span class="wb-meta-item">started ${esc(fmtTime(r.started_at))}</span>` : ''}${r.is_current ? '<span class="wb-meta-item">open chat</span>' : ''}</div>
       </div>
       <div class="ag-console-status">
-        <span class="ag-console-state">${pill(r.status)}${r.started_at ? `<strong class="ag-row-dur" data-started="${r.started_at}">${esc(fmtDur(r.started_at))}</strong>` : ''}</span>
+        <span class="ag-console-state">${pill(r.status)}${r.outcome && OUTCOME[r.outcome] && r.outcome !== r.status ? `<span class="ag-row-outcome" data-outcome="${esc(r.outcome)}">Last run: ${esc(OUTCOME[r.outcome])}</span>` : ''}${r.conversation && r.status !== 'running' && r.child_activity > 0 ? `<span class="ag-row-childwork">${r.child_activity} task${r.child_activity === 1 ? '' : 's'} running</span>` : ''}${r.started_at ? `<strong class="ag-row-dur" data-started="${r.started_at}">${esc(fmtDur(r.started_at))}</strong>` : ''}</span>
         <span class="ag-console-actions">${isCurrentChat(r.session_id)
           ? '<span class="ag-this-chat" title="This is the chat you have open">This chat</span>'
           : `<button type="button" class="wb-btn wb-btn-sm" data-ag="open-chat" data-sid="${esc(r.session_id)}">Open chat</button>`}${
@@ -1179,6 +1326,13 @@ function launchHtml() {
   return `<div class="ag-launch-host" id="ag-launch-host"></div>${problems}
     ${state.profiles.length ? '' : '<p class="wb-hint">No agents yet — define them under Settings › Agents.</p>'}`;
 }
+/** Where an assigned task's result returns by default: the conversation selected
+ *  here, else the chat that is open. The form names it and lets the person change it. */
+function launchParent(cur) {
+  const sel = state.rows.find((r) => r.session_id === state.selected);
+  const pick = sel?.conversation ? sel.session_id : cur;
+  return state.chats.some((c) => c.id === pick) ? pick : '';
+}
 let launchSheet = null;
 function mountLaunchSheet() {
   const host = $('ag-launch-host');
@@ -1189,7 +1343,7 @@ function mountLaunchSheet() {
   const cur = window.sessionModule?.getCurrentSessionId?.() || '';
   launchSheet = agentActions.mountAssignSheet(host, {
     closable: true,
-    initial: { ...snap, agent, ...(snap.parent === undefined ? { parent: state.chats.some((c) => c.id === cur) ? cur : '' } : {}) },
+    initial: { ...snap, agent, ...(snap.parent === undefined ? { parent: launchParent(cur) } : {}) },
     onChange: (next) => { state.launchSnap = next; },
     onClose: () => { state.launchOpen = false; state.launchProfile = null; state.launchSnap = null; render(); },
     onStarted: async (r) => {
@@ -1532,6 +1686,17 @@ async function onClick(e) {
       $('ag-launch')?.querySelector('[data-aa-field="task"]')?.focus();
       if (leavingArchive) await refresh();
     }
+    else if (act === 'new-conversation') {
+      const leavingArchive = state.archiveView;
+      state.newConvOpen = !state.newConvOpen;
+      state.configOpen = false; state.historyView = false; state.archiveView = false; state.loadoutsView = false;
+      render();
+      $('ag-newconv')?.querySelector('.ag-newconv-pick')?.focus();
+      if (leavingArchive) await refresh();
+    }
+    else if (act === 'new-conversation-close') { state.newConvOpen = false; render(); $('agents-dashboard')?.querySelector('[data-ag="new-conversation"]')?.focus(); }
+    else if (act === 'new-conversation-pick') await startConversation(b.dataset.profile);
+    else if (act === 'move-up' || act === 'move-down') moveConversation(b.dataset.sid, act === 'move-up' ? -1 : 1);
     else if (act === 'launch-close') { state.launchOpen = false; state.launchProfile = null; state.launchSnap = null; render(); }
     else if (act === 'bucket') {
       // Toggle: clicking the active bucket clears the filter, so the control
@@ -1541,11 +1706,8 @@ async function onClick(e) {
       state.filter = '';
       state.fleetPage = 0;
       const input = $('ag-filter'); if (input) input.value = '';
-      // Keep a selection that is still visible in the new bucket.
-      const match = (BUCKETS.find(([k]) => k === state.bucket) || [])[2];
-      if (match && !state.rows.some((r) => r.session_id === state.selected && match(r))) {
-        state.selected = (state.rows.find(match) || {}).session_id || state.selected;
-      }
+      // The selection stays where it is: the list keeps showing it even when
+      // the new filter would not have listed it.
       updateStats(); renderFleetOnly(); renderDetail();
     }
     else if (act === 'toggle-workers') {
@@ -1768,6 +1930,7 @@ function resetView(view = null) {
   state.archiveView = view === 'archive';
   state.historyView = view === 'history';
   state.launchOpen = view === 'launch';
+  state.newConvOpen = false;
   state.launchProfile = null; state.launchSnap = null;
   state.bucket = 'all'; state.filter = ''; state.fleetPage = 0; state.detailTab = 'overview';
 }
@@ -1952,7 +2115,10 @@ function init() {
       setFleetWidth(e.target.closest('.ag-body'), state.fleetWidth + (e.key === 'ArrowLeft' ? -24 : 24));
       return;
     }
-    if (e.key === 'Escape' && state.open) { close(); return; }
+    if (e.key === 'Escape' && state.open) {
+      if (state.newConvOpen) { state.newConvOpen = false; render(); return; }
+      close(); return;
+    }
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'a') { e.preventDefault(); toggle(); }
   });
   // Badges stay current while the page is closed: a light poll plus the feed.

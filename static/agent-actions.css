@@ -97,3 +97,20 @@ html[data-style="agamemnon"] .aa-chip { border-radius: 999px; }
 
 /* Phone width: the Assign sheet in the Agents panel sits above the room's own header. */
 @media (max-width: 900px) { .ag-launch { z-index: 20; } }
+
+/* Phalanx: conversations, their last-run outcome, and the new-conversation picker */
+#agents-dashboard .ag-row-outcome,
+#agents-dashboard .ag-row-childwork { font-size: 11.5px; color: var(--wb-muted); white-space: nowrap; }
+#agents-dashboard .ag-row-outcome[data-outcome="failed"] { color: var(--wb-bad); }
+#agents-dashboard :is(.ag-row-outcome[data-outcome="blocked"], .ag-row-outcome[data-outcome="partial"], .ag-row-outcome[data-outcome="stopped"]) { color: var(--wb-warn); }
+#agents-dashboard .ag-row-childwork { color: var(--wb-run); }
+#agents-dashboard .ag-move { min-width: 28px; min-height: 28px; }
+#agents-dashboard .ag-move[disabled] { opacity: .35; cursor: default; }
+#agents-dashboard .ag-workers-done-h { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--wb-faint); padding: 6px 4px 2px; }
+#agents-dashboard .ag-newconv { margin: 0 0 8px; padding: 10px; display: flex; flex-direction: column; gap: 6px; }
+#agents-dashboard .ag-newconv-head { display: flex; align-items: center; justify-content: space-between; }
+#agents-dashboard .ag-newconv-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; max-height: 240px; overflow: auto; }
+#agents-dashboard .ag-newconv-pick { width: 100%; text-align: left; display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; min-height: 40px; background: transparent; color: inherit; border: 1px solid var(--wb-line); border-radius: 6px; cursor: pointer; font: inherit; }
+#agents-dashboard .ag-newconv-pick:hover, #agents-dashboard .ag-newconv-pick:focus-visible { background: var(--wb-hover); }
+#agents-dashboard .ag-newconv-pick small { color: var(--wb-muted); }
+html[data-style="agamemnon"] #agents-dashboard .ag-newconv-pick { border-radius: 0; }

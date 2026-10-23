@@ -201,6 +201,29 @@ def setup_agents_routes(session_manager) -> APIRouter:
                 parent = parents.get(parent)
         return out
 
+    def _is_conversation(settings: Dict[str, Any]) -> bool:
+        """A chat made with an agent (Talk to agent, or a loadout applied) that
+        no other chat started. Workers carry ``parent_session``."""
+        return bool(settings.get("agent_profile")) and not settings.get("parent_session")
+
+    def _created_at(ids: Set[str]) -> Dict[str, float]:
+        """Creation time of each chat, as epoch seconds (the stable list order)."""
+        if not ids:
+            return {}
+        try:
+            from datetime import timezone
+            from core.database import SessionLocal, Session as DbSession
+            db = SessionLocal()
+            try:
+                rows = db.query(DbSession.id, DbSession.created_at).filter(DbSession.id.in_(list(ids))).all()
+            finally:
+                db.close()
+            return {row.id: row.created_at.replace(tzinfo=timezone.utc).timestamp()
+                    for row in rows if row.created_at}
+        except Exception:
+            logger.debug("conversation creation times unavailable", exc_info=True)
+            return {}
+
     def _recent_chats(user: Optional[str], owned: Dict[str, Any], limit: int) -> list:
         """The launch form's "Report to chat" list, most recently active first.
 
@@ -332,6 +355,14 @@ def setup_agents_routes(session_manager) -> APIRouter:
         # descendants together, including grandchildren after runs expire.
         settings_by_id = {sid: live_settings[sid] if sid in live_settings else get_session_settings(sid) or {}
                           for sid in owned}
+        # Agent conversations are durable: every owned, live chat with an agent
+        # applied (Talk to agent, or a loadout applied later) that no other chat
+        # started. They are listed from the database, whether or not a run
+        # record survives, so a conversation does not vanish after 24 hours.
+        conversation_ids = {sid for sid, st in settings_by_id.items()
+                            if _is_conversation(st) and sid not in link_parent}
+        if not show_archived:
+            visible_ids.update(conversation_ids)
         parents = {sid: settings.get('parent_session') for sid, settings in settings_by_id.items()}
         changed = True
         while changed:
@@ -341,6 +372,7 @@ def setup_agents_routes(session_manager) -> APIRouter:
             visible_ids.update(sid for sid, parent in parents.items() if parent in visible_ids and parent != sid)
             changed = len(visible_ids) != before
         crew_roles = _crew_roles(visible_ids & set(owned))
+        created = _created_at(conversation_ids & visible_ids)
         for sid in visible_ids:
             sess = owned.get(sid)
             if sess is None:
@@ -364,6 +396,14 @@ def setup_agents_routes(session_manager) -> APIRouter:
                           "blocked": "blocked", "partial": "partial"}[run["status"]]
             else:
                 status = "idle"
+            # What the last turn ended as, kept apart from whether the chat is
+            # free for the next message. A conversation whose turn completed is
+            # idle, not "finished": it is still there to talk to.
+            outcome = {"done": "done", "error": "failed", "stopped": "stopped",
+                       "blocked": "blocked", "partial": "partial"}.get(run.get("status"))
+            is_conversation = sid in conversation_ids
+            if is_conversation and status == "finished":
+                status = "idle"
             events = activity.history(sid, limit=12)
             latest = next((e for e in reversed(events)
                            if e.get("kind") in ("tool_start", "tool_result", "message", "status", "run_started")), None)
@@ -373,6 +413,7 @@ def setup_agents_routes(session_manager) -> APIRouter:
             needs = open_needs.read(settings, since=run.get("started_at"))
             if needs and status in ("finished", "idle", "stopped"):
                 status = "needs_input"
+                outcome = "needs_input"
             elif status in ("blocked", "partial") and not needs:
                 # Kept distinct from finished; the page lists it under "Needs you"
                 # when the worker left a `Needs user:` line.
@@ -425,8 +466,21 @@ def setup_agents_routes(session_manager) -> APIRouter:
             parent_of = parents.get(sid) or link_parent.get(sid)
             if parent_of == sid:
                 parent_of = None
+            if pending.get(sid):
+                outcome = "waiting_approval"
+            elif status == "running":
+                outcome = None
             rows.append({
                 "session_id": sid,
+                # A durable parent conversation, as opposed to a worker or an
+                # ad-hoc run. `availability` is whether it can take a message;
+                # `outcome` is how its last run ended (done, failed, stopped,
+                # blocked, partial, needs_input, waiting_approval, or none yet).
+                "conversation": is_conversation,
+                "availability": ("working" if status == "running"
+                                 else "waiting" if status in ("waiting_approval", "needs_input") else "idle"),
+                "outcome": outcome,
+                "created_at": created.get(sid),
                 "name": getattr(sess, "name", "") or sid,
                 "model": getattr(sess, "model", ""),
                 "archived": bool(getattr(sess, "archived", False)),
@@ -486,16 +540,34 @@ def setup_agents_routes(session_manager) -> APIRouter:
                         keep.add(cursor)
                         cursor = parents.get(cursor)
             rows = [row for row in rows if row["session_id"] not in stranded or row["session_id"] in keep]
+        # An idle conversation with a working child stays discoverable: say so.
+        working_under: Dict[str, int] = {}
+        for row in rows:
+            cursor, seen_chain = row["parent_session"], {row["session_id"]}
+            while cursor and cursor not in seen_chain:
+                if row["status"] in ("running", "waiting_approval"):
+                    working_under[cursor] = working_under.get(cursor, 0) + 1
+                seen_chain.add(cursor)
+                cursor = parents.get(cursor)
+        for row in rows:
+            row["child_activity"] = max(row["children_running"], working_under.get(row["session_id"], 0))
         order = {"waiting_approval": 0, "needs_input": 0, "running": 1, "blocked": 2, "partial": 2, "failed": 2,
                  "finished": 3, "stopped": 4, "idle": 5}
-        rows.sort(key=lambda r: (order.get(r["status"], 9), -(r.get("latest_ts") or r.get("started_at") or 0)))
+        # Conversations come first in a fixed order (newest created first): a
+        # status change must not move one. Everything else keeps the old
+        # urgency order.
+        rows.sort(key=lambda r: ((0, -(r.get("created_at") or 0), r["session_id"]) if r["conversation"]
+                                 else (1, order.get(r["status"], 9),
+                                       -(r.get("latest_ts") or r.get("started_at") or 0))))
         totals = {
             "running": sum(1 for r in rows if r["status"] == "running"),
             "waiting_approval": sum(1 for r in rows if r["status"] == "waiting_approval"),
             "needs_input": sum(1 for r in rows if r["status"] == "needs_input"
                                or (r["status"] in ("blocked", "partial") and r["needs"])),
             "workers_running": sum(r["children_running"] for r in rows),
-            "finished_24h": sum(1 for r in rows if r["status"] in ("finished",)),
+            "finished_24h": sum(1 for r in rows if r["status"] == "finished"
+                                or (r["conversation"] and r["outcome"] == "done"
+                                    and now - (r.get("finished_at") or 0) <= _RECENT_S)),
             "failed_24h": sum(1 for r in rows if r["status"] == "failed"),
         }
         from src.agent_tools.claude_code_tools import configured_concurrency

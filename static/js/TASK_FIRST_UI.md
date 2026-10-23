@@ -26,6 +26,7 @@ Use these words in UI text, and no others for the same idea.
 | Project | A folder under a vault `Projects/` folder, e.g. `AI Mind/Projects/Tall Tree Group` | Workspace (that is a code checkout) |
 | Agent | A saved specialist (loadout) | Loadout, profile, worker, crew |
 | Talk to agent | Open a chat where that agent answers | Apply loadout |
+| New agent conversation | A chat with a saved agent that stays in Phalanx, Idle between turns, until archived. It works only while it is answering | Launch worker, background agent |
 | Assign a task | The agent works separately and its result returns to this chat | Launch worker, delegate, spawn |
 | Working master | The editable copy that is the source of truth | |
 | Export | A copy made from the master (PDF, Word copy) | |
