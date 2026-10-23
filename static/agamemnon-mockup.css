@@ -402,7 +402,6 @@ html[data-style="agamemnon"] #agents-dashboard .ag-appearance-options{grid-templ
 .theme-style-card label{display:flex;justify-content:space-between;align-items:center;gap:20px;cursor:pointer;min-height:48px}
 .theme-style-card small{display:block;margin-top:5px;line-height:1.45;opacity:.8}
 .theme-style-card input{width:22px;height:22px;flex:none;accent-color:var(--red)}
-html[data-style="agamemnon"] .sidebar :is(#sidebar-new-chat-btn,#sidebar-search-btn){display:none}
 /* Both styles share the 240px sidebar and 40px crest; the fixed hamburger
    sits in the icon rail, not in the branding row. */
 html[data-style="classic"] .sidebar{width:240px!important;min-width:240px!important}

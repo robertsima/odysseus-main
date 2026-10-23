@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from tests.helpers.static_app import LIGHT_THEME, ODYSSEUS_THEME, assert_no_sideways_scroll, expect, settle, wait_ready
+from tests.helpers.static_app import LIGHT_THEME, ODYSSEUS_THEME, assert_no_sideways_scroll, assert_usable, expect, settle, wait_ready
 
 pytestmark = pytest.mark.browser
 
@@ -51,7 +51,10 @@ def test_sidebar_shows_three_groups_with_more_folded(open_app, width):
                            ".map(g => g.id + ':' + g.querySelector('.nav-group-title').textContent.trim())")
     assert titles == ["work-section:Work", "agents-section:Agents", "more-section:More"]
     for group, ids in GROUPS.items():
-        assert page.evaluate("(g) => [...document.querySelectorAll('#' + g + ' > .list-item')].map(n => n.id)", group) == ids
+        rows = page.evaluate("(g) => [...document.querySelectorAll('#' + g + ' > .list-item')].map(n => n.id)", group)
+        # Email is a row of Work, between Today and Library.
+        assert [r for r in rows if r != "email-section"] == ids
+        assert ("email-section" in rows) == (group == "work-section")
     assert not collapsed(page, "work-section") and not collapsed(page, "agents-section")
     assert collapsed(page, "more-section")
     for tool in GROUPS["more-section"]:
@@ -157,3 +160,46 @@ def test_a_folded_more_shows_a_dot_while_a_child_is_running(open_app):
     page.wait_for_timeout(500)
     expect(dot).to_be_hidden()
     expect(page.locator("#tool-gallery-btn")).to_be_visible()
+
+
+@pytest.mark.parametrize("theme", [None, LIGHT_THEME])
+@pytest.mark.parametrize("style", ["agamemnon", "classic"])
+def test_new_chat_and_search_are_rows_of_the_open_sidebar_and_work(open_app, style, theme):
+    """Agamemnon hid both rows, and its rail is hidden while the sidebar is open,
+    so the only ways left were the brand click and Ctrl+K."""
+    page = open_app(1440, style=style, theme=theme, chat=False)
+    open_sidebar(page)
+    for row in ("#sidebar-new-chat-btn", "#sidebar-search-btn"):
+        assert_usable(page, row)
+    assert_no_sideways_scroll(page, ".sidebar-inner")
+    page.click("#sidebar-search-btn")
+    page.wait_for_function("!document.getElementById('search-overlay').classList.contains('hidden')")
+    page.keyboard.press("Escape")
+    page.evaluate("window.newChatClicks = 0; document.addEventListener('click', e => {"
+                  " if (e.target.closest('#sidebar-new-chat-btn')) window.newChatClicks += 1; }, true)")
+    page.click("#sidebar-new-chat-btn")
+    assert page.evaluate("window.newChatClicks") == 1
+    page.wait_for_function("document.querySelector('#chat-container')?.classList.contains('welcome-active')")
+
+
+@pytest.mark.parametrize("style", ["agamemnon", "classic"])
+def test_the_email_row_follows_the_layout_and_keeps_its_unread_dot_and_compose_button(open_app, style):
+    page = open_app(1440, style=style, chat=False)
+    open_sidebar(page)
+    assert page.evaluate("document.getElementById('email-section').parentElement.dataset.navGroup") == "work"
+    assert_usable(page, "#email-section-title")
+    page.evaluate("async () => { const m = await import('/static/js/navLayout.js');"
+                  " m.updateLayout((layout) => m.moveItem(layout, 'email', 'agents')); }")
+    page.wait_for_function("document.getElementById('email-section').parentElement.dataset.navGroup === 'agents'")
+    assert page.evaluate("document.getElementById('email-section').classList.contains('list-item')")
+    assert_usable(page, "#email-section-title")
+    page.evaluate("document.getElementById('email-unread-dot').style.display = 'inline-block'")
+    assert page.evaluate("document.getElementById('email-section').contains(document.getElementById('email-unread-dot'))")
+    page.hover("#email-section")
+    assert_usable(page, "#email-compose-btn")
+    # Compose has its own handler: it must not fall through to opening the inbox.
+    page.click("#email-compose-btn")
+    page.wait_for_timeout(300)
+    assert not page.evaluate("document.querySelector('#email-lib-modal')?.offsetWidth > 0")
+    page.click("#email-section-title")
+    page.wait_for_function("document.querySelector('#email-lib-modal')?.offsetWidth > 0")

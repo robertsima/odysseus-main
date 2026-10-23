@@ -32,12 +32,13 @@ export const NAV_GROUPS = Object.freeze({
 });
 
 // `group` is where a tool goes when a layout does not place it. `sidebar` and
-// `rail` are the existing nodes that carry its click handlers. Email has only a
-// rail node (its sidebar entry is the Email section above the groups); Lotus
-// has only a sidebar node. A flyout row clicks whichever node exists.
+// `rail` are the existing nodes that carry its click handlers. Email's sidebar
+// node is the whole Email section (title, compose +, unread dot); its click
+// handlers sit on the header inside it, so `launcher` names the node a flyout
+// row clicks instead. Lotus has only a sidebar node.
 export const NAV_ITEMS = Object.freeze([
   Object.freeze({ key: 'today', label: 'Today', rail: 'rail-today', sidebar: 'tool-today-btn', group: 'work' }),
-  Object.freeze({ key: 'email', label: 'Email', rail: 'rail-email', sidebar: null, group: 'work' }),
+  Object.freeze({ key: 'email', label: 'Email', rail: 'rail-email', sidebar: 'email-section', launcher: 'rail-email', group: 'work' }),
   Object.freeze({ key: 'library', label: 'Library', rail: 'rail-archive', sidebar: 'tool-library-btn', group: 'work' }),
   Object.freeze({ key: 'notes', label: 'Notes', rail: 'rail-notes', sidebar: 'tool-notes-btn', group: 'work' }),
   Object.freeze({ key: 'tasks', label: 'Tasks', rail: 'rail-tasks', sidebar: 'tool-tasks-btn', group: 'work' }),

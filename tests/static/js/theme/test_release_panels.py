@@ -13,7 +13,10 @@ def test_major_panels_use_default_font_and_keyboard_controls(live_app, live_page
     # Brain lives in the More group, which starts folded.
     if page.locator('#sidebar').evaluate("el => el.classList.contains('hidden')"):
         page.locator('#hamburger-btn').click()
-    page.locator('#more-section .section-title').click()
+    # The fold state belongs to the account now, so an earlier run of this test
+    # on the shared app may have left More open.
+    if page.locator('#more-section').evaluate("el => el.classList.contains('collapsed')"):
+        page.locator('#more-section .section-title').click()
     expect(page.locator('#tool-memory-btn')).to_be_visible()
     for selector, modal in [('#tool-memory-btn', '#memory-modal'),
                             ('#tool-workbench-btn', '#workbench-modal'),

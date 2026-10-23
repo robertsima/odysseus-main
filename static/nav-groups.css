@@ -73,6 +73,28 @@ html[data-style="agamemnon"] .sidebar .nav-group > .section-header-flex { height
   html[data-style="agamemnon"] .sidebar .nav-group > .section-header-flex { height: 34px; }
 }
 
+/* Email is a row like the others, but its node is the whole Email section: the
+   header carries the title, the compose + and the unread dot. */
+.nav-group > #email-section.nav-email-row { display: block; margin: 0; padding: 0; border: 0; }
+.nav-group > #email-section .section-header-flex {
+  display: flex; align-items: center; gap: 10px; height: auto; min-height: inherit; margin: 0; padding: 0 8px 0 10px; box-sizing: border-box;
+}
+.nav-group > #email-section .section-title,
+html[data-style="agamemnon"] .sidebar .nav-group > #email-section .section-title {
+  display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; opacity: 1; cursor: pointer;
+  font-size: 13px; font-weight: inherit; letter-spacing: 0; text-transform: none; color: inherit;
+}
+.nav-group > #email-section #email-section-title > span { font-size: 13px !important; font-weight: inherit !important; }
+html[data-style="agamemnon"] .sidebar .nav-group > #email-section #email-section-title,
+html[data-style="agamemnon"] .sidebar .nav-group > #email-section #email-section-title > span { font-size: 14px !important; }
+.nav-group > #email-section .section-title svg { width: 15px; height: 15px; flex: none; opacity: 0.6; }
+.nav-group > #email-section { min-height: 34px; display: flex; flex-direction: column; justify-content: center; }
+html[data-style="agamemnon"] .sidebar .nav-group > #email-section { min-height: 38px; }
+@media (max-width: 768px) {
+  .nav-group > #email-section, html[data-style="agamemnon"] .sidebar .nav-group > #email-section { min-height: 44px; }
+  #email-compose-btn { opacity: 0.7; }
+}
+
 /* A group the layout leaves empty says so, and is a drop target. */
 .nav-group-empty {
   display: none; margin: 2px 8px 4px; padding: 8px 10px; border: 1px dashed var(--border); border-radius: 6px;
