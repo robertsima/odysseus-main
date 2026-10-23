@@ -845,6 +845,8 @@ app.include_router(setup_editor_draft_routes())
 # Outcomes: one record per intent, linked to the systems of record
 from routes.outcome_routes import setup_outcome_routes
 app.include_router(setup_outcome_routes())
+from routes.library_routes import setup_library_routes
+app.include_router(setup_library_routes())
 from routes.today_routes import setup_today_routes
 app.include_router(setup_today_routes())
 
