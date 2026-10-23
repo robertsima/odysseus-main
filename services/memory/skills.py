@@ -26,6 +26,7 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 import time
 from typing import Dict, Iterable, List, Optional
 
@@ -143,6 +144,9 @@ class SkillsManager:
         self.usage_file = os.path.join(self.skills_root, "_usage.json")
         self.legacy_file = os.path.join(data_dir, "skills.json")  # back-compat
         os.makedirs(self.skills_root, exist_ok=True)
+        # Usage counters are read-modify-write on one JSON file, and prompt
+        # builds record them from a background thread.
+        self._usage_lock = threading.RLock()
 
     # ----------------------------------------------------------------------
     # Path helpers
@@ -199,7 +203,22 @@ class SkillsManager:
         """
         if not owner:
             return None
+        # A skill is written to <category>/<slug(name)>/SKILL.md, so look at
+        # that depth first instead of walking the whole tree (2s on a NAS).
+        # Only a name with no match there falls back to the full walk.
+        found = False
         shipped_seen = False
+        for path in self._candidate_skill_files(name):
+            sk = self._read_skill(path)
+            if not sk or sk.name != name:
+                continue
+            found = True
+            if (sk.owner or "") == owner:
+                return owner
+            if is_app_shipped_source(sk.source):
+                shipped_seen = True
+        if found:
+            return None if shipped_seen else owner
         for path in self._iter_skill_files():
             sk = self._read_skill(path)
             if not sk or sk.name != name:
@@ -209,6 +228,21 @@ class SkillsManager:
             if is_app_shipped_source(sk.source):
                 shipped_seen = True
         return None if shipped_seen else owner
+
+    def _candidate_skill_files(self, name: str) -> List[str]:
+        """SKILL.md files at the canonical <category>/<slug(name)> depth."""
+        slug = slugify(name, fallback="skill")
+        out: List[str] = []
+        try:
+            with os.scandir(self.skills_root) as it:
+                categories = [e.path for e in it if e.is_dir(follow_symlinks=False)]
+        except OSError:
+            return out
+        for cat in categories:
+            path = os.path.join(cat, slug, "SKILL.md")
+            if os.path.isfile(path):
+                out.append(path)
+        return out
 
     def _usage_entry(self, usage: Dict[str, Dict], name: str, owner: Optional[str] = None) -> Dict:
         key = self._usage_key(name, owner)
@@ -722,21 +756,43 @@ class SkillsManager:
         return False
 
     def record_use(self, skill_id: str, owner: Optional[str] = None) -> None:
-        usage = self._load_usage()
-        key = self._usage_key(skill_id, self._usage_owner(skill_id, owner))
-        entry = usage.setdefault(key, {"uses": 0, "last_used": None})
-        entry["uses"] = int(entry.get("uses", 0)) + 1
-        entry["last_used"] = int(time.time())
-        self._save_usage(usage)
+        with self._usage_lock:
+            usage = self._load_usage()
+            key = self._usage_key(skill_id, self._usage_owner(skill_id, owner))
+            entry = usage.setdefault(key, {"uses": 0, "last_used": None})
+            entry["uses"] = int(entry.get("uses", 0)) + 1
+            entry["last_used"] = int(time.time())
+            self._save_usage(usage)
+
+    def record_uses_in_background(self, skill_ids: Iterable[str],
+                                  owner: Optional[str] = None) -> threading.Thread:
+        """Count several uses on a worker thread and return it at once.
+
+        The prompt builder runs on the event loop; the owner lookup and the
+        sidecar write touch the (possibly network) disk. Failures are logged.
+        """
+        names = [n for n in skill_ids if n]
+
+        def run():
+            for n in names:
+                try:
+                    self.record_use(n, owner=owner)
+                except Exception as e:
+                    logger.warning("Failed to record use of skill %s: %s", n, e)
+
+        t = threading.Thread(target=run, name="skill-usage", daemon=True)
+        t.start()
+        return t
 
     def record_view(self, skill_id: str, owner: Optional[str] = None) -> None:
         """Count an agent reading the full skill. `uses` counts showing it."""
-        usage = self._load_usage()
-        key = self._usage_key(skill_id, self._usage_owner(skill_id, owner))
-        entry = usage.setdefault(key, {"uses": 0, "last_used": None})
-        entry["views"] = int(entry.get("views", 0)) + 1
-        entry["last_viewed"] = int(time.time())
-        self._save_usage(usage)
+        with self._usage_lock:
+            usage = self._load_usage()
+            key = self._usage_key(skill_id, self._usage_owner(skill_id, owner))
+            entry = usage.setdefault(key, {"uses": 0, "last_used": None})
+            entry["views"] = int(entry.get("views", 0)) + 1
+            entry["last_viewed"] = int(time.time())
+            self._save_usage(usage)
 
     # ----------------------------------------------------------------------
     # Reading a single skill (used by the skill_view tool)
