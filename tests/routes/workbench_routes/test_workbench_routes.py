@@ -37,7 +37,7 @@ def env(tmp_path, monkeypatch):
 
 
 def _req():
-    return SimpleNamespace(state=SimpleNamespace(), app=SimpleNamespace(state=SimpleNamespace()))
+    return SimpleNamespace(state=SimpleNamespace(), headers={}, app=SimpleNamespace(state=SimpleNamespace()))
 
 
 def test_every_route_is_admin_gated(monkeypatch):

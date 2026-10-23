@@ -10,6 +10,14 @@ from src import agent_activity as act
 from src import constants
 
 
+def _data(frame):
+    """The JSON of an SSE frame's data line, or None for a comment frame."""
+    for line in frame.splitlines():
+        if line.startswith("data: "):
+            return json.loads(line[6:])
+    return None
+
+
 @pytest.fixture
 def data_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(constants, "DATA_DIR", str(tmp_path))
@@ -107,7 +115,7 @@ async def test_subscribe_replays_then_streams_live(data_dir):
     act.publish("s9", "tool_start", "other session")  # must not leak in
     act.publish("s8", "tool_result", "live two")
     await asyncio.wait_for(task, timeout=2)
-    payloads = [json.loads(f[6:]) for f in frames if f.startswith("data: ")]
+    payloads = [_data(f) for f in frames if _data(f) is not None]
     titles = [p.get("title") for p in payloads if "title" in p]
     assert titles == ["before", "live one", "live two"]
     assert any(p.get("type") == "ready" for p in payloads)
@@ -129,7 +137,7 @@ async def test_global_feed_filters_by_owner_and_emits_heartbeats(data_dir):
     act.publish("sB", "message", "bob's private thing", owner="bob")
     act.publish("sC", "message", "unowned is visible")
     await asyncio.wait_for(task, timeout=2)
-    titles = [json.loads(f[6:])["title"] for f in frames if f.startswith("data: ") and "title" in f]
+    titles = [_data(f)["title"] for f in frames if _data(f) and "title" in _data(f)]
     assert titles == ["alice sees this", "unowned is visible"]
 
 
