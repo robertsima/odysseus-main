@@ -652,6 +652,10 @@ def setup_agents_routes(session_manager) -> APIRouter:
                     ev = json.loads(data[6:])
                 except ValueError:
                     continue
+                if isinstance(ev, dict) and ev.get("type") == "ready":
+                    # The shared feed's resume cursor names every user's sessions.
+                    yield "data: " + json.dumps({"type": "ready"}) + "\n\n"
+                    continue
                 sid = ev.get("session_id") if isinstance(ev, dict) else None
                 if sid and sid not in owned_ids and time.time() - state["checked"] > 5:
                     # A worker launched during the stream is a new chat of ours.
@@ -660,7 +664,7 @@ def setup_agents_routes(session_manager) -> APIRouter:
                         owned_ids.update(session_manager.get_sessions_for_user(user))
                     except Exception:
                         pass
-                if not sid or sid in owned_ids or ev.get("type") == "ready":
+                if not sid or sid in owned_ids:
                     yield frame
 
         return StreamingResponse(gen(), media_type="text/event-stream",

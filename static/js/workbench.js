@@ -1505,6 +1505,11 @@ async function loadRoots() {
 const COMMITS_PAGE = 50;
 const COMMITS_MAX = 200;   // src/repo_inspect.MAX_COMMITS
 const REPO_STALE_DEBOUNCE_MS = 250;
+// A tab coming back reopens the Activity stream, which replays what it missed;
+// waiting this long folds those replayed events into the same refresh.
+const REPO_VISIBLE_DEBOUNCE_MS = 800;
+// Busy agents report writes every second; Changes is read again at most this often.
+const REPO_REFRESH_MIN_MS = 3000;
 const isAbort = (e) => !!e && e.name === 'AbortError';
 const emptyCommitsPage = () => ({ hasMore: false, total: null, nextOffset: null, loadingMore: false, moreError: '' });
 const hasRepoContext = () => !!(state.repoCtx.path || state.repoCtx.taskId);
@@ -1518,6 +1523,7 @@ function newContext() {
   state.repoRefresh = null;
   state.repoRefreshing = false;
   state.repoDirty = false;
+  clearTimeout(_repoStaleTimer); _repoStaleTimer = null; _repoStaleAt = 0;
   state.filesLoading = false;
   state.commitsLoading = false;
   state.commitsPage = emptyCommitsPage();
@@ -1725,20 +1731,36 @@ async function loadMoreCommits() {
 // into view, and the Activity half announcing that a checkout may have
 // changed. While the window is closed or hidden the change is only noted.
 let _repoStaleTimer = null;
-function noteRepoStale(reason = 'event') {
-  if (!hasRepoContext()) return;
+let _repoStaleAt = 0;
+const repoShown = () => {
   const tab = state.prefs.tab;
-  if (!isOpen() || document.hidden || (tab !== 'changes' && tab !== 'commits')) { state.repoDirty = true; return; }
-  clearTimeout(_repoStaleTimer);
-  _repoStaleTimer = setTimeout(() => { _repoStaleTimer = null; refreshRepo(reason); }, REPO_STALE_DEBOUNCE_MS);
+  return isOpen() && !document.hidden && (tab === 'changes' || tab === 'commits');
+};
+/** Events arriving while a refresh is scheduled join it; one arriving just
+ *  after a refresh waits out REPO_REFRESH_MIN_MS. */
+function noteRepoStale(reason = 'event', delay = REPO_STALE_DEBOUNCE_MS) {
+  if (!hasRepoContext()) return;
+  if (!repoShown()) { state.repoDirty = true; return; }
+  if (_repoStaleTimer) return;
+  const wait = Math.max(delay, REPO_REFRESH_MIN_MS - (Date.now() - _repoStaleAt));
+  _repoStaleTimer = setTimeout(() => {
+    _repoStaleTimer = null;
+    if (!hasRepoContext()) return;
+    if (!repoShown()) { state.repoDirty = true; return; }
+    _repoStaleAt = Date.now();
+    refreshRepo(reason);
+  }, wait);
+}
+// A shell or write tool in some other chat says nothing about this checkout;
+// a finished run, a file change or a commit anywhere may.
+function repoStaleRelevant(detail) {
+  if (!detail || detail.reason !== 'tool_result') return true;
+  return !detail.session_id || detail.session_id === state.sessionId;
 }
 function watchRepoRefresh() {
-  document.addEventListener('wb:repo-stale', () => noteRepoStale('stale'));
+  document.addEventListener('wb:repo-stale', (e) => { if (repoStaleRelevant(e.detail)) noteRepoStale('stale'); });
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden || !hasRepoContext()) return;
-    const tab = state.prefs.tab;
-    if (isOpen() && (tab === 'changes' || tab === 'commits')) refreshRepo('visible');
-    else state.repoDirty = true;
+    if (!document.hidden) noteRepoStale('visible', REPO_VISIBLE_DEBOUNCE_MS);
   });
 }
 
@@ -2149,6 +2171,8 @@ export function open() {
   }
   connect();
   loadRoots();
+  // open() reads the checkout itself, so setTab must not start a second pass.
+  state.repoDirty = false;
   setTab(state.prefs.tab || 'changes');
   if (hasRepoContext()) refreshRepo('open');
 }

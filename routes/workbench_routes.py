@@ -285,7 +285,7 @@ def setup_workbench_routes() -> APIRouter:
         pos = None
         if key == activity.GLOBAL_FEED:
             pos = activity.merge_cursors(activity.decode_cursor(cursor), activity.decode_cursor(last_id))
-        elif last_id.isdigit():
+        elif last_id.isascii() and last_id.isdigit() and len(last_id) < 19:
             since = max(since, int(last_id))
         gen = activity.subscribe(key, since_seq=since, cursor=pos)
         return StreamingResponse(gen, media_type="text/event-stream",

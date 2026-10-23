@@ -866,7 +866,9 @@ def _global_missed(cursor: Dict[str, Any], owner: Optional[str]) -> Tuple[List[d
     for name in names:
         have = known.get(name)
         rows = history(name, since_seq=have or 0, limit=MAX_EVENTS_PER_SESSION)
-        tops[name] = max(have or 0, last_seq(name))
+        # The position comes from the rows read: an event published after this
+        # read is still queued for the live loop and must not count as covered.
+        tops[name] = max([have or 0] + [ev.get("seq", 0) for ev in rows])
         if have is None:
             rows = [ev for ev in rows if (ev.get("ts") or 0) > cursor["t"]]  # a session born after the cursor
         elif have and rows and rows[0].get("seq", 0) > have + 1:

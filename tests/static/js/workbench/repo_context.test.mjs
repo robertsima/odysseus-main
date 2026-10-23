@@ -277,3 +277,54 @@ test('the scope header names repository, branch, base and last-updated time', as
   assert.ok(header.querySelector('[data-wb-act="refresh-repo"]'));
   assert.ok(header.querySelector('details'));
 });
+
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const stale = (detail) => document.dispatchEvent(new CustomEvent('wb:repo-stale', { detail }));
+
+test('shell results from another chat do not refresh this checkout', async () => {
+  state.sessionId = 's1';
+  await repo.setRepo(A, { remember: false });
+  changesCalls.length = 0;
+  stale({ session_id: 's9', run_id: 'other', reason: 'tool_result' });
+  await wait(400);
+  assert.equal(changesCalls.length, 0);
+});
+
+test('busy agents refresh Changes at a bounded rate, and the last change is still read', async () => {
+  await repo.setRepo(A, { remember: false });
+  changesCalls.length = 0;
+  stale({ session_id: 's1', run_id: 'r', reason: 'run_finished' });
+  await wait(400);
+  assert.equal(changesCalls.length, 1);
+  stale({ session_id: 's1', run_id: 'r2', reason: 'run_finished' });
+  await wait(400);
+  assert.equal(changesCalls.length, 1, 'a second event right after a refresh waits');
+  await wait(3000);
+  assert.equal(changesCalls.length, 2, 'the waiting event is read once the interval passes');
+});
+
+test('opening the window with changes noted while closed reads the checkout once', async () => {
+  fake.route('GET', '/api/workbench/repo/roots', () => ({ repos: [] }));
+  await repo.setRepo(A, { remember: false });
+  changesCalls.length = 0;
+  state.repoDirty = true;
+  workbench.open();
+  await wait(400);
+  assert.equal(changesCalls.length, 1);
+});
+
+test('coming back to the tab plus replayed activity reads the checkout once', async () => {
+  await repo.setRepo(A, { remember: false });
+  changesCalls.length = 0;
+  const setHidden = (hidden) => {
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
+    document.dispatchEvent(new Event('visibilitychange'));
+  };
+  setHidden(true);
+  setHidden(false);
+  await wait(100);
+  stale({ session_id: 's1', run_id: 'r', reason: 'run_finished' });   // replayed by the reopened stream
+  await wait(1200);
+  assert.equal(changesCalls.length, 1);
+  Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
+});
