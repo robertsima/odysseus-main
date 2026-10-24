@@ -50,7 +50,8 @@ fake.route('POST', '/api/agents/launch', ({ body }) => {
     ? jsonResponse({ error: 'x', code: 'WORKSPACE_REQUIRED', blocker: state.blocker }, { status: 409 })
     : { run_id: 'r1', session_id: 'w1', session_name: 'Reader worker' };
 });
-fake.route('POST', '/api/agents/profiles/Reader/chat', () => ({ session_id: 'new-chat' }));
+let chatReply = () => ({ session_id: 'new-chat' });
+fake.route('POST', '/api/agents/profiles/Reader/chat', () => chatReply());
 
 function mount(opts = {}) {
   const host = document.getElementById('host');
@@ -170,12 +171,38 @@ test('a launch the server refuses with a blocker shows it in the sheet instead o
   state.refuseFirst = false;
 });
 
-test('Talk to agent creates the chat through the route and opens it', async () => {
+test('Talk to agent resumes through the route and opens it', async () => {
   const sid = await actions.talkToAgent('Reader');
   assert.equal(sid, 'new-chat');
   assert.deepEqual(opened, ['new-chat']);
   const call = fake.calls.find((c) => c.method === 'POST' && c.url.pathname === '/api/agents/profiles/Reader/chat');
-  assert.deepEqual(JSON.parse(call.body), { from_session: 'chat-1' });
+  assert.deepEqual(JSON.parse(call.body), { from_session: 'chat-1', new_chat: false });
+});
+
+test('New chat explicitly requests another conversation', async () => {
+  await actions.talkToAgent('Reader', { newChat: true });
+  const call = fake.calls.filter((c) => c.method === 'POST' && c.url.pathname === '/api/agents/profiles/Reader/chat').at(-1);
+  assert.equal(JSON.parse(call.body).new_chat, true);
+});
+
+for (const customOpen of [false, true]) test(`a delayed chat open preserves navigation with custom callback=${customOpen}`, async () => {
+  const previous = window.sessionModule.getCurrentSessionId;
+  let current = 'chat-1';
+  window.sessionModule.getCurrentSessionId = () => current;
+  const count = opened.length;
+  let finish;
+  chatReply = () => new Promise((resolve) => { finish = resolve; });
+  try {
+    const pending = actions.talkToAgent('Reader', customOpen ? { open: async (sid) => opened.push(sid) } : {});
+    await waitFor(() => finish, { what: 'pending chat navigation' });
+    current = 'another-chat';
+    finish({ session_id: 'new-chat' });
+    await pending;
+    assert.equal(opened.length, count);
+  } finally {
+    window.sessionModule.getCurrentSessionId = previous;
+    chatReply = () => ({ session_id: 'new-chat' });
+  }
 });
 
 test('quick actions fill the composer, with placeholders filled from the chat context', async () => {

@@ -13,7 +13,7 @@
  * answers (the loadout's agent in Agent mode, the shared Prompt persona
  * otherwise), the project, the open document and what the chat may do. Its
  * Change button opens the settings panel. With a document open it also holds
- * the target selector (this document / this project / general conversation),
+ * the document inclusion control (include / leave out),
  * saved as the chat's doc_target. The persona, workspace and context-use
  * indicators are moved into it (nodes and handlers unchanged). The panel
  * floats over the conversation above the composer, so opening it never
@@ -146,9 +146,8 @@ function restore(settings, { fromNewChat = false } = {}) {
 // chat.js). They move into the strip once; render() never rewrites them.
 const MOVED_NODES = ['chat-context-pill', 'character-indicator-btn', 'workspace-indicator-btn'];
 const DOC_TARGETS = [
-  ['document', 'This document'],
-  ['project', 'This project'],
-  ['general', 'General conversation'],
+  ['document', 'Include document'],
+  ['general', 'Leave document out'],
 ];
 
 function ensureLine() {
@@ -170,6 +169,15 @@ function ensureLine() {
   const slot = line.querySelector('[data-ctx="slot"]');
   MOVED_NODES.forEach((id) => { const n = $(id); if (n) slot.appendChild(n); });
   line.addEventListener('click', onLineClick);
+  line.addEventListener('keydown', (e) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key) || !e.target.matches('[data-csl="target"]')) return;
+    e.preventDefault();
+    const buttons = [...line.querySelectorAll('[data-csl="target"]')];
+    const index = e.key === 'Home' ? 0 : e.key === 'End' ? buttons.length - 1
+      : (buttons.indexOf(e.target) + (e.key === 'ArrowRight' ? 1 : -1) + buttons.length) % buttons.length;
+    buttons[index].click();
+    line.querySelector(`[data-target="${buttons[index].dataset.target}"]`)?.focus();
+  });
   return line;
 }
 const part = (line, name) => line.querySelector(`[data-ctx="${name}"]`);
@@ -199,6 +207,8 @@ function openDoc() {
  *  was entered never aims the chat at it on its own. */
 function effectiveTarget() {
   const saved = state.localTarget || ((state.data && state.data.settings) || {}).doc_target;
+  // Legacy "project" never changed workspace access; it only excluded the doc.
+  if (saved === 'project') return 'general';
   if (DOC_TARGETS.some(([key]) => key === saved)) return saved;
   const doc = openDoc();
   return doc && doc.id !== state.carriedDoc ? 'document' : 'general';
@@ -251,6 +261,8 @@ function accessIsCustom(d, s) {
 function render() {
   const line = ensureLine();
   if (!line) return;
+  const focusedTarget = line.contains(document.activeElement)
+    ? document.activeElement?.dataset?.target : null;
   const d = state.data || {};
   const s = d.settings || {};
   const context = d.context || null;
@@ -273,7 +285,7 @@ function render() {
   const project = context && context.project;
   const wsName = nodeShown('workspace-indicator-btn') ? (($('workspace-indicator-name') || {}).textContent || '').trim() : '';
   if (project && project.toLowerCase() !== wsName.toLowerCase()) bits.push(`<span class="ctx-project" title="Project">${esc(project)}</span>`);
-  if (doc && target === 'document') bits.push(`<span class="ctx-doc" title="This document is part of every message">Editing ${esc(doc.title)}</span>`);
+  if (doc && target === 'document') bits.push(`<span class="ctx-doc" title="The open document and selected text are included with your messages">Document: ${esc(doc.title)}</span>`);
   part(line, 'main').innerHTML = bits.join(dot);
 
   // Line 2: what the chat may do, and the target selector when a document is open
@@ -295,8 +307,9 @@ function render() {
     : '';
   part(line, 'access').innerHTML = accessHtml + links.join('');
   part(line, 'target').innerHTML = doc
-    ? `<span class="ctx-seg" role="radiogroup" aria-label="What this chat is about">${DOC_TARGETS.map(([key, label]) =>
+    ? `<span class="ctx-seg" role="radiogroup" aria-label="Include the open document in messages">${DOC_TARGETS.map(([key, label]) =>
       `<button type="button" role="radio" aria-checked="${key === target}" class="ctx-seg-btn${key === target ? ' on' : ''}" data-csl="target" data-target="${key}" title="${esc(doc.title)}">${esc(label)}</button>`).join('')}</span>`
+      + '<span class="ctx-document-help">Applies to the open document and selected text only. Workspace and tool access stay unchanged.</span>'
     : '';
   part(line, 'change').innerHTML = state.sessionId
     ? '<button type="button" class="ctx-change-btn" data-csl="panel" title="Change who answers, approvals, tools and privacy for this chat">Change</button>'
@@ -316,6 +329,7 @@ function render() {
     || !!(summary && accessIsCustom(d, s));
   line.hidden = !something;
   line.classList.toggle('ctx-no-access', !summary);
+  if (focusedTarget) line.querySelector(`[data-csl="target"][data-target="${focusedTarget}"]`)?.focus();
 }
 
 async function onLineClick(e) {
@@ -333,6 +347,7 @@ async function onLineClick(e) {
 
 /** The segmented control: remember the pick here at once, then save it on the chat. */
 function pickTarget(value) {
+  if (value === 'project') value = 'general';
   if (!DOC_TARGETS.some(([key]) => key === value)) return;
   state.localTarget = value;
   render();

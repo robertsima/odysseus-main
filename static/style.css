@@ -42791,6 +42791,12 @@ body:has(#agents-dashboard.modal-left-docked:not(.hidden)) .edge-dock-resize-han
 @media (prefers-reduced-motion: reduce) { .ag-live.on i { animation: none; } }
 .ag-inline-link { margin: 0; padding: 0; border: 0; background: none; color: var(--wb-accent); font: inherit; text-decoration: underline; cursor: pointer; }
 .ag-head-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; margin-left: auto; }
+.ag-newconv-list li { display: flex; align-items: center; gap: 6px; }
+.ag-newconv-list .ag-newconv-pick { flex: 1; min-width: 0; }
+.today-scope { font-size: 12px; line-height: 1.5; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 14px; }
+.today-scope p { margin: 0 0 6px; }
+.today-scope p:last-child { margin-bottom: 0; }
+
 .ag-refresh-error { flex-shrink: 0; padding: 7px 10px; border: 1px solid color-mix(in srgb, var(--wb-bad) 45%, var(--border)); border-radius: var(--wb-r-sm); background: color-mix(in srgb, var(--wb-bad) 8%, var(--panel)); color: var(--wb-bad); }
 .ag-refresh-error[hidden] { display: none; }
 .ag-body { flex: 1; min-height: 0; display: grid; grid-template-columns: clamp(250px, var(--ag-fleet-width, 380px), 58%) 9px minmax(0, 1fr); gap: 0; }
@@ -43866,6 +43872,10 @@ details.admin-ep-advanced[open] > summary { opacity: 0.8; }
 .today-clarify p { margin: 0 0 8px; }
 .today-clarify-options { display: flex; flex-wrap: wrap; gap: 6px; }
 .today-lists { display: flex; flex-direction: column; gap: 18px; }
+.today-scope { padding: 10px 12px; border: 1px solid var(--wb-line); background: var(--wb-hover); font-size: 12px; line-height: 1.5; }
+.today-scope p { margin: 0; }
+.today-scope p + p { margin-top: 5px; }
+.today-scope a { color: var(--fg); text-decoration: underline; text-underline-offset: 3px; }
 .today-section-title { margin: 0 0 4px; font-size: 12px; font-weight: 600; color: var(--wb-muted); }
 .today-list, .today-plain { list-style: none; margin: 0; padding: 0; }
 .today-item { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px 12px; padding: 11px 0 11px 12px; border-top: 1px solid var(--wb-line); border-left: 2px solid transparent; margin-left: -14px; }

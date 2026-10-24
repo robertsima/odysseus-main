@@ -68,7 +68,9 @@
 }
 .ctx-link { font-family: var(--wb-mono); }
 
-/* Target selector: one choice of three. */
+/* Document inclusion is independent of workspace and tool access. */
+.ctx-target { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-width: 0; }
+.ctx-document-help { font-size: 11px; color: var(--fg); opacity: .8; max-width: 52ch; line-height: 1.4; }
 .ctx-seg { display: inline-flex; max-width: 100%; border: 1px solid color-mix(in srgb, var(--fg) 14%, transparent); border-radius: 6px; overflow: hidden; }
 .ctx-seg-btn {
   height: 22px; margin: 0; padding: 0 9px; border: 0; border-left: 1px solid color-mix(in srgb, var(--fg) 14%, transparent);

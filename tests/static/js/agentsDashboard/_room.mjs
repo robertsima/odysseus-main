@@ -32,7 +32,7 @@ const ROOM = `
   </div>
   <div id="toast"></div>`;
 
-export async function openRoom({ rows = [], profiles = [], chats = [], currentSession = null, personaTemplates = [] } = {}) {
+export async function openRoom({ rows = [], profiles = [], chats = [], historyChats = [], currentSession = null, personaTemplates = [] } = {}) {
   const dom = installDom();
   const fake = installFetchFake();
   after(async () => {
@@ -52,7 +52,7 @@ export async function openRoom({ rows = [], profiles = [], chats = [], currentSe
   };
   fake.route('GET', '/api/agents/overview', () => overview);
   fake.route('GET', '/api/agents/approvals', () => ({ approvals: [] }));
-  fake.route('GET', '/api/agents/history', () => ({ chats: [], total: 0 }));
+  fake.route('GET', '/api/agents/history', () => ({ chats: historyChats, total: historyChats.length }));
   fake.route('GET', '/api/agents/catalog', () => ({ tools: [], skills: [], mcp_servers: [], models: [], provider_limits: {} }));
   fake.route('GET', '/api/presets/templates', () => personaTemplates);
   fake.route('GET', '/api/agents/profiles/templates', () => ({ templates: [] }));

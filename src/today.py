@@ -401,6 +401,11 @@ def _outcome_open_url(o: Dict[str, Any], todoist: Optional[Dict[str, Any]]) -> O
         return _chat_url(chat)
     if todoist is not None:
         return _todoist_url(todoist)
+    task_ref = _link_ref(o, "todoist_task")
+    if task_ref:
+        from urllib.parse import quote
+
+        return f"https://app.todoist.com/app/task/{quote(task_ref, safe='')}"
     for kind, build in (("note", lambda r: f"/notes?id={r}"), ("calendar_event", lambda r: "/calendar"),
                         ("pull_request", str), ("url", str)):
         ref = _link_ref(o, kind)
@@ -484,10 +489,13 @@ def _naive(value: Any) -> Optional[datetime]:
 
 # ── the page ─────────────────────────────────────────────────────────────────
 
-async def _guarded(name: str, degraded: List[str], work: Awaitable, timeout: float) -> Any:
+async def _guarded(name: str, degraded: List[str], work: Awaitable, timeout: float,
+                   absent: Optional[List[str]] = None) -> Any:
     try:
         return await asyncio.wait_for(work, timeout)
     except _Absent:
+        if absent is not None:
+            absent.append(name)
         return None
     except Exception as exc:  # noqa: BLE001 - one dead source must not take the page down
         logger.warning("today: source %s failed: %s", name, exc or type(exc).__name__)
@@ -501,8 +509,9 @@ def _thread(fn: Callable, *args) -> Awaitable:
 
 async def build(ctx: Ctx) -> Dict[str, Any]:
     degraded: List[str] = []
+    absent: List[str] = []
     todoist, events, notes, outcomes, runs = await asyncio.gather(
-        _guarded("todoist", degraded, _fetch_todoist(ctx), TODOIST_TIMEOUT + 0.5),
+        _guarded("todoist", degraded, _fetch_todoist(ctx), TODOIST_TIMEOUT + 0.5, absent),
         _guarded("calendar", degraded, _thread(_read_calendar, ctx), SOURCE_TIMEOUT),
         _guarded("notes", degraded, _thread(_read_notes, ctx), SOURCE_TIMEOUT),
         _guarded("outcomes", degraded, _thread(_read_outcomes, ctx), SOURCE_TIMEOUT),
@@ -538,6 +547,11 @@ async def build(ctx: Ctx) -> Dict[str, Any]:
     shown, spill = today_rows[:TODAY_CAP], today_rows[TODAY_CAP:]
     nxt = (spill + rest)[:NEXT_CAP]
     return {"today": [r.item for r in shown], "next": [r.item for r in nxt], "degraded": degraded,
+            "scope": {"today_limit": TODAY_CAP, "next_limit": NEXT_CAP,
+                      "remaining": max(0, len(rows) - len(shown) - len(nxt))},
+            "sources": {"todoist": "restricted" if not ctx.todoist else
+                        "unavailable" if "todoist" in degraded else
+                        "not_configured" if "todoist" in absent else "ready"},
             "generated_at": _iso_z(ctx.now)}
 
 

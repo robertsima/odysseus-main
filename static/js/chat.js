@@ -2094,7 +2094,9 @@ function _personaNameForTurn() {
       if (sessionModule.clearStreamComplete) sessionModule.clearStreamComplete(sessionModule.getCurrentSessionId());
 
       // Check for document selection context before consuming display override
-      const docSel = !approvalForSend && documentModule
+      const docTargetForSend = (window.chatSettingsModule?.docTarget?.() || {}).target || 'document';
+      const documentIsTarget = docTargetForSend === 'document';
+      const docSel = !approvalForSend && documentIsTarget && documentModule
         ? documentModule.getSelectionContext()
         : null;
       if (docSel) {
@@ -2283,8 +2285,6 @@ function _personaNameForTurn() {
       }
       // What the open document stands for (context strip). Only "document"
       // saves it and sends its id; an approval continuation keeps its document.
-      const docTargetForSend = (window.chatSettingsModule?.docTarget?.() || {}).target || 'document';
-      const documentIsTarget = docTargetForSend === 'document';
       const shouldSaveActiveDoc = !approvalForSend
         ? documentIsTarget
         : !!(approvalForSend.document_id && approvalForSend.document_id === activeDocIdForSend);

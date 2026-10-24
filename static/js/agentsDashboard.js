@@ -261,20 +261,22 @@ function moveConversation(sid, dir) {
 
 // ── new agent conversation ────────────────────────────────────────────────
 function newConversationHtml() {
-  const agents = state.profiles.map((p) => `<li><button type="button" class="ag-newconv-pick" data-ag="new-conversation-pick" data-profile="${esc(p.name)}"${state.newConvBusy ? ' disabled' : ''}><b>${esc(p.name)}</b>${p.description ? `<small>${esc(String(p.description).slice(0, 90))}</small>` : ''}</button></li>`).join('');
+  const agents = state.profiles.map((p) => `<li><button type="button" class="ag-newconv-pick" data-ag="new-conversation-pick" data-profile="${esc(p.name)}"${state.newConvBusy ? ' disabled' : ''}><b>${esc(p.name)}</b>${p.description ? `<small>${esc(String(p.description).slice(0, 90))}</small>` : ''}</button><button type="button" class="wb-btn wb-btn-ghost" data-ag="new-conversation-pick" data-profile="${esc(p.name)}" data-new-chat="true"${state.newConvBusy ? ' disabled' : ''} aria-label="New chat with ${esc(p.name)}">New chat</button></li>`).join('');
   return `<div class="ag-newconv wb-card" id="ag-newconv" role="group" aria-label="New agent conversation">
-    <div class="ag-newconv-head"><strong>New agent conversation</strong><button type="button" class="wb-icon-btn" data-ag="new-conversation-close" aria-label="Close">✕</button></div>
-    <p class="wb-hint">Pick an agent. This opens a chat of its own that stays in this list until you archive it. It replies when you write to it; it does not work in the background.</p>
+    <div class="ag-newconv-head"><strong>Chat with an agent</strong><button type="button" class="wb-icon-btn" data-ag="new-conversation-close" aria-label="Close">✕</button></div>
+    <p class="wb-hint">Pick an agent to keep its active conversation, or start one if this is your first visit. New chat starts a separate conversation. Agents reply when you message them.</p>
     ${agents ? `<ul class="ag-newconv-list">${agents}</ul>` : '<p class="wb-hint">No agents yet. Define them under Settings › Agents.</p>'}
   </div>`;
 }
-async function startConversation(name) {
+async function startConversation(name, newChat = false) {
   if (state.newConvBusy) return;
   state.newConvBusy = true;
+  const selectedBefore = state.selected;
   try {
     // Stay in Phalanx: the new chat is selected here; Open chat goes to it.
-    const sid = await agentActions.talkToAgent(name, { open: async () => {} });
+    const sid = await agentActions.talkToAgent(name, { open: async () => {}, newChat, fromSession: selectedBefore });
     if (!sid) return;
+    if (state.selected !== selectedBefore) return;
     state.selected = sid; state.bucket = 'all'; state.filter = ''; state.fleetPage = 0;
     state.detailTab = 'overview'; state.events.delete(sid);
     await refresh();
@@ -541,7 +543,7 @@ function render() {
   const viewButtons = aside
     ? '<button type="button" class="wb-btn wb-btn-ghost" data-ag="fleet-view">← Fleet</button>'
     : '<button type="button" class="wb-btn wb-btn-ghost" data-ag="history-view" title="Every agent chat, however old">History</button><button type="button" class="wb-btn wb-btn-ghost" data-ag="archive-view">Archived</button><button type="button" class="wb-btn wb-btn-ghost" data-ag="loadouts-view" title="The reusable agent definitions chats and workers are based on">Loadouts</button>';
-  const headActions = `${viewButtons}<button type="button" class="wb-btn wb-btn-primary" data-ag="new-conversation" aria-expanded="${state.newConvOpen ? 'true' : 'false'}" title="Open a chat with a saved agent. It answers when you write to it.">New agent conversation</button><button type="button" class="wb-btn" data-ag="launch" title="The agent works separately and its result returns to a chat you choose">Assign a task</button>${!aside && workbenchAvailable() ? '<button type="button" class="wb-btn wb-btn-ghost" data-ag="workbench" title="Repository changes, commits and PRs">Workbench</button>' : ''}`;
+  const headActions = `<div class="ag-navigation" role="group" aria-label="Agent views">${viewButtons}${!aside && workbenchAvailable() ? '<button type="button" class="wb-btn wb-btn-ghost" data-ag="workbench" title="Repository changes, commits and PRs">Workbench</button>' : ''}</div><div class="ag-start-actions" role="group" aria-label="Start agent work"><button type="button" class="wb-btn wb-btn-primary ag-start-action" data-ag="new-conversation" aria-expanded="${state.newConvOpen ? 'true' : 'false'}"><span>Chat with agent</span><small>Replies when you message</small></button><button type="button" class="wb-btn ag-start-action" data-ag="launch"><span>Assign agent task</span><small>Works separately, returns results here</small></button></div>`;
   const viewTitle = state.configOpen ? "This chat's settings" : state.loadoutsView ? 'Loadouts' : state.historyView ? 'Agent chats' : state.archiveView ? 'Archived agents' : '';
   // One header row. It used to carry a second window title ("Mission floor",
   // under a title bar already reading "Agent Control Room"), and an Expand
@@ -607,7 +609,7 @@ function historyHtml() {
       </div>
       <div class="ag-history-actions">
         ${isCurrentChat(c.id) ? '<span class="wb-hint">This chat</span>' : `<button type="button" class="wb-btn wb-btn-sm wb-btn-primary" data-ag="open-chat" data-sid="${esc(c.id)}">Continue</button>`}
-        ${c.profile ? agentActions.actionButtonsHtml(c.profile) : ''}
+        ${c.profile ? agentActions.actionButtonsHtml(c.profile, { talk: false }) : ''}
       </div>
     </li>`).join('');
   const body = h.error ? `<div class="wb-empty">${esc(h.error)}</div>`
@@ -784,7 +786,7 @@ function fleetHtml() {
     return group(solo ? '' : label, `${items.length} tree${items.length === 1 ? '' : 's'}`, items.map((row) => treeHtml(row, kids)), key === 'attention' ? ' ag-group-attn' : '');
   }).join('');
   if (html) return `${html}${pages > 1 ? `<nav class="ag-fleet-pages" aria-label="Fleet pages"><button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="fleet-page" data-page="${state.fleetPage - 1}"${state.fleetPage === 0 ? ' disabled' : ''}>← Newer</button><span>${state.fleetPage * FLEET_PAGE_SIZE + 1}–${Math.min(candidates.length, (state.fleetPage + 1) * FLEET_PAGE_SIZE)} of ${candidates.length}</span><button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="fleet-page" data-page="${state.fleetPage + 1}"${state.fleetPage >= pages - 1 ? ' disabled' : ''}>Older →</button></nav>` : ''}`;
-  if (!state.rows.length) return '<div class="wb-empty">No agent conversations yet. Use New agent conversation to talk to an agent, or Assign a task to have one work separately.</div>';
+  if (!state.rows.length) return '<div class="wb-empty">No agent conversations yet. Use Chat with agent to talk to one, or Assign agent task to have one work separately.</div>';
   if (state.bucket !== 'all') {
     const label = (BUCKETS.find(([k]) => k === state.bucket) || [, ''])[1];
     return `<div class="wb-empty">Nothing in “${label}”. <button type="button" class="ag-inline-link" data-ag="bucket" data-bucket="all">Show all</button></div>`;
@@ -1695,7 +1697,7 @@ async function onClick(e) {
       if (leavingArchive) await refresh();
     }
     else if (act === 'new-conversation-close') { state.newConvOpen = false; render(); $('agents-dashboard')?.querySelector('[data-ag="new-conversation"]')?.focus(); }
-    else if (act === 'new-conversation-pick') await startConversation(b.dataset.profile);
+    else if (act === 'new-conversation-pick') await startConversation(b.dataset.profile, b.dataset.newChat === 'true');
     else if (act === 'move-up' || act === 'move-down') moveConversation(b.dataset.sid, act === 'move-up' ? -1 : 1);
     else if (act === 'launch-close') { state.launchOpen = false; state.launchProfile = null; state.launchSnap = null; render(); }
     else if (act === 'bucket') {
