@@ -13,6 +13,8 @@ pytestmark = pytest.mark.browser
 ])
 def test_launch_actions_show_their_difference_without_clipping(open_app, width, style, theme):
     page = open_app(width, style=style, theme=theme)
+    page.route('**/api/agents/overview*', lambda route: route.fulfill(json={
+        **route.fetch().json(), 'profiles': [{'name': 'Reader', 'description': 'Reads files'}]}))
     open_agents(page)
     for action in ('new-conversation', 'launch'):
         selector = f'#agents-dashboard .ag-start-actions [data-ag="{action}"]'
@@ -25,3 +27,8 @@ def test_launch_actions_show_their_difference_without_clipping(open_app, width, 
     page.locator('[data-ag="new-conversation"]').press('Enter')
     page.wait_for_selector('#ag-newconv')
     assert page.locator('[data-ag="new-conversation"]').get_attribute('aria-expanded') == 'true'
+    selector = '.ag-newconv-list [data-new-chat]'
+    assert probe(page, selector)['hit']
+    parent = page.locator('.ag-newconv-list').bounding_box()
+    child = page.locator(selector).bounding_box()
+    assert child['x'] + child['width'] <= parent['x'] + parent['width'] + 1
