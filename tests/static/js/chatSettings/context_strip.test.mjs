@@ -91,18 +91,18 @@ test('a document opened in this chat shows the selector, aimed at the document',
   openDoc = { id: 'd1', title: 'DA-02' };
   chatSettings.render();
 
-  assert.match(lines()[0], /Tall Tree Group.+Editing DA-02/);
+  assert.match(lines()[0], /Tall Tree Group.+Document: DA-02/);
   const picked = segment().querySelector('[aria-checked="true"]');
-  assert.equal(picked.textContent, 'This document');
+  assert.equal(picked.textContent, 'Include document');
   assert.deepEqual([...segment().querySelectorAll('button')].map((b) => b.textContent),
-    ['This document', 'This project', 'General conversation']);
+    ['Include document', 'Leave document out']);
   assert.deepEqual(chatSettings.docTarget(), { docId: 'd1', target: 'document' });
 });
 
 test('a document that was already open on arrival defaults to a general conversation', async () => {
   await open('tall', { id: 'carried', title: 'Other' });
 
-  assert.equal(segment().querySelector('[aria-checked="true"]').textContent, 'General conversation');
+  assert.equal(segment().querySelector('[aria-checked="true"]').textContent, 'Leave document out');
   assert.doesNotMatch(lines()[0], /Editing/);
   assert.equal(chatSettings.docTarget().target, 'general');
 });
@@ -125,7 +125,7 @@ test('choosing a target saves it on the chat and follows it at once', async () =
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   assert.deepEqual(patches, [{ doc_target: 'general' }]);
-  assert.equal(segment().querySelector('[aria-checked="true"]').textContent, 'General conversation');
+  assert.equal(segment().querySelector('[aria-checked="true"]').textContent, 'Leave document out');
   assert.doesNotMatch(lines()[0], /Editing/);
   assert.equal(chatSettings.docTarget().target, 'general');
 });
@@ -135,7 +135,7 @@ test('a saved target wins over the default', async () => {
   openDoc = { id: 'd3', title: 'DA-04' };
   chatSettings.render();
 
-  assert.equal(segment().querySelector('[aria-checked="true"]').textContent, 'This project');
+  assert.equal(segment().querySelector('[aria-checked="true"]').textContent, 'Leave document out');
 });
 
 test('the persona, workspace and context-use indicators live in the strip', async () => {
@@ -160,4 +160,15 @@ test('the empty quick-actions slot is there for the Agents panel', async () => {
   await open('tall');
 
   assert.ok(strip().querySelector('.ctx-quick-actions'));
+});
+
+test('document inclusion supports arrow navigation and retains focus after saving', async () => {
+  await open('tall', { id: 'keyboard', title: 'Keyboard draft' });
+  const excluded = segment().querySelector('[data-target="general"]');
+  excluded.focus();
+  excluded.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(chatSettings.docTarget().target, 'document');
+  assert.equal(document.activeElement.dataset.target, 'document');
+  assert.equal(document.activeElement.getAttribute('aria-checked'), 'true');
 });

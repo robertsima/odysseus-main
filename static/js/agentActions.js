@@ -3,7 +3,7 @@
  * Every place that shows an agent (the composer Agents menu, the Agents panel
  * cards, the loadout library) offers the same two actions:
  *
- *   Talk to agent    opens a new chat where that agent answers
+ *   Talk to agent    resumes its active chat (creates one on first use)
  *                    (POST /api/agents/profiles/{name}/chat).
  *   Assign a task    the agent works separately and its result returns to the
  *                    chat that assigned it (POST /api/agents/launch). A small
@@ -68,8 +68,8 @@ export function actionButtonsEl(name) {
 }
 
 // ── Talk ────────────────────────────────────────────────────────────────────
-/** Open a new chat where `name` answers. Returns the new chat id, or null. */
-export async function talkToAgent(name, { open } = {}) {
+/** Resume this agent's active chat; newChat explicitly starts another. */
+export async function talkToAgent(name, { open, newChat = false, fromSession } = {}) {
   let from = currentSessionId();
   const sm = sessions();
   if (!from && sm?.getPendingChat?.() && (sm.getSessions?.() || []).length === 0) {
@@ -77,7 +77,7 @@ export async function talkToAgent(name, { open } = {}) {
     try { await sm.materializePendingSession(); } catch (_) { /* server falls back */ }
     from = currentSessionId();
   }
-  const r = await postJson(`/api/agents/profiles/${encodeURIComponent(name)}/chat`, { from_session: from || undefined });
+  const r = await postJson(`/api/agents/profiles/${encodeURIComponent(name)}/chat`, { from_session: fromSession || from || undefined, new_chat: newChat });
   if (!r.ok || !r.body?.session_id) {
     toast(errorText(r, `Could not start a chat with ${name}`), 'error');
     return null;
@@ -85,7 +85,7 @@ export async function talkToAgent(name, { open } = {}) {
   const sid = r.body.session_id;
   try { await sm?.loadSessions?.(); } catch (_) { /* the list refreshes on its own */ }
   if (typeof open === 'function') await open(sid);
-  else await sm?.selectSession?.(sid);
+  else if (currentSessionId() === from) await sm?.selectSession?.(sid);
   try { document.dispatchEvent(new CustomEvent('odysseus:loadout-changed')); } catch (_) { /* no DOM events */ }
   return sid;
 }

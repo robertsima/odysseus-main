@@ -35,7 +35,7 @@ def plain_chat(api, owner, name="c"):
 
 def talk(api, owner="alice"):
     donor = plain_chat(api, owner, "donor")
-    res = api.as_user(owner).post("/api/agents/profiles/Reader/chat", json={"from_session": donor})
+    res = api.as_user(owner).post("/api/agents/profiles/Reader/chat", json={"from_session": donor, "new_chat": True})
     assert res.status_code == 200, res.text
     return res.json()["session_id"]
 
