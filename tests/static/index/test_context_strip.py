@@ -12,6 +12,7 @@ import pytest
 
 from tests.helpers.static_app import SESSION_ID, assert_no_sideways_scroll, assert_usable, probe
 
+
 pytestmark = pytest.mark.browser
 
 SETTINGS = {
@@ -27,11 +28,14 @@ SETTINGS = {
 def _open(open_app, width, **kwargs):
     page = open_app(width, **kwargs)
     patches = []
+    saved_settings = dict(SETTINGS["settings"])
 
     def settings(route):
         if route.request.method == "PATCH":
-            patches.append(json.loads(route.request.post_data or "{}"))
-        route.fulfill(json=SETTINGS)
+            patch = json.loads(route.request.post_data or "{}")
+            patches.append(patch)
+            saved_settings.update(patch)
+        route.fulfill(json={**SETTINGS, "settings": saved_settings})
 
     page.route(f"**/api/session/{SESSION_ID}/settings", settings)
     page.evaluate("window.chatSettingsModule.refresh()")
@@ -65,20 +69,44 @@ def test_the_strip_sits_above_the_transcript_and_fits(open_app, width, style):
 
 @pytest.mark.parametrize("width", [1440, 390])
 def test_an_open_document_brings_the_selector_and_saves_the_pick(open_app, width):
+    from playwright.sync_api import expect
+
     page, patches = _open(open_app, width)
     assert page.query_selector("#chat-status-line .ctx-seg") is None
 
     _show_document(page)
 
     assert page.query_selector("#chat-status-line .ctx-seg") is not None
-    assert "Editing DA-02" in page.inner_text("#chat-status-line .ctx-main")
+    assert page.locator("#chat-status-line .ctx-doc").inner_text().endswith("DA-02")
+    choices = page.get_by_role("radiogroup", name="Include the open document in messages")
+    include = choices.get_by_role("radio", name="Include document", exact=True)
+    exclude = choices.get_by_role("radio", name="Leave document out", exact=True)
+    expect(choices.get_by_role("radio")).to_have_count(2)
+    expect(include).to_have_attribute("aria-checked", "true")
+    expect(exclude).to_have_attribute("aria-checked", "false")
     assert_no_sideways_scroll(page)
     right = page.evaluate("document.querySelector('#chat-status-line .ctx-seg').getBoundingClientRect().right")
     assert right <= width
 
-    page.click("#chat-status-line [data-target='project']")
-    page.wait_for_function("true")
-    assert patches == [{"doc_target": "project"}]
+    def is_settings_patch(response):
+        return response.url.endswith(f"/api/session/{SESSION_ID}/settings") and response.request.method == "PATCH"
+
+    with page.expect_response(is_settings_patch):
+        exclude.click()
+    expect(exclude).to_have_attribute("aria-checked", "true")
+    expect(page.locator("#chat-status-line .ctx-doc")).to_have_count(0)
+
+    assert patches == [{"doc_target": "general"}]
+
+    # Arrow navigation must select, persist and keep focus after re-rendering.
+    exclude.focus()
+    with page.expect_response(is_settings_patch):
+        exclude.press("ArrowLeft")
+    expect(include).to_have_attribute("aria-checked", "true")
+    expect(include).to_be_focused()
+    expect(page.locator("#chat-status-line .ctx-doc")).to_have_count(1)
+
+    assert patches == [{"doc_target": "general"}, {"doc_target": "document"}]
 
 
 def test_the_composer_lost_the_indicators_that_moved(open_app):

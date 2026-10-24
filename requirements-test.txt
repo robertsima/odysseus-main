@@ -10,3 +10,5 @@ pytest-cov
 # The browser job reruns a failed test once (--reruns 1). A test that needed
 # the rerun shows as R in the summary, so flakiness stays visible.
 pytest-rerunfailures
+# Bound browser setup/call/teardown, including a blocked Playwright driver.
+pytest-timeout>=2.3,<3

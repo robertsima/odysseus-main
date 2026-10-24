@@ -131,7 +131,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.lane == "full":
         return run_full(extra)
     if args.lane == "browser":
-        return pytest(["-m", "browser", *extra])
+        # Playwright's action timeout does not cover driver/context shutdown.
+        # The thread watchdog also covers teardown and kills a stuck xdist
+        # worker with its stack trace instead of waiting for Actions' 6h cap.
+        return pytest(["-m", "browser", "--timeout=120", "--timeout-method=thread", *extra])
     if args.lane == "security":
         return pytest(["-m", "security", *extra], parallel=True)
     return pytest(["-m", "nightly", *extra])
