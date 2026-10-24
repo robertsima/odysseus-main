@@ -1099,7 +1099,7 @@ def setup_agents_routes(session_manager) -> APIRouter:
 
     @router.post("/profiles/{name}/chat")
     async def chat_with_profile(request: Request, name: str):
-        """Open a new chat of the caller's with this agent applied ("Talk to agent").
+        """Resume the caller's active agent chat, or explicitly create another.
 
         The chat gets exactly what ``POST /sessions/{id}/loadout`` would give it,
         under the same guard. It runs on the agent's own model when it has one;
@@ -1122,8 +1122,40 @@ def setup_agents_routes(session_manager) -> APIRouter:
         if not profile:
             raise HTTPException(404, f"No agent named {name!r}")
         from_session = str(body.get("from_session") or "").strip()
+        owned.update(_stored_conversations(user, set(owned)))
         if from_session and from_session not in owned:
             raise HTTPException(404, "Session not found")
+        # Opening an agent is navigation, not an implicit request for another
+        # conversation. Empty chats may be absent from the cache after restart.
+        def resume_conversation():
+            if body.get("new_chat") is True:
+                return None
+            from core.database import get_session_settings, get_db_session, Session as DbSession
+            from core.database import update_session_last_accessed
+            candidates = []
+            # Refresh after model resolution too: another open can create the
+            # conversation while this request awaits its provider configuration.
+            _, current_owned = _owned(request)
+            current_owned.update(_stored_conversations(user, set(current_owned)))
+            for existing_id, existing in current_owned.items():
+                settings = get_session_settings(existing_id)
+                if (not getattr(existing, "archived", False)
+                        and _is_conversation(settings)
+                        and str(settings.get("agent_profile", "")).casefold() == profile["name"].casefold()):
+                    candidates.append(existing_id)
+            if candidates:
+                with get_db_session() as db:
+                    recent = db.query(DbSession.id).filter(DbSession.id.in_(candidates)).order_by(
+                        DbSession.last_accessed.desc(), DbSession.created_at.desc(), DbSession.id).first()
+                selected = from_session if from_session in candidates else recent.id
+                update_session_last_accessed(selected)
+                return {"session_id": selected, "name": current_owned[selected].name,
+                        "model": current_owned[selected].model, "resumed": True}
+            return None
+
+        resumed = resume_conversation()
+        if resumed:
+            return resumed
         patch = agent_profiles.session_patch(profile)
         sid = str(uuid.uuid4())
         shell_access.guard_settings_change(request, sid, patch)
@@ -1147,6 +1179,12 @@ def setup_agents_routes(session_manager) -> APIRouter:
                 raise HTTPException(400, "There is no model to start this chat on. Open any chat once, "
                                          "or give this agent a model.")
             resolved = (donor.endpoint_url, donor.model, getattr(donor, "headers", None))
+        # There is no await between this second check and persisting the chat.
+        # Concurrent default opens in this app process converge on one chat;
+        # explicit New chat deliberately does not participate in that reuse.
+        resumed = resume_conversation()
+        if resumed:
+            return resumed
         url, model, headers = resolved
         session = session_manager.create_session(session_id=sid, name=profile["name"], endpoint_url=url,
                                                  model=model, rag=False, owner=user)

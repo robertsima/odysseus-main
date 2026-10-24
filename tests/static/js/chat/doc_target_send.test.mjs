@@ -43,6 +43,19 @@ test('a general conversation sends no document id and does not switch to Agent m
   assert.equal(form.mode, 'chat');
 });
 
+test('excluding the document also excludes selected editor text and edit instructions', async () => {
+  const original = documentModule.getSelectionContext;
+  documentModule.getSelectionContext = () => ({ text: 'private draft', startLine: 1, endLine: 1 });
+  try {
+    chatSettings.setDocTarget('general');
+    page.reply([{ delta: 'ok' }, DONE]);
+    await page.send('unrelated question');
+    assert.equal(page.posts.at(-1).message, 'unrelated question');
+  } finally {
+    documentModule.getSelectionContext = original;
+  }
+});
+
 
 
 

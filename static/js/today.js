@@ -132,8 +132,9 @@ function blockerHtml(b, title = '') {
   return `<p class="today-blocker"><span class="today-blocker-summary">${esc(b.summary || 'Work is blocked.')}</span> ${action}</p>${buttons ? `<div class="today-blocker-actions">${buttons}</div>` : ''}`;
 }
 function actionButtons(item) {
+  const doneLabel = item.source === 'todoist' ? 'Complete in Todoist' : item.source === 'outcome' ? 'Close outcome' : 'Archive note';
   return (item.actions || []).filter((a) => ACTION_LABEL[a]).map((a) => (
-    `<button type="button" class="today-btn" data-today-action="${esc(a)}" title="${esc(ACTION_HINT[a])}">${esc(ACTION_LABEL[a])}</button>`
+    `<button type="button" class="today-btn" data-today-action="${esc(a)}" title="${esc(a === 'done' ? doneLabel : ACTION_HINT[a])}">${esc(a === 'done' ? doneLabel : ACTION_LABEL[a])}</button>`
   )).join('');
 }
 function waitForm(item) {
@@ -158,6 +159,7 @@ function itemHtml(item) {
       <p class="today-why">${esc(item.why)}</p>
       ${blockerHtml(item.blocker, item.title)}
       <p class="today-meta"><span class="today-source">${esc(SOURCE_LABEL[item.source] || item.source)}</span>${hint ? `<span class="today-due">${esc(hint)}</span>` : ''}</p>
+      ${isOutcome ? '<p class="today-muted">Closing this outcome does not complete linked tasks. An open source task may appear again.</p>' : ''}
     </div>
     <div class="today-actions">${actionButtons(item)}</div>
     ${state.waitingFor === item.key ? waitForm(item) : ''}
@@ -218,7 +220,18 @@ function listHtml() {
   const body = (today.length || next.length)
     ? sectionHtml('today', 'Today', today) + sectionHtml('next', 'Next', next)
     : emptyHtml();
-  return body + degradedHtml(degraded);
+  const source = state.data.sources?.todoist;
+  const sourceText = {
+    ready: 'Todoist: live tasks due today or overdue (not your full backlog).',
+    unavailable: 'Todoist is unavailable. Try Refresh; no tasks were changed.',
+    not_configured: 'Todoist is not connected or signed in on this server.',
+    restricted: 'Todoist is not available to this account; this integration is admin / single-user only.',
+  }[source] || 'Todoist shows tasks due today or overdue when connected and permitted.';
+  const remaining = Number(state.data.scope?.remaining) || 0;
+  return `<aside class="today-scope" aria-label="About this shortlist"><p>A ranked shortlist, not a task manager: up to 5 Today and 3 Next across your sources.</p>
+    <p>${esc(sourceText)} ${source === 'ready' ? '<a href="https://app.todoist.com/app/today" target="_blank" rel="noopener noreferrer">View all in Todoist</a>' : ''}</p>
+    <p>Snooze and Wait only hide or park items here. Change task dates, projects and recurrence in Todoist. Complete in Todoist finishes that task (recurring tasks advance there).</p>
+    ${remaining ? `<p>${remaining} more eligible item${remaining === 1 ? '' : 's'} beyond this shortlist.</p>` : ''}</aside>` + body + degradedHtml(degraded);
 }
 
 function detailHtml() {
@@ -251,7 +264,7 @@ function detailHtml() {
       ${evidence ? `<ul class="today-plain">${evidence}</ul>` : '<p class="today-muted">No evidence yet. Done needs evidence or your confirmation.</p>'}
       <h4 class="today-section-title">Recent history</h4>
       ${events ? `<ul class="today-plain">${events}</ul>` : '<p class="today-muted">No history.</p>'}
-      ${closed ? '' : '<div class="today-detail-actions"><button type="button" class="today-btn today-btn-primary" data-today-confirm-done>Mark done and record my confirmation</button></div>'}
+      ${closed ? '' : '<div class="today-detail-actions"><p class="today-muted">This closes only the local outcome. Linked tasks stay open in their source and may appear again.</p><button type="button" class="today-btn today-btn-primary" data-today-confirm-done>Close outcome and record my confirmation</button></div>'}
     </article>`;
 }
 function eventText(e) {
@@ -348,7 +361,9 @@ async function runAction(key, action, extra = {}) {
       openTarget(res.open_url);
       return;
     }
-    setStatus(ACTION_DONE[action] || 'Done.', 'ok');
+    const doneMessage = item?.source === 'outcome' ? 'Outcome closed here. Linked tasks were not completed.'
+      : item?.source === 'todoist' ? 'Completed in Todoist. Recurring tasks follow their Todoist schedule.' : 'Note archived.';
+    setStatus(action === 'done' ? doneMessage : ACTION_DONE[action] || 'Done.', 'ok');
   } catch (e) {
     setStatus(e.message || 'That did not work.', 'error');
   }
@@ -364,7 +379,7 @@ async function confirmDone() {
   try {
     await post(`/api/outcomes/${encodeURIComponent(id)}/state`, { state: 'done', confirm: true });
     state.detail = null;
-    setStatus('Marked done. Your confirmation is recorded.', 'ok');
+    setStatus('Outcome closed here. Your confirmation is recorded; linked tasks were not completed.', 'ok');
   } catch (e) {
     state.detail = { ...state.detail, error: e.message };
     render();

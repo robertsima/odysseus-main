@@ -85,7 +85,7 @@ def test_a_regular_user_never_reaches_the_shared_todoist_account(world):
 def test_the_response_shape(world):
     got = world.get(world.api.as_user("alice"))
 
-    assert set(got) == {"today", "next", "degraded", "generated_at"}
+    assert set(got) == {"today", "next", "degraded", "generated_at", "scope", "sources"}
     assert got["generated_at"].startswith("2026-10-10T10:00:00")
 
 
