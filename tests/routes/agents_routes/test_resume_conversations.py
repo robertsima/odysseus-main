@@ -47,3 +47,31 @@ def test_delegated_worker_is_not_resumed_as_a_conversation(phalanx):
     worker = plain_chat(phalanx, "alice")
     update_session_settings(worker, {"parent_session": parent, "agent_profile": "Reader"})
     assert open_agent(phalanx, from_session=parent)["session_id"] != worker
+
+
+def test_simultaneous_first_opens_share_one_conversation(phalanx, monkeypatch):
+    """Two clicks while a model resolves must not create two empty chats."""
+    import asyncio
+    import time
+    import httpx
+    from src import agent_profiles, ai_interaction
+    profiles = agent_profiles.validate_profiles([{"name": "Reader", "model": "m", "tool_access": "all"}])
+    monkeypatch.setattr(agent_profiles, "load_profiles", lambda: profiles)
+
+    def resolve(*args):
+        time.sleep(0.05)
+        return ("http://127.0.0.1:9/v1", "m", None)
+
+    monkeypatch.setattr(ai_interaction, "_resolve_model", resolve)
+    cookies = dict(phalanx.as_user("alice").cookies)
+
+    async def opens():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=phalanx.module.app),
+                                     base_url="http://testserver", cookies=cookies) as client:
+            responses = await asyncio.gather(*[
+                client.post("/api/agents/profiles/Reader/chat", json={}) for _ in range(2)])
+            assert all(r.status_code == 200 for r in responses), [r.text for r in responses]
+            return [r.json()["session_id"] for r in responses]
+
+    first, second = asyncio.run(opens())
+    assert first == second

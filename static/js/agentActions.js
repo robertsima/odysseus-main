@@ -54,10 +54,10 @@ const sessions = () => window.sessionModule;
 const currentSessionId = () => sessions()?.getCurrentSessionId?.() || '';
 
 // ── markup shared by every place that lists agents ──────────────────────────
-export function actionButtonsHtml(name, { className = '' } = {}) {
+export function actionButtonsHtml(name, { className = '', talk = true } = {}) {
   const n = esc(name);
   return `<span class="aa-acts ${esc(className)}">`
-    + `<button type="button" class="aa-btn aa-btn-primary" data-agent-act="talk" data-agent="${n}">${TALK_LABEL}</button>`
+    + (talk ? `<button type="button" class="aa-btn aa-btn-primary" data-agent-act="talk" data-agent="${n}">${TALK_LABEL}</button>` : '')
     + `<button type="button" class="aa-btn" data-agent-act="assign" data-agent="${n}">${ASSIGN_LABEL}</button></span>`;
 }
 
@@ -84,8 +84,10 @@ export async function talkToAgent(name, { open, newChat = false, fromSession } =
   }
   const sid = r.body.session_id;
   try { await sm?.loadSessions?.(); } catch (_) { /* the list refreshes on its own */ }
-  if (typeof open === 'function') await open(sid);
-  else if (currentSessionId() === from) await sm?.selectSession?.(sid);
+  if (currentSessionId() === from) {
+    if (typeof open === 'function') await open(sid);
+    else await sm?.selectSession?.(sid);
+  }
   try { document.dispatchEvent(new CustomEvent('odysseus:loadout-changed')); } catch (_) { /* no DOM events */ }
   return sid;
 }

@@ -609,7 +609,7 @@ function historyHtml() {
       </div>
       <div class="ag-history-actions">
         ${isCurrentChat(c.id) ? '<span class="wb-hint">This chat</span>' : `<button type="button" class="wb-btn wb-btn-sm wb-btn-primary" data-ag="open-chat" data-sid="${esc(c.id)}">Continue</button>`}
-        ${c.profile ? agentActions.actionButtonsHtml(c.profile) : ''}
+        ${c.profile ? agentActions.actionButtonsHtml(c.profile, { talk: false }) : ''}
       </div>
     </li>`).join('');
   const body = h.error ? `<div class="wb-empty">${esc(h.error)}</div>`

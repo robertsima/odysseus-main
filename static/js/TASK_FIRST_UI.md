@@ -139,9 +139,12 @@ engine.
 `blocker` (only when `task` is given and preflight or the document check would
 refuse it) is `{"code", "summary", "detail", "actions": [...]}`.
 
-`POST /api/agents/profiles/{name}/chat` creates a new chat owned by the caller
-with the agent applied (same patch and guard as `POST /sessions/{id}/loadout`)
-and returns `{"session_id"}`.
+`POST /api/agents/profiles/{name}/chat` resumes the caller's current conversation
+with this agent, or its most recently accessed non-archived conversation. It
+creates one on first use. `{"new_chat": true}` explicitly creates another with
+the agent applied, using the same patch and guard as `POST /sessions/{id}/loadout`.
+Delegated workers and other owners' chats are never resume candidates. The
+response includes `{"session_id"}` and `"resumed": true` when reusing a chat.
 
 `POST /api/agents/launch` accepts `requires` and `extra_tools` (as the agent
 tool does) and, when blocked, returns status 409 with

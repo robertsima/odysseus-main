@@ -185,7 +185,7 @@ test('New chat explicitly requests another conversation', async () => {
   assert.equal(JSON.parse(call.body).new_chat, true);
 });
 
-test('a delayed chat open does not replace a conversation chosen meanwhile', async () => {
+for (const customOpen of [false, true]) test(`a delayed chat open preserves navigation with custom callback=${customOpen}`, async () => {
   const previous = window.sessionModule.getCurrentSessionId;
   let current = 'chat-1';
   window.sessionModule.getCurrentSessionId = () => current;
@@ -193,7 +193,7 @@ test('a delayed chat open does not replace a conversation chosen meanwhile', asy
   let finish;
   chatReply = () => new Promise((resolve) => { finish = resolve; });
   try {
-    const pending = actions.talkToAgent('Reader');
+    const pending = actions.talkToAgent('Reader', customOpen ? { open: async (sid) => opened.push(sid) } : {});
     await waitFor(() => finish, { what: 'pending chat navigation' });
     current = 'another-chat';
     finish({ session_id: 'new-chat' });
