@@ -22,7 +22,8 @@ def _workflow() -> dict:
 
 
 def _pytest_steps(job: dict) -> list[str]:
-    return [s["run"] for s in job.get("steps", []) if "python -m pytest" in str(s.get("run", ""))]
+    return [s["run"] for s in job.get("steps", [])
+            if re.search(r"python -m (?:pytest|tests\.run)\b", str(s.get("run", "")))]
 
 
 def test_ci_runs_on_pushes_to_dev_and_on_pull_requests():
@@ -43,7 +44,7 @@ def test_python_tests_run_the_suite_and_can_fail_the_run():
 
 def test_browser_tests_run_in_their_own_job_that_can_fail_the_run():
     jobs = _workflow()["jobs"]
-    selects_browser = re.compile(r"""-m ["']?browser\b""")
+    selects_browser = re.compile(r"""(?:-m ["']?browser\b|tests\.run browser\b)""")
     browser = [name for name, job in jobs.items() if any(selects_browser.search(run) for run in _pytest_steps(job))]
     assert browser, "no job runs the browser marker"
     assert all(not jobs[name].get("continue-on-error") for name in browser)
