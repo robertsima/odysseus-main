@@ -75,6 +75,14 @@ def test_marker_lanes_select_by_marker(calls, lane, marker):
     assert calls[0][1][:2] == ["-m", marker]
 
 
+def test_browser_lane_bounds_stalled_tests_including_teardown(calls):
+    """A stuck Playwright close must fail its worker, not consume six CI hours."""
+    run.main(["browser"])
+    args = calls[0][1]
+    assert "--timeout=120" in args
+    assert "--timeout-method=thread" in args
+
+
 def _apply_env(monkeypatch, env):
     for key in ("CI", "ODYSSEUS_TEST_WORKERS", "ODYSSEUS_AGENT_SHELL"):
         monkeypatch.delenv(key, raising=False)
